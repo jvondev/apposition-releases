@@ -1,0 +1,32 @@
+appId: com.jvondev.apposition.app
+productName: Apposition App
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out
+  - '!**/.vscode'
+  - '!**/.github'
+publish:
+  - provider: github
+    # Replace this with your public repository info
+    owner: jvondev
+    repo: apposition-releases
+    private: false
+mac:
+  target: dmg
+win:
+  target: 
+    - nsis
+  icon: build/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  runAfterFinish: false
+  include: build/installer.nsh
+
+linux:
+  target:
+    - AppImage
