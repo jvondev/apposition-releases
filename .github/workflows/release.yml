@@ -5,12 +5,16 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build & Publish on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
     
@@ -21,25 +25,22 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           
-      - name: Install Dependencies
-        run: npm install
-        
       - name: Build & Publish for Linux
         if: matrix.os == 'ubuntu-latest'
-        run: npx electron-builder --linux --publish always
+        run: npx electron-builder@latest --linux --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Build & Publish for macOS
         if: matrix.os == 'macos-latest'
-        run: npx electron-builder --mac --publish always
+        run: npx electron-builder@latest --mac --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           
       - name: Build & Publish for Windows
         if: matrix.os == 'windows-latest'
-        run: npx electron-builder --win --publish always
+        run: npx electron-builder@latest --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

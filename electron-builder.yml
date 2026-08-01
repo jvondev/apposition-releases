@@ -25,7 +25,6 @@ nsis:
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
   runAfterFinish: false
-  include: build/installer.nsh
 
 linux:
   target:
