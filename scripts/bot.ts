@@ -177,6 +177,10 @@ export async function main() {
         }
       }
     }
+
+    // 🚦 AI Rate Limiting: Wait 3 seconds before sending the next batch to Gemma 4.
+    // This ensures we stay well under the 30 Requests Per Minute (RPM) and 16K Tokens Per Minute (TPM) limits.
+    await new Promise(resolve => setTimeout(resolve, 3000));
   }
 }
 
