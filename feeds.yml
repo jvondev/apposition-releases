@@ -1,63 +1,33 @@
 feeds:
   # ==========================================
-  # COMPETITOR DISPLACEMENT (REDDIT)
+  # COMPETITOR DISPLACEMENT (REDDIT) - CONSOLIDATED
   # ==========================================
-  - 'https://www.reddit.com/search.rss?q="arc+browser+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="rambox+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="station+browser+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="franz+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="biscuit+browser"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="shift+browser+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="wavebox+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="sigmaos+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="sidekick+browser+alternative"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="better+than+arc+browser"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="switching+from+arc"&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("arc+browser+alternative"+OR+"rambox+alternative"+OR+"station+browser+alternative"+OR+"franz+alternative"+OR+"biscuit+browser"+OR+"shift+browser+alternative"+OR+"wavebox+alternative"+OR+"sigmaos+alternative"+OR+"sidekick+browser+alternative"+OR+"better+than+arc+browser"+OR+"switching+from+arc")&sort=new'
 
   # ==========================================
-  # PAIN POINTS: RAM, MEMORY, BATTERY (REDDIT)
+  # PAIN POINTS: RAM, MEMORY, BATTERY (REDDIT) - CONSOLIDATED
   # ==========================================
-  - 'https://www.reddit.com/search.rss?q="too+many+chrome+profiles"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="browser+using+too+much+ram"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="chrome+memory+leak"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="chrome+draining+battery"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="browser+taking+up+ram"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="suspend+chrome+tabs"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="browser+for+work"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="macbook+fan+noise+browser"&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("too+many+chrome+profiles"+OR+"browser+using+too+much+ram"+OR+"chrome+memory+leak"+OR+"chrome+draining+battery"+OR+"browser+taking+up+ram"+OR+"suspend+chrome+tabs"+OR+"browser+for+work"+OR+"macbook+fan+noise+browser")&sort=new'
 
   # ==========================================
-  # PAIN POINTS: CLIENT CHAOS (REDDIT)
+  # PAIN POINTS: CLIENT CHAOS (REDDIT) - CONSOLIDATED
   # ==========================================
-  - 'https://www.reddit.com/search.rss?q="manage+multiple+slack+accounts"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="too+many+slack+workspaces"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="separate+work+and+personal+browser"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="multiple+client+accounts"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="logging+in+and+out+of+clients"&sort=new'
-  - 'https://www.reddit.com/search.rss?q="managing+multiple+gmails"&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("manage+multiple+slack+accounts"+OR+"too+many+slack+workspaces"+OR+"separate+work+and+personal+browser"+OR+"multiple+client+accounts"+OR+"logging+in+and+out+of+clients"+OR+"managing+multiple+gmails")&sort=new'
 
   # ==========================================
-  # NICHE SUBREDDIT TARGETING
+  # NICHE SUBREDDIT TARGETING (REDDIT) - CONSOLIDATED
   # ==========================================
-  - 'https://www.reddit.com/search.rss?q="managing+multiple+clients"+subreddit:freelance&sort=new'
-  - 'https://www.reddit.com/search.rss?q="managing+multiple+clients"+subreddit:agency&sort=new'
-  - 'https://www.reddit.com/search.rss?q="too+many+tabs"+subreddit:productivity&sort=new'
-  - 'https://www.reddit.com/search.rss?q="browser"+subreddit:macapps&sort=new'
-  - 'https://www.reddit.com/search.rss?q="browser"+subreddit:software&sort=new'
-  - 'https://www.reddit.com/search.rss?q="client+management"+subreddit:smma&sort=new'
-  - 'https://www.reddit.com/search.rss?q="multiple+accounts"+subreddit:marketing&sort=new'
-  - 'https://www.reddit.com/search.rss?q="work+setup"+subreddit:digitalnomad&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("managing+multiple+clients"+AND+(subreddit:freelance+OR+subreddit:agency))&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("too+many+tabs"+subreddit:productivity)&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("browser"+AND+(subreddit:macapps+OR+subreddit:software))&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("client+management"+subreddit:smma)&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("multiple+accounts"+subreddit:marketing)&sort=new'
+  - 'https://www.reddit.com/search.rss?q=("work+setup"+subreddit:digitalnomad)&sort=new'
 
   # ==========================================
-  # HACKER NEWS (HNRSS)
+  # HACKER NEWS (HNRSS) - CONSOLIDATED
   # ==========================================
-  - 'https://hnrss.org/newcomments?q="arc+browser"'
-  - 'https://hnrss.org/newcomments?q="browser+ram"'
-  - 'https://hnrss.org/newcomments?q="multiple+chrome+profiles"'
-  - 'https://hnrss.org/newcomments?q="context+switching"'
-  - 'https://hnrss.org/newcomments?q="electron+memory"'
-  - 'https://hnrss.org/newcomments?q="wavebox"'
-  - 'https://hnrss.org/newcomments?q="station+app"'
+  - 'https://hnrss.org/newcomments?q="arc+browser"+OR+"browser+ram"+OR+"multiple+chrome+profiles"+OR+"context+switching"+OR+"electron+memory"+OR+"wavebox"+OR+"station+app"'
 
   # ==========================================
   # MASTODON / FEDIVERSE
@@ -88,4 +58,3 @@ feeds:
   # ==========================================
   - 'https://www.google.com/alerts/feeds/13369648097822478570/9347539338148874764'
   - 'https://www.google.com/alerts/feeds/13369648097822478570/9347539338148875889'
-  - 'https://www.google.com/alerts/feeds/13369648097822478570/9347539338148874764'
