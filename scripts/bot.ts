@@ -6,7 +6,8 @@ import { subHours, isAfter } from 'date-fns';
 
 const rssParser = new Parser({
   headers: {
-    'User-Agent': 'AppositionMarketingBot/1.0 (+https://github.com/jvondev/apposition-releases)'
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/rss+xml, application/rdf+xml, application/atom+xml, application/xml, text/xml, */*'
   }
 });
 
@@ -52,8 +53,8 @@ export async function fetchAndFilterEntries(feeds: string[]) {
       console.error(`Error fetching feed ${feedUrl}:`, (error as Error).message);
     }
     
-    // 🚦 Add a 2-second delay between requests to avoid rate limiting
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    // 🚦 Add a 3-second delay between requests to avoid rate limiting
+    await new Promise(resolve => setTimeout(resolve, 3000));
   }
   return validEntries;
 }
@@ -95,16 +96,18 @@ export async function evaluateBatch(batch: any[], apiKey: string) {
 }
 
 export async function sendTelegramMessage(entry: any, evaluation: any, botToken: string, chatId: string) {
-  const escapeHtml = (unsafe: string) => {
-    return unsafe
+  const escapeHtml = (unsafe: any) => {
+    return String(unsafe || '')
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
   };
 
-  const title = escapeHtml(entry.title);
-  const reason = escapeHtml(evaluation.reason || '');
-  const draft = escapeHtml(evaluation.draft_reply || '');
+  const truncate = (str: string, len: number) => str.length > len ? str.substring(0, len) + '...' : str;
+
+  const title = escapeHtml(truncate(entry.title || 'No Title', 200));
+  const reason = escapeHtml(truncate(evaluation.reason || '', 1000));
+  const draft = escapeHtml(truncate(evaluation.draft_reply || '', 2000));
 
   let text = `<b>${title}</b>\n\n`;
   text += `📰 <b>Source:</b> Google Alerts\n`;
@@ -131,7 +134,8 @@ export async function sendTelegramMessage(entry: any, evaluation: any, botToken:
       })
     });
     if (!response.ok) {
-      throw new Error(`Telegram API responded with ${response.status}`);
+      const errText = await response.text();
+      throw new Error(`Telegram API responded with ${response.status}: ${errText}`);
     }
     console.log(`Sent Telegram message for ${entry.id}`);
   } catch (error) {
