@@ -5,8 +5,8 @@ directories:
   output: dist
 files:
   - out
-  - '!**/.vscode'
-  - '!**/.github'
+  - "!**/.vscode"
+  - "!**/.github"
 publish:
   - provider: github
     # Replace this with your public repository info
@@ -14,9 +14,11 @@ publish:
     repo: apposition-releases
     private: false
 mac:
-  target: dmg
+  target:
+    - dmg
+    - zip
 win:
-  target: 
+  target:
     - nsis
   icon: build/icon.ico
 
