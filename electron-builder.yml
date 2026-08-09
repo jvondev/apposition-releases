@@ -15,6 +15,7 @@ publish:
     owner: jvondev
     repo: apposition-releases
     private: false
+    releaseType: release
 mac:
   target:
     - dmg
