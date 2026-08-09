@@ -25,7 +25,6 @@
     "build:linux": "npm run rebuild && npm run build && electron-builder --linux -c.npmRebuild=false"
   },
   "dependencies": {
-    "@apposition/ui": "workspace:*",
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^3.0.0",
     "better-sqlite3": "^11.1.2",
@@ -59,12 +58,5 @@
     "vite": "^6.0.0",
     "vite-plugin-solid": "^2.10.0",
     "vitest": "^4.1.10"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "electron",
-      "esbuild"
-    ]
   }
 }
