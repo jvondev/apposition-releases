@@ -20,7 +20,7 @@ mac:
   target:
     - dmg
     - zip
-  icon: assets/icon.ico
+  icon: assets/icon.png
 win:
   target:
     - nsis
@@ -35,4 +35,4 @@ nsis:
 linux:
   target:
     - AppImage
-  icon: assets/icon.ico
+  icon: assets/icon.png
