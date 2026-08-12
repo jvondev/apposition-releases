@@ -1,7 +1,7 @@
 appId: com.jvondev.apposition.app
 productName: Apposition App
 directories:
-  buildResources: build
+  buildResources: assets
   output: dist
 files:
   - out
@@ -20,10 +20,11 @@ mac:
   target:
     - dmg
     - zip
+  icon: assets/icon.ico
 win:
   target:
     - nsis
-  icon: build/icon.ico
+  icon: assets/icon.ico
 
 nsis:
   oneClick: false
@@ -34,3 +35,4 @@ nsis:
 linux:
   target:
     - AppImage
+  icon: assets/icon.ico
