@@ -12,7 +12,6 @@ jobs:
   build:
     name: Build & Publish on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    
     strategy:
       fail-fast: false
       matrix:
@@ -26,21 +25,25 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          
-      - name: Build & Publish for Linux
-        if: matrix.os == 'ubuntu-latest'
-        run: npx electron-builder@latest --linux --publish always
+
+      - name: Build App Packages
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then npx electron-builder --linux --publish never; fi
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then npx electron-builder --mac --publish never; fi
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then npx electron-builder --win --publish never; fi
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Build & Publish for macOS
-        if: matrix.os == 'macos-latest'
-        run: npx electron-builder@latest --mac --publish always
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.zip
+            dist/*.yml
+            dist/*.blockmap
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Build & Publish for Windows
-        if: matrix.os == 'windows-latest'
-        run: npx electron-builder@latest --win --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
