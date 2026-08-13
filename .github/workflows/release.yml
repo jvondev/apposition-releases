@@ -27,7 +27,7 @@ jobs:
           node-version: 22
 
       - name: Install Dependencies
-        run: npm install
+        run: npm install --legacy-peer-deps
 
       - name: Rebuild Native Dependencies for Electron
         run: npx electron-rebuild
