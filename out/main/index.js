@@ -1515,6 +1515,12 @@ function createWindow() {
     }
     global.overlayWindow = void 0;
   });
+  overlayWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    console.log(`[RENDERER CONSOLE ${level}] (${sourceId}:${line}): ${message}`);
+  });
+  overlayWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    console.error(`[OVERLAY LOAD ERROR] Code ${errorCode}: ${errorDescription} (${validatedURL})`);
+  });
   if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     overlayWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
