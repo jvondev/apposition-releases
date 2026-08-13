@@ -1462,7 +1462,7 @@ function createWindow() {
     backgroundColor: "#F7F7F5",
     icon: require$$1.join(
       __dirname,
-      process.platform === "linux" ? "../../build/icon.png" : "../../build/icon.ico"
+      process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
     ),
     webPreferences: {
       preload: require$$1.join(__dirname, "../preload/index.js"),
@@ -1500,13 +1500,14 @@ function createWindow() {
   const showWindows = () => {
     if (windowsShown) return;
     windowsShown = true;
-    syncOverlayBounds();
     mainWindow.maximize();
+    syncOverlayBounds();
     mainWindow.show();
     overlayWindow.show();
   };
+  overlayWindow.webContents.on("did-finish-load", showWindows);
   mainWindow.on("ready-to-show", showWindows);
-  setTimeout(showWindows, 1500).unref();
+  setTimeout(showWindows, 1e3).unref();
   mainWindow.on("closed", () => {
     try {
       if (!overlayWindow.isDestroyed()) overlayWindow.destroy();
@@ -1731,8 +1732,8 @@ function initDeepLinking() {
   } else {
     require$$1$1.app.setAsDefaultProtocolClient("apposition");
   }
-  const gotTheLock = require$$1$1.app.requestSingleInstanceLock();
-  if (!gotTheLock) {
+  const gotTheLock2 = require$$1$1.app.requestSingleInstanceLock();
+  if (!gotTheLock2) {
     require$$1$1.app.quit();
   } else {
     require$$1$1.app.on("second-instance", (event, commandLine) => {
@@ -17682,59 +17683,70 @@ require$$1$1.app.commandLine.appendSwitch("disable-backgrounding-occluded-window
 require$$1$1.app.commandLine.appendSwitch("enable-lcd-text");
 require$$1$1.app.commandLine.appendSwitch("hide-scrollbars");
 require$$1$1.app.commandLine.appendSwitch("disable-features", "FedCm");
-initDeepLinking();
-require$$1$1.app.whenReady().then(() => {
-  initAutoUpdater();
-  require$$1$1.Menu.setApplicationMenu(null);
-  utils$2.electronApp.setAppUserModelId("com.apposition");
-  require$$1$1.app.on("browser-window-focus", () => {
-    require$$1$1.globalShortcut.register("Alt+Space", () => {
-      if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-        global.overlayWindow.webContents.send("forwarded-key", {
-          key: " ",
-          code: "Space",
-          control: false,
-          meta: false,
-          shift: false,
-          alt: true,
-          isInputFocused: false
-        });
-      }
-    });
-  });
-  require$$1$1.app.on("browser-window-blur", () => {
-    require$$1$1.globalShortcut.unregister("Alt+Space");
-  });
-  require$$1$1.nativeTheme.themeSource = "light";
-  gcDeletedSessions();
-  initSessionSecurity();
-  initWindowManagerIpc();
-  initViewManager();
-  initDbIpc();
-  initLicensingIpc();
-  require$$1$1.ipcMain.handle("pane.ping", () => "pong");
-  require$$1$1.ipcMain.on("pane.log", (event, level, ...args) => {
-    const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
-    if (level === "ERROR") {
-      console.error(`[PANE CONSOLE ${level}]`, msg);
-    } else {
-      console.log(`[PANE CONSOLE ${level}]`, msg);
+const gotTheLock = require$$1$1.app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  require$$1$1.app.quit();
+} else {
+  require$$1$1.app.on("second-instance", () => {
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+      global.mainWindow.focus();
     }
   });
-  require$$1$1.ipcMain.handle("metrics.memory", () => {
-    return Promise.resolve(process.getProcessMemoryInfo());
+  initDeepLinking();
+  require$$1$1.app.whenReady().then(() => {
+    initAutoUpdater();
+    require$$1$1.Menu.setApplicationMenu(null);
+    utils$2.electronApp.setAppUserModelId("com.apposition");
+    require$$1$1.app.on("browser-window-focus", () => {
+      require$$1$1.globalShortcut.register("Alt+Space", () => {
+        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
+          global.overlayWindow.webContents.send("forwarded-key", {
+            key: " ",
+            code: "Space",
+            control: false,
+            meta: false,
+            shift: false,
+            alt: true,
+            isInputFocused: false
+          });
+        }
+      });
+    });
+    require$$1$1.app.on("browser-window-blur", () => {
+      require$$1$1.globalShortcut.unregister("Alt+Space");
+    });
+    require$$1$1.nativeTheme.themeSource = "light";
+    gcDeletedSessions();
+    initSessionSecurity();
+    initWindowManagerIpc();
+    initViewManager();
+    initDbIpc();
+    initLicensingIpc();
+    require$$1$1.ipcMain.handle("pane.ping", () => "pong");
+    require$$1$1.ipcMain.on("pane.log", (event, level, ...args) => {
+      const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
+      if (level === "ERROR") {
+        console.error(`[PANE CONSOLE ${level}]`, msg);
+      } else {
+        console.log(`[PANE CONSOLE ${level}]`, msg);
+      }
+    });
+    require$$1$1.ipcMain.handle("metrics.memory", () => {
+      return Promise.resolve(process.getProcessMemoryInfo());
+    });
+    require$$1$1.ipcMain.on("window.openExternal", (_, url) => {
+      require$$1$1.shell.openExternal(url);
+    });
+    createWindow();
+    require$$1$1.app.on("activate", function() {
+      if (require$$1$1.BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-  require$$1$1.ipcMain.on("window.openExternal", (_, url) => {
-    require$$1$1.shell.openExternal(url);
+  require$$1$1.app.on("will-quit", () => {
+    closeDb();
   });
-  createWindow();
-  require$$1$1.app.on("activate", function() {
-    if (require$$1$1.BrowserWindow.getAllWindows().length === 0) createWindow();
+  require$$1$1.app.on("window-all-closed", () => {
+    require$$1$1.app.quit();
   });
-});
-require$$1$1.app.on("will-quit", () => {
-  closeDb();
-});
-require$$1$1.app.on("window-all-closed", () => {
-  require$$1$1.app.quit();
-});
+}
