@@ -51,11 +51,18 @@ function initDatabase() {
         console.error("[SQLite Error] Failed to rename corrupt database:", backupError);
       }
     }
-    const freshInstance = new Database(dbPath);
-    freshInstance.pragma("journal_mode = WAL");
-    freshInstance.pragma("synchronous = NORMAL");
-    freshInstance.pragma("busy_timeout = 5000");
-    return freshInstance;
+    try {
+      const freshInstance = new Database(dbPath);
+      freshInstance.pragma("journal_mode = WAL");
+      freshInstance.pragma("synchronous = NORMAL");
+      freshInstance.pragma("busy_timeout = 5000");
+      return freshInstance;
+    } catch (fallbackErr) {
+      console.error("[SQLite Fatal] Could not create disk DB, using in-memory fallback:", fallbackErr);
+      const memInstance = new Database(":memory:");
+      memInstance.pragma("busy_timeout = 5000");
+      return memInstance;
+    }
   }
 }
 const db = initDatabase();
@@ -1520,6 +1527,13 @@ function createWindow() {
   });
   overlayWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
     console.error(`[OVERLAY LOAD ERROR] Code ${errorCode}: ${errorDescription} (${validatedURL})`);
+    if (!utils$2.is.dev) {
+      setTimeout(() => {
+        if (!overlayWindow.isDestroyed()) {
+          overlayWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+        }
+      }, 500);
+    }
   });
   if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     overlayWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
