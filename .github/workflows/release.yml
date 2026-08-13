@@ -26,6 +26,12 @@ jobs:
         with:
           node-version: 22
 
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Rebuild Native Dependencies for Electron
+        run: npx electron-rebuild
+
       - name: Build App Packages
         run: |
           if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then npx electron-builder --linux --publish never; fi
