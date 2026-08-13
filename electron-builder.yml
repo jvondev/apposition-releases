@@ -35,6 +35,9 @@ nsis:
   createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: "Apposition"
+  installerIcon: assets/icon.ico
+  uninstallerIcon: assets/icon.ico
+  installerHeaderIcon: assets/icon.ico
 
 linux:
   target:

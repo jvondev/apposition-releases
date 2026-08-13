@@ -48,7 +48,10 @@ function initDatabase() {
       try {
         require$$1$2.renameSync(dbPath, `${dbPath}.corrupt.${Date.now()}`);
       } catch (backupError) {
-        console.error("[SQLite Error] Failed to rename corrupt database:", backupError);
+        console.error(
+          "[SQLite Error] Failed to rename corrupt database:",
+          backupError
+        );
       }
     }
     try {
@@ -58,7 +61,10 @@ function initDatabase() {
       freshInstance.pragma("busy_timeout = 5000");
       return freshInstance;
     } catch (fallbackErr) {
-      console.error("[SQLite Fatal] Could not create disk DB, using in-memory fallback:", fallbackErr);
+      console.error(
+        "[SQLite Fatal] Could not create disk DB, using in-memory fallback:",
+        fallbackErr
+      );
       const memInstance = new Database(":memory:");
       memInstance.pragma("busy_timeout = 5000");
       return memInstance;
@@ -164,7 +170,9 @@ function updateProfile(id, name, color, is_ephemeral = false, proxy_server = nul
 }
 function deleteProfile(id) {
   if (id === "main") throw new Error("Cannot delete main profile");
-  db.prepare("UPDATE nodes SET profile_id = 'main' WHERE profile_id = ?").run(id);
+  db.prepare("UPDATE nodes SET profile_id = 'main' WHERE profile_id = ?").run(
+    id
+  );
   db.prepare("DELETE FROM profiles WHERE id = ?").run(id);
 }
 function getNodes(tabId) {
@@ -630,8 +638,46 @@ viewRegistry.webContentsIdToPaneId;
 const viewProfile = viewRegistry.viewProfiles;
 const stashedBounds = viewRegistry.stashedBounds;
 const hibernatedViews = viewRegistry.hibernatedViews;
+function configureSessionForProfile(profileId) {
+  try {
+    const profile = getProfileById(profileId);
+    if (!profile) return;
+    const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
+    const ses = require$$1$1.session.fromPartition(partition);
+    if (profile.proxy_server) {
+      ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
+        console.error(`Failed to set proxy for session ${profileId}:`, e);
+      });
+    } else {
+      ses.setProxy({}).catch(() => {
+      });
+    }
+    if (profile.user_agent && profile.user_agent.trim()) {
+      ses.setUserAgent(profile.user_agent.trim());
+    }
+    ses.setPermissionRequestHandler((_webContents, permission, callback) => {
+      const allowed = ["notifications", "geolocation", "media", "screen"];
+      callback(allowed.includes(permission));
+    });
+  } catch (e) {
+    console.error("Failed to configure session for profile", profileId, e);
+  }
+}
+function configureAllSessions() {
+  try {
+    const profiles = getProfiles();
+    for (const profile of profiles) {
+      configureSessionForProfile(profile.id);
+    }
+  } catch (e) {
+    console.error("Failed to configure sessions on startup", e);
+  }
+}
 function initDbIpc() {
-  require$$1$1.ipcMain.handle("db.getProfiles", () => getProfiles());
+  require$$1$1.ipcMain.handle("db.getProfiles", () => {
+    configureAllSessions();
+    return getProfiles();
+  });
   require$$1$1.ipcMain.handle(
     "db.createProfile",
     async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
@@ -643,6 +689,7 @@ function initDbIpc() {
         }
       }
       createProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
+      configureSessionForProfile(id);
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
@@ -650,6 +697,7 @@ function initDbIpc() {
     "db.updateProfile",
     (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
+      configureSessionForProfile(id);
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
@@ -680,8 +728,8 @@ function initDbIpc() {
     }
     deleteProfile(id);
     try {
-      const { session } = require("electron");
-      const ses = session.fromPartition(isEphemeral ? id : `persist:${id}`);
+      const { session: session2 } = require("electron");
+      const ses = session2.fromPartition(isEphemeral ? id : `persist:${id}`);
       await ses.clearStorageData();
     } catch (e) {
       console.error("[Profile Engine] Failed to wipe session data:", e);
@@ -801,7 +849,9 @@ function configureViewAndSession(paneId, view, profileId) {
   if (!ses.__networkErrorTrackingBound) {
     ses.__networkErrorTrackingBound = true;
     ses.webRequest.onErrorOccurred((details) => {
-      const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(details.webContentsId ?? -1);
+      const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(
+        details.webContentsId ?? -1
+      );
       if (trackedPaneId && global.overlayWindow && !global.overlayWindow.isDestroyed()) {
         global.overlayWindow.webContents.send("view.network-error", {
           paneId: trackedPaneId,
@@ -814,18 +864,21 @@ function configureViewAndSession(paneId, view, profileId) {
       }
     });
   }
-  view.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.console-message", {
-        paneId,
-        level,
-        message,
-        line,
-        sourceId,
-        timestamp: Date.now()
-      });
+  view.webContents.on(
+    "console-message",
+    (_event, level, message, line, sourceId) => {
+      if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
+        global.overlayWindow.webContents.send("view.console-message", {
+          paneId,
+          level,
+          message,
+          line,
+          sourceId,
+          timestamp: Date.now()
+        });
+      }
     }
-  });
+  );
   view.webContents.on("focus", () => {
     if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
       global.overlayWindow.webContents.send("view.focus", { paneId });
@@ -883,12 +936,18 @@ function configureViewAndSession(paneId, view, profileId) {
   });
   view.webContents.on("media-started-playing", () => {
     if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.media-status", { paneId, isPlaying: true });
+      global.overlayWindow.webContents.send("view.media-status", {
+        paneId,
+        isPlaying: true
+      });
     }
   });
   view.webContents.on("media-paused", () => {
     if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.media-status", { paneId, isPlaying: false });
+      global.overlayWindow.webContents.send("view.media-status", {
+        paneId,
+        isPlaying: false
+      });
     }
   });
   view.webContents.on("render-process-gone", (_event, details) => {
@@ -1022,16 +1081,16 @@ function initCaptureIpc() {
         const image = await view.webContents.capturePage();
         const { clipboard } = require("electron");
         clipboard.writeImage(image);
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("app:toast", {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
             message: "Screenshot copied to clipboard",
             type: "success"
           });
         }
       } catch (err) {
         console.error("Failed to capture screenshot", err);
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("app:toast", {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
             message: "Failed to copy screenshot",
             type: "error"
           });
@@ -1039,84 +1098,96 @@ function initCaptureIpc() {
       }
     }
   });
-  require$$1$1.ipcMain.handle("view.capture", async (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
-    const dataURL = await captureViewSafely(view);
-    dataURL === "" && console.warn(`[pane ${paneId}] capture returned empty page`);
-    return dataURL;
-  });
-  require$$1$1.ipcMain.handle("view.captureAllActive", async () => {
-    const captures = {};
-    for (const [paneId, view] of activeViews) {
-      if (view.webContents.isDestroyed()) continue;
-      const bounds = view.getBounds();
-      if (bounds.width > 0 && bounds.height > 0) {
-        const dataURL = await captureViewSafely(view);
-        if (dataURL) captures[paneId] = dataURL;
-      }
-    }
-    return captures;
-  });
-  require$$1$1.ipcMain.handle("view.hibernateAllActive", async () => {
-    const captures = {};
-    const panesToHibernate = [];
-    for (const [paneId, view] of activeViews) {
-      if (view.webContents.isDestroyed()) continue;
-      if (view.webContents.isCurrentlyAudible()) {
-        continue;
-      }
-      panesToHibernate.push(paneId);
-    }
-    for (const paneId of panesToHibernate) {
+  require$$1$1.ipcMain.handle(
+    "view.capture",
+    async (_event, paneId) => {
       const view = activeViews.get(paneId);
-      if (view && !view.webContents.isDestroyed()) {
-        const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
-        captures[paneId] = PLACEHOLDER;
-        const descriptor = {
-          url: view.webContents.getURL(),
-          profileId: viewProfile.get(paneId),
-          bounds: view.getBounds(),
-          dataURL: PLACEHOLDER,
-          title: view.webContents.getTitle()
-        };
-        viewProfile.delete(paneId);
-        hibernatedViews.set(paneId, descriptor);
-        if (global.mainWindow) {
-          try {
-            global.mainWindow.contentView.removeChildView(view);
-          } catch {
-          }
+      if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
+      const dataURL = await captureViewSafely(view);
+      dataURL === "" && console.warn(`[pane ${paneId}] capture returned empty page`);
+      return dataURL;
+    }
+  );
+  require$$1$1.ipcMain.handle(
+    "view.captureAllActive",
+    async () => {
+      const captures = {};
+      for (const [paneId, view] of activeViews) {
+        if (view.webContents.isDestroyed()) continue;
+        const bounds = view.getBounds();
+        if (bounds.width > 0 && bounds.height > 0) {
+          const dataURL = await captureViewSafely(view);
+          if (dataURL) captures[paneId] = dataURL;
         }
-        view.webContents.close();
-        activeViews.delete(paneId);
       }
+      return captures;
     }
-    return captures;
-  });
-  require$$1$1.ipcMain.handle("view.hibernate", async (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
-    if (!view) return PLACEHOLDER;
-    const descriptor = {
-      url: view.webContents.getURL(),
-      profileId: viewProfile.get(paneId),
-      bounds: view.getBounds(),
-      dataURL: PLACEHOLDER,
-      title: view.webContents.getTitle()
-    };
-    viewProfile.delete(paneId);
-    hibernatedViews.set(paneId, descriptor);
-    if (global.mainWindow) {
-      try {
-        global.mainWindow.contentView.removeChildView(view);
-      } catch {
+  );
+  require$$1$1.ipcMain.handle(
+    "view.hibernateAllActive",
+    async () => {
+      const captures = {};
+      const panesToHibernate = [];
+      for (const [paneId, view] of activeViews) {
+        if (view.webContents.isDestroyed()) continue;
+        if (view.webContents.isCurrentlyAudible()) {
+          continue;
+        }
+        panesToHibernate.push(paneId);
       }
+      for (const paneId of panesToHibernate) {
+        const view = activeViews.get(paneId);
+        if (view && !view.webContents.isDestroyed()) {
+          const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
+          captures[paneId] = PLACEHOLDER;
+          const descriptor = {
+            url: view.webContents.getURL(),
+            profileId: viewProfile.get(paneId),
+            bounds: view.getBounds(),
+            dataURL: PLACEHOLDER,
+            title: view.webContents.getTitle()
+          };
+          viewProfile.delete(paneId);
+          hibernatedViews.set(paneId, descriptor);
+          if (global.mainWindow) {
+            try {
+              global.mainWindow.contentView.removeChildView(view);
+            } catch {
+            }
+          }
+          view.webContents.close();
+          activeViews.delete(paneId);
+        }
+      }
+      return captures;
     }
-    view.webContents.close();
-    activeViews.delete(paneId);
-    return PLACEHOLDER;
-  });
+  );
+  require$$1$1.ipcMain.handle(
+    "view.hibernate",
+    async (_event, paneId) => {
+      const view = activeViews.get(paneId);
+      const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
+      if (!view) return PLACEHOLDER;
+      const descriptor = {
+        url: view.webContents.getURL(),
+        profileId: viewProfile.get(paneId),
+        bounds: view.getBounds(),
+        dataURL: PLACEHOLDER,
+        title: view.webContents.getTitle()
+      };
+      viewProfile.delete(paneId);
+      hibernatedViews.set(paneId, descriptor);
+      if (global.mainWindow) {
+        try {
+          global.mainWindow.contentView.removeChildView(view);
+        } catch {
+        }
+      }
+      view.webContents.close();
+      activeViews.delete(paneId);
+      return PLACEHOLDER;
+    }
+  );
 }
 function initViewIpc() {
   require$$1$1.ipcMain.on("view.reload", (event, paneId) => {
@@ -1280,125 +1351,27 @@ function initViewIpc() {
       view.webContents.send("auth:trigger-autofill");
     }
   });
-  require$$1$1.ipcMain.handle("view.getSearchSuggestions", async (_event, query) => {
-    try {
-      const response = await fetch(
-        `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`
-      );
-      if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-      const data = await response.json();
-      return data && Array.isArray(data[1]) ? data[1] : [];
-    } catch (e) {
-      console.error("Failed to fetch autocomplete suggestions", e);
-      return [];
+  require$$1$1.ipcMain.handle(
+    "view.getSearchSuggestions",
+    async (_event, query) => {
+      try {
+        const response = await fetch(
+          `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`
+        );
+        if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+        const data = await response.json();
+        return data && Array.isArray(data[1]) ? data[1] : [];
+      } catch (e) {
+        console.error("Failed to fetch autocomplete suggestions", e);
+        return [];
+      }
     }
-  });
+  );
 }
 function initViewManager() {
   initViewLifecycleIpc();
   initCaptureIpc();
   initViewIpc();
-}
-function bindInputForwarding(sourceWindow, targetWindows) {
-  sourceWindow.webContents.on("before-input-event", (event, input) => {
-    if (input.type === "keyDown") {
-      if (input.key === "F12" || input.alt && input.code === "Space") {
-        event.preventDefault();
-      }
-      const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-      const payload = {
-        key: input.key,
-        code: input.code,
-        control: input.control,
-        meta: input.meta,
-        shift: input.shift,
-        alt: input.alt,
-        isAutoRepeat: input.isAutoRepeat,
-        isInputFocused: false,
-        eventId: sharedId
-      };
-      for (const target of targetWindows) {
-        if (target && !target.isDestroyed()) {
-          target.webContents.send("forwarded-key", payload);
-        }
-      }
-    }
-  });
-}
-let edgePollingInterval = null;
-global.isIgnoringMouse = false;
-global.wakeRegions = [];
-function startEdgePolling() {
-  if (edgePollingInterval) return;
-  edgePollingInterval = setInterval(() => {
-    if (!global.isIgnoringMouse) return;
-    const overlay = global.overlayWindow;
-    if (!overlay || overlay.isDestroyed()) return;
-    const point = require$$1$1.screen.getCursorScreenPoint();
-    const bounds = overlay.getBounds();
-    const x = point.x - bounds.x;
-    const y = point.y - bounds.y;
-    let shouldWake = false;
-    if (x >= 0 && x <= bounds.width && y >= 0 && y <= bounds.height) {
-      if (x <= 12 || y <= 12 || x >= bounds.width - 12 || y >= bounds.height - 12) {
-        shouldWake = true;
-      } else {
-        const rects = global.wakeRegions || [];
-        for (const rect of rects) {
-          if (x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height) {
-            shouldWake = true;
-            break;
-          }
-        }
-      }
-    }
-    if (shouldWake) {
-      global.isIgnoringMouse = false;
-      overlay.setIgnoreMouseEvents(false);
-    }
-  }, 33);
-}
-function stopEdgePolling() {
-  if (edgePollingInterval) {
-    clearInterval(edgePollingInterval);
-    edgePollingInterval = null;
-  }
-}
-function bindOverlayBoundsSync(mainWindow, overlayWindow) {
-  const syncOverlayBounds = () => {
-    const bounds = mainWindow.getContentBounds();
-    overlayWindow.setBounds(bounds);
-  };
-  mainWindow.on("resize", syncOverlayBounds);
-  mainWindow.on("maximize", syncOverlayBounds);
-  mainWindow.on("unmaximize", syncOverlayBounds);
-  mainWindow.on("move", syncOverlayBounds);
-  mainWindow.on("restore", () => {
-    syncOverlayBounds();
-    for (const [, view] of activeViews) {
-      if (!view.webContents.isDestroyed()) {
-        const b = view.getBounds();
-        view.setBounds({ ...b, width: b.width + 1 });
-        setTimeout(() => {
-          if (!view.webContents.isDestroyed()) {
-            view.setBounds(b);
-          }
-        }, 16);
-      }
-    }
-  });
-  const checkFocusAndPoll = () => {
-    if (global.mainWindow && global.mainWindow.isFocused() || global.overlayWindow && global.overlayWindow.isFocused()) {
-      startEdgePolling();
-    } else {
-      stopEdgePolling();
-    }
-  };
-  mainWindow.on("focus", checkFocusAndPoll);
-  mainWindow.on("blur", checkFocusAndPoll);
-  overlayWindow.on("focus", checkFocusAndPoll);
-  overlayWindow.on("blur", checkFocusAndPoll);
-  return syncOverlayBounds;
 }
 const tearWindows = /* @__PURE__ */ new Map();
 function initTearWindowIpc() {
@@ -1442,7 +1415,11 @@ function initTearWindowIpc() {
       const finalWin = new require$$1$1.BrowserWindow({
         ...bounds,
         titleBarStyle: "hidden",
-        titleBarOverlay: { color: "#ffffff", symbolColor: "#737373", height: 40 },
+        titleBarOverlay: {
+          color: "#ffffff",
+          symbolColor: "#737373",
+          height: 40
+        },
         webPreferences: {
           preload: require$$1.join(__dirname, "../preload/index.js"),
           webviewTag: true,
@@ -1450,7 +1427,9 @@ function initTearWindowIpc() {
         }
       });
       if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-        finalWin.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`);
+        finalWin.loadURL(
+          `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
+        );
       } else {
         finalWin.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
           hash: `standalone-${paneId}`
@@ -1458,6 +1437,15 @@ function initTearWindowIpc() {
       }
     }
   });
+}
+function logToFile(msg) {
+  try {
+    const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+    require$$1$2.appendFileSync(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
+`, "utf8");
+  } catch (e) {
+    console.error("Failed to write to log file:", e);
+  }
 }
 function createWindow() {
   const mainWindow = new require$$1$1.BrowserWindow({
@@ -1474,71 +1462,45 @@ function createWindow() {
     webPreferences: {
       preload: require$$1.join(__dirname, "../preload/index.js"),
       sandbox: false,
-      webviewTag: false
+      webviewTag: true
     }
   });
   global.mainWindow = mainWindow;
-  const overlayWindow = new require$$1$1.BrowserWindow({
-    parent: mainWindow,
-    width: 1200,
-    height: 800,
-    show: false,
-    frame: false,
-    transparent: true,
-    backgroundColor: "#00000000",
-    resizable: true,
-    skipTaskbar: true,
-    webPreferences: {
-      preload: require$$1.join(__dirname, "../preload/index.js"),
-      sandbox: false
-    }
-  });
-  global.overlayWindow = overlayWindow;
-  bindInputForwarding(overlayWindow, [mainWindow, overlayWindow]);
-  bindInputForwarding(mainWindow, [mainWindow, overlayWindow]);
-  overlayWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send("open-in-new-pane", url);
-    }
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    mainWindow.webContents.send("open-in-new-pane", url);
     return { action: "deny" };
   });
-  const syncOverlayBounds = bindOverlayBoundsSync(mainWindow, overlayWindow);
-  let windowsShown = false;
-  const showWindows = () => {
-    if (windowsShown) return;
-    windowsShown = true;
+  mainWindow.webContents.on(
+    "console-message",
+    (_event, level, message, line, sourceId) => {
+      const msg = `[RENDERER CONSOLE ${level}] (${sourceId}:${line}): ${message}`;
+      console.log(msg);
+      logToFile(msg);
+    }
+  );
+  mainWindow.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL) => {
+      const msg = `[MAINWINDOW LOAD ERROR] Code ${errorCode}: ${errorDescription} (${validatedURL})`;
+      console.error(msg);
+      logToFile(msg);
+      if (!utils$2.is.dev) {
+        setTimeout(() => {
+          if (!mainWindow.isDestroyed()) {
+            mainWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+          }
+        }, 500);
+      }
+    }
+  );
+  mainWindow.once("ready-to-show", () => {
     mainWindow.maximize();
-    syncOverlayBounds();
     mainWindow.show();
-    overlayWindow.show();
-  };
-  overlayWindow.webContents.on("did-finish-load", showWindows);
-  mainWindow.on("ready-to-show", showWindows);
-  setTimeout(showWindows, 1e3).unref();
-  mainWindow.on("closed", () => {
-    try {
-      if (!overlayWindow.isDestroyed()) overlayWindow.destroy();
-    } catch {
-    }
-    global.overlayWindow = void 0;
-  });
-  overlayWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    console.log(`[RENDERER CONSOLE ${level}] (${sourceId}:${line}): ${message}`);
-  });
-  overlayWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
-    console.error(`[OVERLAY LOAD ERROR] Code ${errorCode}: ${errorDescription} (${validatedURL})`);
-    if (!utils$2.is.dev) {
-      setTimeout(() => {
-        if (!overlayWindow.isDestroyed()) {
-          overlayWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
-        }
-      }, 500);
-    }
   });
   if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-    overlayWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+    mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
-    overlayWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+    mainWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
   }
 }
 function initWindowManagerIpc() {
@@ -1546,58 +1508,17 @@ function initWindowManagerIpc() {
     global.mainWindow?.minimize();
   });
   require$$1$1.ipcMain.on("window.focus-main", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed() && global.overlayWindow.isFocused()) {
-      global.overlayWindow.blur();
-    }
     global.mainWindow?.focus();
     global.mainWindow?.webContents.focus();
   });
-  require$$1$1.ipcMain.on("window.focus-overlay", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.focus();
-      global.overlayWindow.webContents.focus();
-    }
-  });
-  require$$1$1.ipcMain.on("set-ignore-mouse-events", (_event, ignore, options) => {
-    try {
-      const overlay = global.overlayWindow;
-      if (!overlay || overlay.isDestroyed()) return;
-      if (typeof overlay.setIgnoreMouseEvents !== "function") return;
-      if (typeof ignore !== "boolean") return;
-      const opts = options && typeof options === "object" ? options : void 0;
-      global.isIgnoringMouse = ignore;
-      if (process.platform === "win32" && opts && opts.forward) {
-        opts.forward = false;
-      }
-      overlay.setIgnoreMouseEvents(ignore, opts);
-    } catch (err) {
-      console.error("[set-ignore-mouse-events] guarded failure:", err);
-    }
-  });
-  require$$1$1.ipcMain.on("set-wake-regions", (_event, rects) => {
-    if (Array.isArray(rects)) {
-      global.wakeRegions = rects;
-    }
-  });
   require$$1$1.ipcMain.on("app.openInternalDevTools", () => {
-    if (utils$2.is.dev && global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      if (global.overlayWindow.webContents.isDevToolsOpened()) return;
-      activeViews.forEach((v) => {
-        if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
-          v.webContents.closeDevTools();
-        }
-      });
-      global.overlayWindow.webContents.once("devtools-closed", () => {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("view.devtools-closed");
-        }
-      });
-      global.overlayWindow.webContents.openDevTools({ mode: "undocked" });
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.openDevTools({ mode: "undocked" });
     }
   });
   require$$1$1.ipcMain.on("app.closeInternalDevTools", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.closeDevTools();
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.closeDevTools();
     }
   });
   require$$1$1.ipcMain.on("window.maximize", () => {
@@ -1618,12 +1539,46 @@ function initWindowManagerIpc() {
 function initSessionSecurity() {
   const patchedSessions = /* @__PURE__ */ new WeakSet();
   require$$1$1.app.on("web-contents-created", (_, webContents) => {
-    console.log(`[DEBUG] WebContents created. ID: ${webContents.id}, Type: ${webContents.getType()}`);
-    webContents.on("did-start-navigation", (event, url, isInPlace, isMainFrame, frameProcessId, frameRoutingId) => {
-      console.log(`[DEBUG] Navigation started. URL: ${url}, MainFrame: ${isMainFrame}`);
-    });
-    webContents.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
-      console.error(`[DEBUG] Failed to load. URL: ${validatedURL}, Error: ${errorDescription} (${errorCode})`);
+    console.log(
+      `[DEBUG] WebContents created. ID: ${webContents.id}, Type: ${webContents.getType()}`
+    );
+    webContents.on(
+      "did-start-navigation",
+      (event, url, isInPlace, isMainFrame, frameProcessId, frameRoutingId) => {
+        console.log(
+          `[DEBUG] Navigation started. URL: ${url}, MainFrame: ${isMainFrame}`
+        );
+      }
+    );
+    webContents.on(
+      "did-fail-load",
+      (event, errorCode, errorDescription, validatedURL) => {
+        console.error(
+          `[DEBUG] Failed to load. URL: ${validatedURL}, Error: ${errorDescription} (${errorCode})`
+        );
+      }
+    );
+    webContents.on("before-input-event", (event, input) => {
+      if (input.type === "keyDown") {
+        if (input.key === "F12" || input.alt && input.code === "Space") {
+          event.preventDefault();
+        }
+        const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
+        const payload = {
+          key: input.key,
+          code: input.code,
+          control: input.control,
+          meta: input.meta,
+          shift: input.shift,
+          alt: input.alt,
+          isAutoRepeat: input.isAutoRepeat,
+          isInputFocused: false,
+          eventId: sharedId
+        };
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("forwarded-key", payload);
+        }
+      }
     });
     const session = webContents.session;
     if (!patchedSessions.has(session)) {
@@ -1637,7 +1592,9 @@ function initSessionSecurity() {
         { urls: ["https://*/*", "http://*/*"] },
         (details, callback) => {
           const requestHeaders = { ...details.requestHeaders };
-          const uaKey = Object.keys(requestHeaders).find((k) => k.toLowerCase() === "user-agent");
+          const uaKey = Object.keys(requestHeaders).find(
+            (k) => k.toLowerCase() === "user-agent"
+          );
           if (uaKey && requestHeaders[uaKey]) {
             requestHeaders[uaKey] = requestHeaders[uaKey].replace(/\s+Electron\/\S+/i, "").replace(/\s+Apposition\/\S+/i, "").replace(/(\)\s+)\S+\s+(Chrome\/)/, "$1$2");
           }
@@ -1658,7 +1615,9 @@ function initSessionSecurity() {
         const responseHeaders = { ...details.responseHeaders };
         let modified = false;
         const removeHeader = (headerName) => {
-          const key = Object.keys(responseHeaders).find((k) => k.toLowerCase() === headerName.toLowerCase());
+          const key = Object.keys(responseHeaders).find(
+            (k) => k.toLowerCase() === headerName.toLowerCase()
+          );
           if (key) {
             delete responseHeaders[key];
             modified = true;
@@ -1666,6 +1625,7 @@ function initSessionSecurity() {
         };
         removeHeader("Cross-Origin-Embedder-Policy");
         removeHeader("Cross-Origin-Opener-Policy");
+        removeHeader("X-Frame-Options");
         if (modified) {
           callback({ cancel: false, responseHeaders });
         } else {
@@ -1674,7 +1634,14 @@ function initSessionSecurity() {
       });
     }
     webContents.setWindowOpenHandler((details) => {
-      console.log("setWindowOpenHandler called with URL:", details.url, "disposition:", details.disposition, "features:", details.features);
+      console.log(
+        "setWindowOpenHandler called with URL:",
+        details.url,
+        "disposition:",
+        details.disposition,
+        "features:",
+        details.features
+      );
       const isPopup = details.features && (details.features.includes("width=") || details.features.includes("height="));
       const urlLower = details.url.toLowerCase();
       const isBlank = urlLower === "about:blank" || urlLower === "about:blank#blocked";
@@ -1696,7 +1663,10 @@ function initSessionSecurity() {
           }
         };
       } else if (isSSO) {
-        console.log("Intercepting as SSO redirect to current pane:", details.url);
+        console.log(
+          "Intercepting as SSO redirect to current pane:",
+          details.url
+        );
         webContents.loadURL(details.url);
         return { action: "deny" };
       }
@@ -1707,8 +1677,8 @@ function initSessionSecurity() {
     webContents.on("render-process-gone", (event, details) => {
       console.error(`WebContents crashed: ${details.reason}`);
       if (details.reason === "oom" || details.reason === "crashed") {
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("pane.crashed", webContents.id);
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("pane.crashed", webContents.id);
         }
       }
     });
@@ -1716,7 +1686,9 @@ function initSessionSecurity() {
   require$$1$1.app.on("child-process-gone", (event, details) => {
     console.error(`Process gone: ${details.type} (${details.reason})`);
     if (details.type === "GPU" && details.reason === "crashed") {
-      console.warn("GPU Process Crashed. Electron will attempt to restart it automatically.");
+      console.warn(
+        "GPU Process Crashed. Electron will attempt to restart it automatically."
+      );
     }
   });
   require$$1$1.app.on("browser-window-created", (_, window2) => {
@@ -1727,15 +1699,18 @@ const handleDeepLink = (url) => {
   const deepPath = url.replace("apposition://", "");
   if (deepPath.startsWith("workspace/")) {
     const workspaceId = deepPath.replace("workspace/", "");
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("app.deep-link.workspace", workspaceId);
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send(
+        "app.deep-link.workspace",
+        workspaceId
+      );
     }
   } else if (deepPath.startsWith("oauth-callback")) {
     try {
       const urlObj = new URL(url);
       const token = urlObj.searchParams.get("token");
-      if (token && global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-        global.overlayWindow.webContents.send("app.deep-link.oauth", token);
+      if (token && global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.deep-link.oauth", token);
       }
     } catch (e) {
       console.error("Failed to parse oauth callback url", e);
@@ -17707,6 +17682,30 @@ const gotTheLock = require$$1$1.app.requestSingleInstanceLock();
 if (!gotTheLock) {
   require$$1$1.app.quit();
 } else {
+  process.on("uncaughtException", (err) => {
+    try {
+      const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+      require$$1$2.appendFileSync(
+        logPath,
+        `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNCAUGHT EXCEPTION] ${err.stack || err}
+`,
+        "utf8"
+      );
+    } catch {
+    }
+  });
+  process.on("unhandledRejection", (reason) => {
+    try {
+      const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+      require$$1$2.appendFileSync(
+        logPath,
+        `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNHANDLED REJECTION] ${reason}
+`,
+        "utf8"
+      );
+    } catch {
+    }
+  });
   require$$1$1.app.on("second-instance", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
       if (global.mainWindow.isMinimized()) global.mainWindow.restore();
@@ -17720,8 +17719,8 @@ if (!gotTheLock) {
     utils$2.electronApp.setAppUserModelId("com.apposition");
     require$$1$1.app.on("browser-window-focus", () => {
       require$$1$1.globalShortcut.register("Alt+Space", () => {
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("forwarded-key", {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("forwarded-key", {
             key: " ",
             code: "Space",
             control: false,
@@ -17752,9 +17751,12 @@ if (!gotTheLock) {
         console.log(`[PANE CONSOLE ${level}]`, msg);
       }
     });
-    require$$1$1.ipcMain.handle("metrics.memory", () => {
-      return Promise.resolve(process.getProcessMemoryInfo());
-    });
+    require$$1$1.ipcMain.handle(
+      "metrics.memory",
+      () => {
+        return Promise.resolve(process.getProcessMemoryInfo());
+      }
+    );
     require$$1$1.ipcMain.on("window.openExternal", (_, url) => {
       require$$1$1.shell.openExternal(url);
     });
