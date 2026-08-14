@@ -21,7 +21,9 @@
     "dev:web": "pnpm --filter web dev",
     "build": "npm run typecheck && electron-vite build",
     "rebuild": "electron-rebuild",
-    "build:win": "npm run rebuild && npm run build && electron-builder --win -c.npmRebuild=false",
+    "build:win": "npm run rebuild && npm run build && electron-builder --win -c electron-builder.dev.yml -c.npmRebuild=false",
+    "build:win:dev": "npm run rebuild && npm run build && electron-builder --win -c electron-builder.dev.yml -c.npmRebuild=false",
+    "build:win:prod": "npm run rebuild && npm run build && electron-builder --win -c electron-builder.yml -c.npmRebuild=false",
     "build:mac": "npm run rebuild && npm run build && electron-builder --mac -c.npmRebuild=false",
     "build:linux": "npm run rebuild && npm run build && electron-builder --linux -c.npmRebuild=false"
   },

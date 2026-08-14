@@ -1,8 +1,8 @@
 "use strict";
-const require$$1$1 = require("electron");
+const require$$1 = require("electron");
 const utils$2 = require("@electron-toolkit/utils");
 const Database = require("better-sqlite3");
-const require$$1 = require("path");
+const require$$1$1 = require("path");
 const require$$1$2 = require("fs");
 const os = require("os");
 const crypto = require("crypto");
@@ -32,9 +32,10 @@ function _interopNamespaceDefault(e) {
   n.default = e;
   return Object.freeze(n);
 }
-const require$$1__namespace = /* @__PURE__ */ _interopNamespaceDefault(require$$1);
-const dbFileName = utils$2.is.dev ? "apposition_state_dev.db" : "apposition_state.db";
-const dbPath = require$$1.join(require$$1$1.app.getPath("userData"), dbFileName);
+const require$$1__namespace = /* @__PURE__ */ _interopNamespaceDefault(require$$1$1);
+const isDevMode$2 = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+const dbFileName = isDevMode$2 ? "apposition_state_dev.db" : "apposition_state.db";
+const dbPath = require$$1$1.join(require$$1.app.getPath("userData"), dbFileName);
 function initDatabase() {
   try {
     const instance = new Database(dbPath);
@@ -309,8 +310,8 @@ function setWorkspaceDefaultProfile(id, profileId) {
   );
 }
 function getMachineKeyFilePath() {
-  const userDataPath = require$$1$1.app.getPath("userData");
-  return require$$1.join(userDataPath, "apposition_machine.key");
+  const userDataPath = require$$1.app.getPath("userData");
+  return require$$1$1.join(userDataPath, "apposition_machine.key");
 }
 function getOrCreateMachineKey() {
   const keyPath = getMachineKeyFilePath();
@@ -326,7 +327,7 @@ function getOrCreateMachineKey() {
   }
   const newKey = crypto.randomBytes(32);
   try {
-    const userDataPath = require$$1$1.app.getPath("userData");
+    const userDataPath = require$$1.app.getPath("userData");
     if (!require$$1$2.existsSync(userDataPath)) {
       require$$1$2.mkdirSync(userDataPath, { recursive: true });
     }
@@ -416,7 +417,7 @@ function saveLicenseState(state) {
     console.error("Failed to save license state", e);
   }
 }
-function isDevMode() {
+function isDevMode$1() {
   return utils$2.is.dev;
 }
 function shouldBypassGatekeep() {
@@ -643,7 +644,7 @@ function configureSessionForProfile(profileId) {
     const profile = getProfileById(profileId);
     if (!profile) return;
     const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
-    const ses = require$$1$1.session.fromPartition(partition);
+    const ses = require$$1.session.fromPartition(partition);
     if (profile.proxy_server) {
       ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
         console.error(`Failed to set proxy for session ${profileId}:`, e);
@@ -674,11 +675,11 @@ function configureAllSessions() {
   }
 }
 function initDbIpc() {
-  require$$1$1.ipcMain.handle("db.getProfiles", () => {
+  require$$1.ipcMain.handle("db.getProfiles", () => {
     configureAllSessions();
     return getProfiles();
   });
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "db.createProfile",
     async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       const isPremium = await checkPremiumStatus();
@@ -693,7 +694,7 @@ function initDbIpc() {
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "db.updateProfile",
     (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
@@ -701,7 +702,7 @@ function initDbIpc() {
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
-  require$$1$1.ipcMain.handle("db.deleteProfile", async (_, id) => {
+  require$$1.ipcMain.handle("db.deleteProfile", async (_, id) => {
     for (const [paneId, profileId] of viewProfile.entries()) {
       if (profileId === id) {
         const view = activeViews.get(paneId);
@@ -712,8 +713,8 @@ function initDbIpc() {
           }
           activeViews.delete(paneId);
           viewProfile.delete(paneId);
-          require$$1$1.ipcMain.removeAllListeners(`view.updateProfile.${paneId}`);
-          const createHandler = require$$1$1.ipcMain.listeners("view.create")[0];
+          require$$1.ipcMain.removeAllListeners(`view.updateProfile.${paneId}`);
+          const createHandler = require$$1.ipcMain.listeners("view.create")[0];
           if (createHandler) {
             createHandler(null, paneId, currentUrl, "main");
           }
@@ -735,8 +736,8 @@ function initDbIpc() {
       console.error("[Profile Engine] Failed to wipe session data:", e);
     }
   });
-  require$$1$1.ipcMain.handle("db.getWorkspaces", () => getWorkspaces());
-  require$$1$1.ipcMain.handle("db.createWorkspace", async (_, id, name) => {
+  require$$1.ipcMain.handle("db.getWorkspaces", () => getWorkspaces());
+  require$$1.ipcMain.handle("db.createWorkspace", async (_, id, name) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const workspaces = getWorkspaces();
@@ -746,29 +747,29 @@ function initDbIpc() {
     }
     createWorkspace(id, name);
   });
-  require$$1$1.ipcMain.handle("db.updateWorkspace", (_, id, name) => {
+  require$$1.ipcMain.handle("db.updateWorkspace", (_, id, name) => {
     updateWorkspace(id, name);
   });
-  require$$1$1.ipcMain.handle("db.deleteWorkspace", (_, id) => {
+  require$$1.ipcMain.handle("db.deleteWorkspace", (_, id) => {
     deleteWorkspace(id);
   });
-  require$$1$1.ipcMain.handle("db.setWorkspaceDefaultProfile", (_, id, profileId) => {
+  require$$1.ipcMain.handle("db.setWorkspaceDefaultProfile", (_, id, profileId) => {
     setWorkspaceDefaultProfile(id, profileId);
   });
-  require$$1$1.ipcMain.handle("db.setTabDefaultProfile", (_, id, profileId) => {
+  require$$1.ipcMain.handle("db.setTabDefaultProfile", (_, id, profileId) => {
     setTabDefaultProfile(id, profileId);
   });
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "db.updatePaneProfilesForWorkspace",
     (_, workspaceId, profileId) => {
       updatePaneProfilesForWorkspace(workspaceId, profileId);
     }
   );
-  require$$1$1.ipcMain.handle("db.updatePaneProfilesForTab", (_, tabId, profileId) => {
+  require$$1.ipcMain.handle("db.updatePaneProfilesForTab", (_, tabId, profileId) => {
     updatePaneProfilesForTab(tabId, profileId);
   });
-  require$$1$1.ipcMain.handle("db.getTabs", (_, workspaceId) => getTabs(workspaceId));
-  require$$1$1.ipcMain.handle("db.createTab", async (_, id, workspaceId, name) => {
+  require$$1.ipcMain.handle("db.getTabs", (_, workspaceId) => getTabs(workspaceId));
+  require$$1.ipcMain.handle("db.createTab", async (_, id, workspaceId, name) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const tabs = getTabs(workspaceId);
@@ -779,30 +780,30 @@ function initDbIpc() {
     createTab(id, workspaceId, name);
     return { id, workspaceId, name };
   });
-  require$$1$1.ipcMain.handle("db.updateTab", (_, id, name) => {
+  require$$1.ipcMain.handle("db.updateTab", (_, id, name) => {
     updateTab(id, name);
   });
-  require$$1$1.ipcMain.handle("db.deleteTab", (_, id) => {
+  require$$1.ipcMain.handle("db.deleteTab", (_, id) => {
     deleteTab(id);
   });
-  require$$1$1.ipcMain.handle("db.moveNodeToTab", (_, nodeId, targetTabId) => {
+  require$$1.ipcMain.handle("db.moveNodeToTab", (_, nodeId, targetTabId) => {
     moveNodeToTab(nodeId, targetTabId);
   });
-  require$$1$1.ipcMain.handle("db.getNodes", (_, tabId) => getNodesForTab(tabId));
-  require$$1$1.ipcMain.on("db.saveNode", (event, node2) => saveNode(node2));
-  require$$1$1.ipcMain.on("db.deleteNode", (event, id) => deleteNode(id));
-  require$$1$1.ipcMain.on(
+  require$$1.ipcMain.handle("db.getNodes", (_, tabId) => getNodesForTab(tabId));
+  require$$1.ipcMain.on("db.saveNode", (event, node2) => saveNode(node2));
+  require$$1.ipcMain.on("db.deleteNode", (event, id) => deleteNode(id));
+  require$$1.ipcMain.on(
     "db.saveTabLayout",
     (event, tabId, layoutState) => saveTabLayout(tabId, layoutState)
   );
 }
 function initLicensingIpc() {
-  require$$1$1.ipcMain.handle("licensing.activate", (_, key) => activateLicenseKey(key));
-  require$$1$1.ipcMain.handle("licensing.validate", (_, key) => validateLicenseKey(key));
-  require$$1$1.ipcMain.handle("licensing.getKey", () => getSavedLicenseKey());
-  require$$1$1.ipcMain.handle("licensing.getState", () => getSavedLicenseState());
-  require$$1$1.ipcMain.handle("licensing.checkPremium", () => checkPremiumStatus());
-  require$$1$1.ipcMain.handle("licensing.isDev", () => isDevMode());
+  require$$1.ipcMain.handle("licensing.activate", (_, key) => activateLicenseKey(key));
+  require$$1.ipcMain.handle("licensing.validate", (_, key) => validateLicenseKey(key));
+  require$$1.ipcMain.handle("licensing.getKey", () => getSavedLicenseKey());
+  require$$1.ipcMain.handle("licensing.getState", () => getSavedLicenseState());
+  require$$1.ipcMain.handle("licensing.checkPremium", () => checkPremiumStatus());
+  require$$1.ipcMain.handle("licensing.isDev", () => isDevMode$1());
 }
 function configureViewAndSession(paneId, view, profileId) {
   let partitionString = void 0;
@@ -822,7 +823,7 @@ function configureViewAndSession(paneId, view, profileId) {
     }
     partitionString = isEphemeral ? profileId : `persist:${profileId}`;
   }
-  const ses = partitionString ? require$$1$1.session.fromPartition(partitionString) : require$$1$1.session.defaultSession;
+  const ses = partitionString ? require$$1.session.fromPartition(partitionString) : require$$1.session.defaultSession;
   if (isEphemeral) {
     ses.clearCache().catch(() => {
     });
@@ -838,7 +839,7 @@ function configureViewAndSession(paneId, view, profileId) {
   if (userAgent && userAgent.trim()) {
     ses.setUserAgent(userAgent.trim());
   } else {
-    ses.setUserAgent(require$$1$1.app.userAgentFallback);
+    ses.setUserAgent(require$$1.app.userAgentFallback);
   }
   ses.setPermissionRequestHandler(
     (_webContents, permission, callback) => {
@@ -981,9 +982,9 @@ function createOrUpdateView(paneId, url, profileId = "main") {
     }
     partitionString = isEphemeral ? profileId : `persist:${profileId}`;
   }
-  const view = new require$$1$1.WebContentsView({
+  const view = new require$$1.WebContentsView({
     webPreferences: {
-      preload: require$$1.join(__dirname, "../preload/pane.js"),
+      preload: require$$1$1.join(__dirname, "../preload/pane.js"),
       partition: partitionString,
       sandbox: true,
       contextIsolation: true
@@ -1040,13 +1041,13 @@ function updateViewProfile(paneId, newProfileId) {
   }
 }
 function initViewLifecycleIpc() {
-  require$$1$1.ipcMain.on("view.create", (_event, paneId, url, profileId) => {
+  require$$1.ipcMain.on("view.create", (_event, paneId, url, profileId) => {
     createOrUpdateView(paneId, url, profileId);
   });
-  require$$1$1.ipcMain.on("view.destroy", (_event, paneId) => {
+  require$$1.ipcMain.on("view.destroy", (_event, paneId) => {
     destroyView(paneId);
   });
-  require$$1$1.ipcMain.on("view.updateProfile", (_event, paneId, newProfileId) => {
+  require$$1.ipcMain.on("view.updateProfile", (_event, paneId, newProfileId) => {
     updateViewProfile(paneId, newProfileId);
   });
 }
@@ -1074,7 +1075,7 @@ const captureViewSafely = async (view) => {
   return "";
 };
 function initCaptureIpc() {
-  require$$1$1.ipcMain.on("view.screenshot", async (event, paneId) => {
+  require$$1.ipcMain.on("view.screenshot", async (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       try {
@@ -1098,7 +1099,7 @@ function initCaptureIpc() {
       }
     }
   });
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "view.capture",
     async (_event, paneId) => {
       const view = activeViews.get(paneId);
@@ -1108,7 +1109,7 @@ function initCaptureIpc() {
       return dataURL;
     }
   );
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "view.captureAllActive",
     async () => {
       const captures = {};
@@ -1123,7 +1124,7 @@ function initCaptureIpc() {
       return captures;
     }
   );
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "view.hibernateAllActive",
     async () => {
       const captures = {};
@@ -1162,7 +1163,7 @@ function initCaptureIpc() {
       return captures;
     }
   );
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "view.hibernate",
     async (_event, paneId) => {
       const view = activeViews.get(paneId);
@@ -1190,13 +1191,13 @@ function initCaptureIpc() {
   );
 }
 function initViewIpc() {
-  require$$1$1.ipcMain.on("view.reload", (event, paneId) => {
+  require$$1.ipcMain.on("view.reload", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.reload();
     }
   });
-  require$$1$1.ipcMain.on("pane.clicked", (event) => {
+  require$$1.ipcMain.on("pane.clicked", (event) => {
     for (const [paneId, view] of activeViews) {
       if (view.webContents === event.sender) {
         if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
@@ -1206,7 +1207,7 @@ function initViewIpc() {
       }
     }
   });
-  require$$1$1.ipcMain.on("view.openDevTools", (event, paneId) => {
+  require$$1.ipcMain.on("view.openDevTools", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (!view || view.webContents.isDestroyed()) return;
     if (view.webContents.isDevToolsOpened()) {
@@ -1227,24 +1228,24 @@ function initViewIpc() {
     });
     view.webContents.openDevTools({ mode: "undocked" });
   });
-  require$$1$1.ipcMain.on("view.closeDevTools", (event, paneId) => {
+  require$$1.ipcMain.on("view.closeDevTools", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.closeDevTools();
     }
   });
-  require$$1$1.ipcMain.on("view.hideDevTools", (event) => {
+  require$$1.ipcMain.on("view.hideDevTools", (event) => {
     activeViews.forEach((v) => {
       if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
     });
   });
-  require$$1$1.ipcMain.on("view.setBounds", (event, paneId, bounds) => {
+  require$$1.ipcMain.on("view.setBounds", (event, paneId, bounds) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed() && bounds) {
       view.setBounds(bounds);
     }
   });
-  require$$1$1.ipcMain.on("view.batchSetBounds", (event, boundsMap) => {
+  require$$1.ipcMain.on("view.batchSetBounds", (event, boundsMap) => {
     if (!boundsMap || typeof boundsMap !== "object") return;
     for (const [paneId, bounds] of Object.entries(boundsMap)) {
       const view = activeViews.get(paneId);
@@ -1253,7 +1254,7 @@ function initViewIpc() {
       }
     }
   });
-  require$$1$1.ipcMain.on("view.loadURL", (event, paneId, url, options) => {
+  require$$1.ipcMain.on("view.loadURL", (event, paneId, url, options) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       if (options?.clearHistory) {
@@ -1262,7 +1263,7 @@ function initViewIpc() {
       view.webContents.loadURL(url);
     }
   });
-  require$$1$1.ipcMain.on("view.focus", (event, paneId) => {
+  require$$1.ipcMain.on("view.focus", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.focus();
@@ -1271,45 +1272,45 @@ function initViewIpc() {
       global.mainWindow.webContents.focus();
     }
   });
-  require$$1$1.ipcMain.on("view.goBack", (event, paneId) => {
+  require$$1.ipcMain.on("view.goBack", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoBack()) {
       view.webContents.goBack();
     }
   });
-  require$$1$1.ipcMain.on("view.goForward", (event, paneId) => {
+  require$$1.ipcMain.on("view.goForward", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoForward()) {
       view.webContents.goForward();
     }
   });
-  require$$1$1.ipcMain.on("view.toggleMute", (_, paneId) => {
+  require$$1.ipcMain.on("view.toggleMute", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setAudioMuted(!view.webContents.isAudioMuted());
     }
   });
-  require$$1$1.ipcMain.on("view.zoomIn", (_, paneId) => {
+  require$$1.ipcMain.on("view.zoomIn", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       const level = view.webContents.getZoomLevel();
       view.webContents.setZoomLevel(level + 0.5);
     }
   });
-  require$$1$1.ipcMain.on("view.zoomOut", (_, paneId) => {
+  require$$1.ipcMain.on("view.zoomOut", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       const level = view.webContents.getZoomLevel();
       view.webContents.setZoomLevel(level - 0.5);
     }
   });
-  require$$1$1.ipcMain.on("view.zoomReset", (_, paneId) => {
+  require$$1.ipcMain.on("view.zoomReset", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setZoomLevel(0);
     }
   });
-  require$$1$1.ipcMain.on("view.sleep", (event, paneId) => {
+  require$$1.ipcMain.on("view.sleep", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setBackgroundThrottling(true);
@@ -1319,7 +1320,7 @@ function initViewIpc() {
       view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
     }
   });
-  require$$1$1.ipcMain.on("view.wake", (event, paneId, bounds) => {
+  require$$1.ipcMain.on("view.wake", (event, paneId, bounds) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setBackgroundThrottling(false);
@@ -1327,7 +1328,7 @@ function initViewIpc() {
       if (bounds) view.setBounds(bounds);
     }
   });
-  require$$1$1.ipcMain.on("view.hideAll", () => {
+  require$$1.ipcMain.on("view.hideAll", () => {
     stashedBounds.clear();
     for (const [paneId, view] of activeViews) {
       if (view.webContents.isDestroyed()) continue;
@@ -1335,7 +1336,7 @@ function initViewIpc() {
       view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
     }
   });
-  require$$1$1.ipcMain.on("view.restoreAll", () => {
+  require$$1.ipcMain.on("view.restoreAll", () => {
     for (const [paneId, bounds] of stashedBounds) {
       const view = activeViews.get(paneId);
       if (view && !view.webContents.isDestroyed()) {
@@ -1344,14 +1345,14 @@ function initViewIpc() {
     }
     stashedBounds.clear();
   });
-  require$$1$1.ipcMain.removeAllListeners("auth:trigger-autofill");
-  require$$1$1.ipcMain.on("auth:trigger-autofill", (event, paneId) => {
+  require$$1.ipcMain.removeAllListeners("auth:trigger-autofill");
+  require$$1.ipcMain.on("auth:trigger-autofill", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.send("auth:trigger-autofill");
     }
   });
-  require$$1$1.ipcMain.handle(
+  require$$1.ipcMain.handle(
     "view.getSearchSuggestions",
     async (_event, query) => {
       try {
@@ -1375,10 +1376,10 @@ function initViewManager() {
 }
 const tearWindows = /* @__PURE__ */ new Map();
 function initTearWindowIpc() {
-  require$$1$1.ipcMain.on("tear-update", (_event, paneId, x, y) => {
+  require$$1.ipcMain.on("tear-update", (_event, paneId, x, y) => {
     let win = tearWindows.get(paneId);
     if (!win) {
-      win = new require$$1$1.BrowserWindow({
+      win = new require$$1.BrowserWindow({
         width: 400,
         height: 300,
         x: x - 200,
@@ -1386,13 +1387,13 @@ function initTearWindowIpc() {
         frame: false,
         transparent: true,
         alwaysOnTop: true,
-        webPreferences: { preload: require$$1.join(__dirname, "../preload/index.js") }
+        webPreferences: { preload: require$$1$1.join(__dirname, "../preload/index.js") }
       });
       win.setOpacity(0.8);
       if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
         win.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#tear-${paneId}`);
       } else {
-        win.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
+        win.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"), {
           hash: `tear-${paneId}`
         });
       }
@@ -1402,17 +1403,17 @@ function initTearWindowIpc() {
       if (!win.isVisible()) win.show();
     }
   });
-  require$$1$1.ipcMain.on("tear-hide", (_event, paneId) => {
+  require$$1.ipcMain.on("tear-hide", (_event, paneId) => {
     const win = tearWindows.get(paneId);
     if (win && win.isVisible()) win.hide();
   });
-  require$$1$1.ipcMain.on("tear-commit", (_event, paneId) => {
+  require$$1.ipcMain.on("tear-commit", (_event, paneId) => {
     const win = tearWindows.get(paneId);
     if (win) {
       const bounds = win.getBounds();
       win.destroy();
       tearWindows.delete(paneId);
-      const finalWin = new require$$1$1.BrowserWindow({
+      const finalWin = new require$$1.BrowserWindow({
         ...bounds,
         titleBarStyle: "hidden",
         titleBarOverlay: {
@@ -1421,7 +1422,7 @@ function initTearWindowIpc() {
           height: 40
         },
         webPreferences: {
-          preload: require$$1.join(__dirname, "../preload/index.js"),
+          preload: require$$1$1.join(__dirname, "../preload/index.js"),
           webviewTag: true,
           safeDialogs: true
         }
@@ -1431,7 +1432,7 @@ function initTearWindowIpc() {
           `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
         );
       } else {
-        finalWin.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
+        finalWin.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"), {
           hash: `standalone-${paneId}`
         });
       }
@@ -1440,7 +1441,7 @@ function initTearWindowIpc() {
 }
 function logToFile(msg) {
   try {
-    const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+    const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
     require$$1$2.appendFileSync(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
 `, "utf8");
   } catch (e) {
@@ -1448,19 +1449,19 @@ function logToFile(msg) {
   }
 }
 function createWindow() {
-  const mainWindow = new require$$1$1.BrowserWindow({
+  const mainWindow = new require$$1.BrowserWindow({
     width: 1200,
     height: 800,
     show: false,
     frame: false,
     titleBarStyle: "hidden",
     backgroundColor: "#F7F7F5",
-    icon: require$$1.join(
+    icon: require$$1$1.join(
       __dirname,
       process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
     ),
     webPreferences: {
-      preload: require$$1.join(__dirname, "../preload/index.js"),
+      preload: require$$1$1.join(__dirname, "../preload/index.js"),
       sandbox: false,
       webviewTag: true
     }
@@ -1487,41 +1488,47 @@ function createWindow() {
       if (!utils$2.is.dev) {
         setTimeout(() => {
           if (!mainWindow.isDestroyed()) {
-            mainWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+            mainWindow.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"));
           }
         }, 500);
       }
     }
   );
-  mainWindow.once("ready-to-show", () => {
-    mainWindow.maximize();
-    mainWindow.show();
-  });
+  let isShown = false;
+  const showWindow = () => {
+    if (!isShown && !mainWindow.isDestroyed()) {
+      isShown = true;
+      mainWindow.maximize();
+      mainWindow.show();
+    }
+  };
+  mainWindow.once("ready-to-show", showWindow);
+  setTimeout(showWindow, 1500);
   if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
     mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
-    mainWindow.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+    mainWindow.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"));
   }
 }
 function initWindowManagerIpc() {
-  require$$1$1.ipcMain.on("window.minimize", () => {
+  require$$1.ipcMain.on("window.minimize", () => {
     global.mainWindow?.minimize();
   });
-  require$$1$1.ipcMain.on("window.focus-main", () => {
+  require$$1.ipcMain.on("window.focus-main", () => {
     global.mainWindow?.focus();
     global.mainWindow?.webContents.focus();
   });
-  require$$1$1.ipcMain.on("app.openInternalDevTools", () => {
+  require$$1.ipcMain.on("app.openInternalDevTools", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
       global.mainWindow.webContents.openDevTools({ mode: "undocked" });
     }
   });
-  require$$1$1.ipcMain.on("app.closeInternalDevTools", () => {
+  require$$1.ipcMain.on("app.closeInternalDevTools", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
       global.mainWindow.webContents.closeDevTools();
     }
   });
-  require$$1$1.ipcMain.on("window.maximize", () => {
+  require$$1.ipcMain.on("window.maximize", () => {
     const win = global.mainWindow;
     if (win) {
       if (win.isMaximized()) {
@@ -1531,14 +1538,14 @@ function initWindowManagerIpc() {
       }
     }
   });
-  require$$1$1.ipcMain.on("window.close", () => {
+  require$$1.ipcMain.on("window.close", () => {
     global.mainWindow?.close();
   });
   initTearWindowIpc();
 }
 function initSessionSecurity() {
   const patchedSessions = /* @__PURE__ */ new WeakSet();
-  require$$1$1.app.on("web-contents-created", (_, webContents) => {
+  require$$1.app.on("web-contents-created", (_, webContents) => {
     console.log(
       `[DEBUG] WebContents created. ID: ${webContents.id}, Type: ${webContents.getType()}`
     );
@@ -1671,7 +1678,7 @@ function initSessionSecurity() {
         return { action: "deny" };
       }
       console.log("Denying and opening in OS browser:", details.url);
-      require$$1$1.shell.openExternal(details.url);
+      require$$1.shell.openExternal(details.url);
       return { action: "deny" };
     });
     webContents.on("render-process-gone", (event, details) => {
@@ -1683,7 +1690,7 @@ function initSessionSecurity() {
       }
     });
   });
-  require$$1$1.app.on("child-process-gone", (event, details) => {
+  require$$1.app.on("child-process-gone", (event, details) => {
     console.error(`Process gone: ${details.type} (${details.reason})`);
     if (details.type === "GPU" && details.reason === "crashed") {
       console.warn(
@@ -1691,7 +1698,7 @@ function initSessionSecurity() {
       );
     }
   });
-  require$$1$1.app.on("browser-window-created", (_, window2) => {
+  require$$1.app.on("browser-window-created", (_, window2) => {
   });
 }
 const handleDeepLink = (url) => {
@@ -1720,18 +1727,18 @@ const handleDeepLink = (url) => {
 function initDeepLinking() {
   if (process.defaultApp) {
     if (process.argv.length >= 2) {
-      require$$1$1.app.setAsDefaultProtocolClient("apposition", process.execPath, [
+      require$$1.app.setAsDefaultProtocolClient("apposition", process.execPath, [
         require$$1__namespace.resolve(process.argv[1])
       ]);
     }
   } else {
-    require$$1$1.app.setAsDefaultProtocolClient("apposition");
+    require$$1.app.setAsDefaultProtocolClient("apposition");
   }
-  const gotTheLock2 = require$$1$1.app.requestSingleInstanceLock();
+  const gotTheLock2 = require$$1.app.requestSingleInstanceLock();
   if (!gotTheLock2) {
-    require$$1$1.app.quit();
+    require$$1.app.quit();
   } else {
-    require$$1$1.app.on("second-instance", (event, commandLine) => {
+    require$$1.app.on("second-instance", (event, commandLine) => {
       if (global.mainWindow) {
         if (global.mainWindow.isMinimized()) global.mainWindow.restore();
         global.mainWindow.focus();
@@ -1739,7 +1746,7 @@ function initDeepLinking() {
       const url = commandLine.find((arg) => arg.startsWith("apposition://"));
       handleDeepLink(url);
     });
-    require$$1$1.app.on("open-url", (event, url) => {
+    require$$1.app.on("open-url", (event, url) => {
       event.preventDefault();
       if (global.mainWindow) {
         if (global.mainWindow.isMinimized()) global.mainWindow.restore();
@@ -2668,7 +2675,7 @@ var hasRequiredUtils$1;
 function requireUtils$1() {
   if (hasRequiredUtils$1) return utils$1;
   hasRequiredUtils$1 = 1;
-  const path = require$$1;
+  const path = require$$1$1;
   utils$1.checkPath = function checkPath(pth) {
     if (process.platform === "win32") {
       const pathHasInvalidWinCharacters = /[<>:"|?*]/.test(pth.replace(path.parse(pth).root, ""));
@@ -2776,7 +2783,7 @@ function requireStat() {
   if (hasRequiredStat) return stat;
   hasRequiredStat = 1;
   const fs2 = /* @__PURE__ */ requireFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const util2 = require$$4;
   function getStats(src2, dest, opts) {
     const statFunc = opts.dereference ? (file2) => fs2.stat(file2, { bigint: true }) : (file2) => fs2.lstat(file2, { bigint: true });
@@ -2907,7 +2914,7 @@ function requireCopy$1() {
   if (hasRequiredCopy$1) return copy_1;
   hasRequiredCopy$1 = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const mkdirs2 = requireMkdirs().mkdirs;
   const pathExists = requirePathExists().pathExists;
   const utimesMillis = requireUtimes().utimesMillis;
@@ -3104,7 +3111,7 @@ function requireCopySync() {
   if (hasRequiredCopySync) return copySync_1;
   hasRequiredCopySync = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const mkdirsSync = requireMkdirs().mkdirsSync;
   const utimesMillisSync = requireUtimes().utimesMillisSync;
   const stat2 = /* @__PURE__ */ requireStat();
@@ -3250,7 +3257,7 @@ function requireRimraf() {
   if (hasRequiredRimraf) return rimraf_1;
   hasRequiredRimraf = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const assert = require$$5;
   const isWindows = process.platform === "win32";
   function defaults(options) {
@@ -3508,7 +3515,7 @@ function requireEmpty() {
   hasRequiredEmpty = 1;
   const u = requireUniversalify().fromPromise;
   const fs2 = /* @__PURE__ */ requireFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const remove = /* @__PURE__ */ requireRemove();
   const emptyDir = u(async function emptyDir2(dir) {
@@ -3546,7 +3553,7 @@ function requireFile() {
   if (hasRequiredFile) return file;
   hasRequiredFile = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1;
+  const path = require$$1$1;
   const fs2 = requireGracefulFs();
   const mkdir = /* @__PURE__ */ requireMkdirs();
   function createFile(file2, callback) {
@@ -3608,7 +3615,7 @@ function requireLink() {
   if (hasRequiredLink) return link;
   hasRequiredLink = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1;
+  const path = require$$1$1;
   const fs2 = requireGracefulFs();
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const pathExists = requirePathExists().pathExists;
@@ -3669,7 +3676,7 @@ var hasRequiredSymlinkPaths;
 function requireSymlinkPaths() {
   if (hasRequiredSymlinkPaths) return symlinkPaths_1;
   hasRequiredSymlinkPaths = 1;
-  const path = require$$1;
+  const path = require$$1$1;
   const fs2 = requireGracefulFs();
   const pathExists = requirePathExists().pathExists;
   function symlinkPaths(srcpath, dstpath, callback) {
@@ -3781,7 +3788,7 @@ function requireSymlink() {
   if (hasRequiredSymlink) return symlink;
   hasRequiredSymlink = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1;
+  const path = require$$1$1;
   const fs2 = /* @__PURE__ */ requireFs();
   const _mkdirs = /* @__PURE__ */ requireMkdirs();
   const mkdirs2 = _mkdirs.mkdirs;
@@ -3995,7 +4002,7 @@ function requireOutputFile() {
   hasRequiredOutputFile = 1;
   const u = requireUniversalify().fromCallback;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const pathExists = requirePathExists().pathExists;
   function outputFile(file2, data, encoding, callback) {
@@ -4079,7 +4086,7 @@ function requireMove$1() {
   if (hasRequiredMove$1) return move_1;
   hasRequiredMove$1 = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const copy2 = requireCopy().copy;
   const remove = requireRemove().remove;
   const mkdirp = requireMkdirs().mkdirp;
@@ -4150,7 +4157,7 @@ function requireMoveSync() {
   if (hasRequiredMoveSync) return moveSync_1;
   hasRequiredMoveSync = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1;
+  const path = require$$1$1;
   const copySync = requireCopy().copySync;
   const removeSync = requireRemove().removeSync;
   const mkdirpSync = requireMkdirs().mkdirpSync;
@@ -13614,7 +13621,7 @@ function requireDownloadedUpdateHelper() {
   const fs_1 = require$$1$2;
   const isEqual = requireLodash_isequal();
   const fs_extra_1 = /* @__PURE__ */ requireLib();
-  const path = require$$1;
+  const path = require$$1$1;
   let DownloadedUpdateHelper$1 = class DownloadedUpdateHelper {
     constructor(cacheDir) {
       this.cacheDir = cacheDir;
@@ -13773,7 +13780,7 @@ function requireAppAdapter() {
   hasRequiredAppAdapter = 1;
   Object.defineProperty(AppAdapter, "__esModule", { value: true });
   AppAdapter.getAppCacheDir = getAppCacheDir;
-  const path = require$$1;
+  const path = require$$1$1;
   const os_1 = os;
   function getAppCacheDir() {
     const homedir = (0, os_1.homedir)();
@@ -13795,10 +13802,10 @@ function requireElectronAppAdapter() {
   hasRequiredElectronAppAdapter = 1;
   Object.defineProperty(ElectronAppAdapter, "__esModule", { value: true });
   ElectronAppAdapter.ElectronAppAdapter = void 0;
-  const path = require$$1;
+  const path = require$$1$1;
   const AppAdapter_1 = requireAppAdapter();
   let ElectronAppAdapter$1 = class ElectronAppAdapter {
-    constructor(app = require$$1$1.app) {
+    constructor(app = require$$1.app) {
       this.app = app;
     }
     whenReady() {
@@ -13847,7 +13854,7 @@ function requireElectronHttpExecutor() {
     const builder_util_runtime_1 = requireOut();
     exports.NET_SESSION_NAME = "electron-updater";
     function getNetSession() {
-      return require$$1$1.session.fromPartition(exports.NET_SESSION_NAME, {
+      return require$$1.session.fromPartition(exports.NET_SESSION_NAME, {
         cache: false
       });
     }
@@ -13888,7 +13895,7 @@ function requireElectronHttpExecutor() {
         if (this.cachedSession == null) {
           this.cachedSession = getNetSession();
         }
-        const request = require$$1$1.net.request({
+        const request = require$$1.net.request({
           ...options,
           session: this.cachedSession
         });
@@ -14755,7 +14762,7 @@ function requirePrivateGitHubProvider() {
   PrivateGitHubProvider.PrivateGitHubProvider = void 0;
   const builder_util_runtime_1 = requireOut();
   const js_yaml_1 = requireJsYaml();
-  const path = require$$1;
+  const path = require$$1$1;
   const url_1 = require$$2;
   const util_1 = requireUtil();
   const GitHubProvider_1 = requireGitHubProvider();
@@ -15769,7 +15776,7 @@ function requireAppUpdater() {
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const js_yaml_1 = requireJsYaml();
   const lazy_val_1 = requireMain$1();
-  const path = require$$1;
+  const path = require$$1$1;
   const semver_1 = requireSemver();
   const DownloadedUpdateHelper_1 = requireDownloadedUpdateHelper();
   const ElectronAppAdapter_1 = requireElectronAppAdapter();
@@ -15976,7 +15983,7 @@ function requireAppUpdater() {
         }
         void it.downloadPromise.then(() => {
           const notificationContent = AppUpdater2.formatDownloadNotification(it.updateInfo.version, this.app.name, downloadNotification);
-          new require$$1$1.Notification(notificationContent).show();
+          new require$$1.Notification(notificationContent).show();
         });
         return it;
       });
@@ -16389,7 +16396,7 @@ function requireBaseUpdater() {
   Object.defineProperty(BaseUpdater, "__esModule", { value: true });
   BaseUpdater.BaseUpdater = void 0;
   const child_process_1 = require$$1$4;
-  const path = require$$1;
+  const path = require$$1$1;
   const AppUpdater_1 = requireAppUpdater();
   let BaseUpdater$1 = class BaseUpdater extends AppUpdater_1.AppUpdater {
     constructor(options, app) {
@@ -16402,7 +16409,7 @@ function requireBaseUpdater() {
       const isInstalled = this.install(isSilent, isSilent ? isForceRunAfter : this.autoRunAppAfterInstall);
       if (isInstalled) {
         setImmediate(() => {
-          require$$1$1.autoUpdater.emit("before-quit-for-update");
+          require$$1.autoUpdater.emit("before-quit-for-update");
           this.app.quit();
         });
       } else {
@@ -16578,7 +16585,7 @@ function requireAppImageUpdater() {
   const child_process_1 = require$$1$4;
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const fs_1 = require$$1$2;
-  const path = require$$1;
+  const path = require$$1$1;
   const BaseUpdater_1 = requireBaseUpdater();
   const FileWithEmbeddedBlockMapDifferentialDownloader_1 = requireFileWithEmbeddedBlockMapDifferentialDownloader();
   const Provider_1 = requireProvider();
@@ -17021,7 +17028,7 @@ function requireMacUpdater() {
   const builder_util_runtime_1 = requireOut();
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const fs_1 = require$$1$2;
-  const path = require$$1;
+  const path = require$$1$1;
   const http_1 = require$$4$1;
   const AppUpdater_1 = requireAppUpdater();
   const Provider_1 = requireProvider();
@@ -17030,7 +17037,7 @@ function requireMacUpdater() {
   let MacUpdater$1 = class MacUpdater2 extends AppUpdater_1.AppUpdater {
     constructor(options, app) {
       super(options, app);
-      this.nativeUpdater = require$$1$1.autoUpdater;
+      this.nativeUpdater = require$$1.autoUpdater;
       this.squirrelDownloadedUpdate = false;
       this.nativeUpdater.on("error", (it) => {
         this._logger.warn(it);
@@ -17268,7 +17275,7 @@ function requireWindowsExecutableCodeSignatureVerifier() {
   const builder_util_runtime_1 = requireOut();
   const child_process_1 = require$$1$4;
   const os$1 = os;
-  const path = require$$1;
+  const path = require$$1$1;
   function preparePowerShellExec(command, timeout) {
     const executable = `set "PSModulePath=" & chcp 65001 >NUL & powershell.exe`;
     const args = ["-NoProfile", "-NonInteractive", "-InputFormat", "None", "-Command", command];
@@ -17380,7 +17387,7 @@ function requireNsisUpdater() {
   Object.defineProperty(NsisUpdater, "__esModule", { value: true });
   NsisUpdater.NsisUpdater = void 0;
   const builder_util_runtime_1 = requireOut();
-  const path = require$$1;
+  const path = require$$1$1;
   const BaseUpdater_1 = requireBaseUpdater();
   const FileWithEmbeddedBlockMapDifferentialDownloader_1 = requireFileWithEmbeddedBlockMapDifferentialDownloader();
   const types_1 = requireTypes();
@@ -17502,7 +17509,7 @@ function requireNsisUpdater() {
         if (errorCode === "UNKNOWN" || errorCode === "EACCES") {
           callUsingElevation();
         } else if (errorCode === "ENOENT") {
-          require$$1$1.shell.openPath(installerPath).catch((err) => this.dispatchError(err));
+          require$$1.shell.openPath(installerPath).catch((err) => this.dispatchError(err));
         } else {
           this.dispatchError(e);
         }
@@ -17561,7 +17568,7 @@ function requireMain() {
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.NsisUpdater = exports.MacUpdater = exports.RpmUpdater = exports.PacmanUpdater = exports.DebUpdater = exports.AppImageUpdater = exports.Provider = exports.NoOpLogger = exports.AppUpdater = exports.BaseUpdater = void 0;
     const fs_extra_1 = /* @__PURE__ */ requireLib();
-    const path = require$$1;
+    const path = require$$1$1;
     var BaseUpdater_1 = requireBaseUpdater();
     Object.defineProperty(exports, "BaseUpdater", { enumerable: true, get: function() {
       return BaseUpdater_1.BaseUpdater;
@@ -17646,7 +17653,7 @@ function requireMain() {
 }
 var mainExports = requireMain();
 function initAutoUpdater() {
-  require$$1$1.ipcMain.handle("updater.check", async () => {
+  require$$1.ipcMain.handle("updater.check", async () => {
     try {
       await mainExports.autoUpdater.checkForUpdates();
       return { success: true };
@@ -17672,19 +17679,30 @@ function initAutoUpdater() {
     });
   });
 }
-require$$1$1.app.commandLine.appendSwitch("disable-background-timer-throttling");
-require$$1$1.app.commandLine.appendSwitch("disable-renderer-backgrounding");
-require$$1$1.app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-require$$1$1.app.commandLine.appendSwitch("enable-lcd-text");
-require$$1$1.app.commandLine.appendSwitch("hide-scrollbars");
-require$$1$1.app.commandLine.appendSwitch("disable-features", "FedCm");
-const gotTheLock = require$$1$1.app.requestSingleInstanceLock();
+require$$1.app.commandLine.appendSwitch("disable-background-timer-throttling");
+require$$1.app.commandLine.appendSwitch("disable-renderer-backgrounding");
+require$$1.app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+require$$1.app.commandLine.appendSwitch("enable-lcd-text");
+require$$1.app.commandLine.appendSwitch("hide-scrollbars");
+require$$1.app.commandLine.appendSwitch("disable-features", "FedCm");
+const isDevMode = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+if (isDevMode) {
+  require$$1.app.setName("Apposition Dev");
+  try {
+    require$$1.app.setPath("userData", require$$1$1.join(require$$1.app.getPath("appData"), "AppositionDev"));
+  } catch (e) {
+    console.warn("Failed to set custom dev userData path:", e);
+  }
+} else {
+  require$$1.app.setName("Apposition");
+}
+const gotTheLock = require$$1.app.requestSingleInstanceLock();
 if (!gotTheLock) {
-  require$$1$1.app.quit();
+  require$$1.app.quit();
 } else {
   process.on("uncaughtException", (err) => {
     try {
-      const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+      const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
       require$$1$2.appendFileSync(
         logPath,
         `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNCAUGHT EXCEPTION] ${err.stack || err}
@@ -17696,7 +17714,7 @@ if (!gotTheLock) {
   });
   process.on("unhandledRejection", (reason) => {
     try {
-      const logPath = require$$1.join(require$$1$1.app.getPath("userData"), "apposition.log");
+      const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
       require$$1$2.appendFileSync(
         logPath,
         `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNHANDLED REJECTION] ${reason}
@@ -17706,19 +17724,23 @@ if (!gotTheLock) {
     } catch {
     }
   });
-  require$$1$1.app.on("second-instance", () => {
+  require$$1.app.on("second-instance", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
       if (global.mainWindow.isMinimized()) global.mainWindow.restore();
       global.mainWindow.focus();
     }
   });
   initDeepLinking();
-  require$$1$1.app.whenReady().then(() => {
+  require$$1.app.whenReady().then(() => {
     initAutoUpdater();
-    require$$1$1.Menu.setApplicationMenu(null);
-    utils$2.electronApp.setAppUserModelId("com.apposition");
-    require$$1$1.app.on("browser-window-focus", () => {
-      require$$1$1.globalShortcut.register("Alt+Space", () => {
+    require$$1.Menu.setApplicationMenu(null);
+    if (isDevMode) {
+      utils$2.electronApp.setAppUserModelId("com.jvondev.apposition.dev");
+    } else {
+      utils$2.electronApp.setAppUserModelId("com.jvondev.apposition.app");
+    }
+    require$$1.app.on("browser-window-focus", () => {
+      require$$1.globalShortcut.register("Alt+Space", () => {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
           global.mainWindow.webContents.send("forwarded-key", {
             key: " ",
@@ -17732,18 +17754,18 @@ if (!gotTheLock) {
         }
       });
     });
-    require$$1$1.app.on("browser-window-blur", () => {
-      require$$1$1.globalShortcut.unregister("Alt+Space");
+    require$$1.app.on("browser-window-blur", () => {
+      require$$1.globalShortcut.unregister("Alt+Space");
     });
-    require$$1$1.nativeTheme.themeSource = "light";
+    require$$1.nativeTheme.themeSource = "light";
     gcDeletedSessions();
     initSessionSecurity();
     initWindowManagerIpc();
     initViewManager();
     initDbIpc();
     initLicensingIpc();
-    require$$1$1.ipcMain.handle("pane.ping", () => "pong");
-    require$$1$1.ipcMain.on("pane.log", (event, level, ...args) => {
+    require$$1.ipcMain.handle("pane.ping", () => "pong");
+    require$$1.ipcMain.on("pane.log", (event, level, ...args) => {
       const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
       if (level === "ERROR") {
         console.error(`[PANE CONSOLE ${level}]`, msg);
@@ -17751,24 +17773,24 @@ if (!gotTheLock) {
         console.log(`[PANE CONSOLE ${level}]`, msg);
       }
     });
-    require$$1$1.ipcMain.handle(
+    require$$1.ipcMain.handle(
       "metrics.memory",
       () => {
         return Promise.resolve(process.getProcessMemoryInfo());
       }
     );
-    require$$1$1.ipcMain.on("window.openExternal", (_, url) => {
-      require$$1$1.shell.openExternal(url);
+    require$$1.ipcMain.on("window.openExternal", (_, url) => {
+      require$$1.shell.openExternal(url);
     });
     createWindow();
-    require$$1$1.app.on("activate", function() {
-      if (require$$1$1.BrowserWindow.getAllWindows().length === 0) createWindow();
+    require$$1.app.on("activate", function() {
+      if (require$$1.BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
-  require$$1$1.app.on("will-quit", () => {
+  require$$1.app.on("will-quit", () => {
     closeDb();
   });
-  require$$1$1.app.on("window-all-closed", () => {
-    require$$1$1.app.quit();
+  require$$1.app.on("window-all-closed", () => {
+    require$$1.app.quit();
   });
 }
