@@ -11,8 +11,6 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Build and Output
-out/
-build/
 dist/
 
 # OS Files
