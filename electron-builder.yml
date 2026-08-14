@@ -28,10 +28,9 @@ win:
   icon: assets/icon.ico
 
 nsis:
-  oneClick: false
+  oneClick: true
   perMachine: false
   allowElevation: false
-  allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
   runAfterFinish: true
   createDesktopShortcut: always
@@ -40,7 +39,6 @@ nsis:
   include: build/installer.nsh
   installerIcon: assets/icon.ico
   uninstallerIcon: assets/icon.ico
-  installerHeaderIcon: assets/icon.ico
 
 linux:
   target:
