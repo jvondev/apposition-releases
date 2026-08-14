@@ -17802,6 +17802,7 @@ if (!gotTheLock) {
     closeDb();
   });
   require$$1.app.on("window-all-closed", () => {
-    require$$1.app.quit();
+    closeDb();
+    require$$1.app.exit(0);
   });
 }
