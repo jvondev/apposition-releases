@@ -559,23 +559,28 @@ async function validateLicenseKey(key) {
   }
 }
 async function checkPremiumStatus() {
-  if (shouldBypassGatekeep()) {
-    return true;
-  }
-  const key = getSavedLicenseKey();
-  if (!key) {
+  try {
+    if (shouldBypassGatekeep()) {
+      return true;
+    }
+    const key = getSavedLicenseKey();
+    if (!key) {
+      return false;
+    }
+    const cachedState = getSavedLicenseState();
+    if (!cachedState || !cachedState.activated) {
+      return false;
+    }
+    const timeSinceLastCheck = Date.now() - (cachedState.lastChecked || 0);
+    if (timeSinceLastCheck < 12 * 60 * 60 * 1e3) {
+      return true;
+    }
+    const validation = await validateLicenseKey(key);
+    return validation.success;
+  } catch (e) {
+    console.error("[Licensing] checkPremiumStatus safe error fallback:", e);
     return false;
   }
-  const cachedState = getSavedLicenseState();
-  if (!cachedState || !cachedState.activated) {
-    return false;
-  }
-  const timeSinceLastCheck = Date.now() - (cachedState.lastChecked || 0);
-  if (timeSinceLastCheck < 12 * 60 * 60 * 1e3) {
-    return true;
-  }
-  const validation = await validateLicenseKey(key);
-  return validation.success;
 }
 class ViewRegistryImpl {
   activeViews = /* @__PURE__ */ new Map();
@@ -17664,7 +17669,13 @@ function initAutoUpdater() {
   mainExports.autoUpdater.on("error", (err) => {
     console.error("AutoUpdater error:", err);
   });
-  mainExports.autoUpdater.checkForUpdatesAndNotify();
+  try {
+    mainExports.autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.warn("AutoUpdater background check skipped:", err?.message || err);
+    });
+  } catch (err) {
+    console.warn("AutoUpdater initialization skipped:", err?.message || err);
+  }
   mainExports.autoUpdater.on("update-downloaded", () => {
     const { dialog } = require("electron");
     dialog.showMessageBox({

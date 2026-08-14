@@ -34,9 +34,9 @@ jobs:
 
       - name: Build App Packages
         run: |
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then npx electron-builder --linux --publish never; fi
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then npx electron-builder --mac --publish never; fi
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then npx electron-builder --win --publish never; fi
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then npx electron-builder --linux -c electron-builder.yml -c.npmRebuild=false --publish never; fi
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then npx electron-builder --mac -c electron-builder.yml -c.npmRebuild=false --publish never; fi
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then npx electron-builder --win -c electron-builder.yml -c.npmRebuild=false --publish never; fi
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
