@@ -309,6 +309,22 @@ function setWorkspaceDefaultProfile(id, profileId) {
     id
   );
 }
+function getInitialAppState() {
+  try {
+    const workspaces = getWorkspaces();
+    const activeWsId = workspaces[0]?.id || "ws_personal";
+    const tabs = getTabs(activeWsId);
+    return {
+      workspaces,
+      activeWorkspaceId: activeWsId,
+      tabs,
+      activeTabId: tabs[0]?.id || `tab_${activeWsId}_main`
+    };
+  } catch (e) {
+    console.error("Failed to get initial app state", e);
+    return null;
+  }
+}
 function getMachineKeyFilePath() {
   const userDataPath = require$$1.app.getPath("userData");
   return require$$1$1.join(userDataPath, "apposition_machine.key");
@@ -741,6 +757,7 @@ function initDbIpc() {
       console.error("[Profile Engine] Failed to wipe session data:", e);
     }
   });
+  require$$1.ipcMain.handle("db.getInitialAppState", () => getInitialAppState());
   require$$1.ipcMain.handle("db.getWorkspaces", () => getWorkspaces());
   require$$1.ipcMain.handle("db.createWorkspace", async (_, id, name) => {
     const isPremium = await checkPremiumStatus();
@@ -810,6 +827,10 @@ function initLicensingIpc() {
   require$$1.ipcMain.handle("licensing.checkPremium", () => checkPremiumStatus());
   require$$1.ipcMain.handle("licensing.isDev", () => isDevMode$1());
 }
+function getTargetWindow() {
+  const win = global.mainWindow || global.overlayWindow;
+  return win && !win.isDestroyed() ? win : null;
+}
 function configureViewAndSession(paneId, view, profileId) {
   let partitionString = void 0;
   let isEphemeral = false;
@@ -858,8 +879,9 @@ function configureViewAndSession(paneId, view, profileId) {
       const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(
         details.webContentsId ?? -1
       );
-      if (trackedPaneId && global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-        global.overlayWindow.webContents.send("view.network-error", {
+      const win = getTargetWindow();
+      if (trackedPaneId && win) {
+        win.webContents.send("view.network-error", {
           paneId: trackedPaneId,
           url: details.url,
           errorDescription: details.error,
@@ -873,8 +895,9 @@ function configureViewAndSession(paneId, view, profileId) {
   view.webContents.on(
     "console-message",
     (_event, level, message, line, sourceId) => {
-      if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-        global.overlayWindow.webContents.send("view.console-message", {
+      const win = getTargetWindow();
+      if (win) {
+        win.webContents.send("view.console-message", {
           paneId,
           level,
           message,
@@ -886,9 +909,10 @@ function configureViewAndSession(paneId, view, profileId) {
     }
   );
   view.webContents.on("focus", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.focus", { paneId });
-      global.overlayWindow.webContents.send("pane.focused", paneId);
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.focus", { paneId });
+      win.webContents.send("pane.focused", paneId);
     }
   });
   view.webContents.on("before-input-event", (event, input) => {
@@ -908,17 +932,19 @@ function configureViewAndSession(paneId, view, profileId) {
         isInputFocused: false,
         eventId: sharedId
       };
-      if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-        global.overlayWindow.webContents.send("forwarded-key", payload);
+      const win = getTargetWindow();
+      if (win) {
+        win.webContents.send("forwarded-key", payload);
       }
     }
   });
   const handleNav = (url) => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
+    const win = getTargetWindow();
+    if (win) {
       const title = view.webContents.getTitle() || url;
       const canGoBack = view.webContents.canGoBack();
       const canGoForward = view.webContents.canGoForward();
-      global.overlayWindow.webContents.send("view.navigated", {
+      win.webContents.send("view.navigated", {
         paneId,
         url,
         title,
@@ -930,8 +956,9 @@ function configureViewAndSession(paneId, view, profileId) {
   view.webContents.on("did-navigate", (_event, url) => handleNav(url));
   view.webContents.on("did-navigate-in-page", (_event, url) => handleNav(url));
   view.webContents.on("page-title-updated", (_event, title) => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.navigated", {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.navigated", {
         paneId,
         url: view.webContents.getURL(),
         title,
@@ -941,24 +968,27 @@ function configureViewAndSession(paneId, view, profileId) {
     }
   });
   view.webContents.on("media-started-playing", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.media-status", {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.media-status", {
         paneId,
         isPlaying: true
       });
     }
   });
   view.webContents.on("media-paused", () => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.media-status", {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.media-status", {
         paneId,
         isPlaying: false
       });
     }
   });
   view.webContents.on("render-process-gone", (_event, details) => {
-    if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-      global.overlayWindow.webContents.send("view.crashed", {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.crashed", {
         paneId,
         reason: details.reason,
         exitCode: details.exitCode
@@ -1043,6 +1073,14 @@ function updateViewProfile(paneId, newProfileId) {
   const newView = createOrUpdateView(paneId, currentUrl, newProfileId);
   if (bounds) {
     newView.setBounds(bounds);
+  }
+}
+function destroyAllViews() {
+  for (const paneId of Array.from(viewRegistry.activeViews.keys())) {
+    try {
+      destroyView(paneId);
+    } catch {
+    }
   }
 }
 function initViewLifecycleIpc() {
@@ -1472,6 +1510,7 @@ function createWindow() {
     }
   });
   global.mainWindow = mainWindow;
+  global.overlayWindow = mainWindow;
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     mainWindow.webContents.send("open-in-new-pane", url);
     return { action: "deny" };
@@ -17799,9 +17838,17 @@ if (!gotTheLock) {
     });
   });
   require$$1.app.on("will-quit", () => {
+    try {
+      destroyAllViews();
+    } catch {
+    }
     closeDb();
   });
   require$$1.app.on("window-all-closed", () => {
+    try {
+      destroyAllViews();
+    } catch {
+    }
     closeDb();
     require$$1.app.exit(0);
   });

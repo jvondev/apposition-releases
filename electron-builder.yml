@@ -29,14 +29,15 @@ win:
 
 nsis:
   oneClick: false
-  perMachine: true
-  allowElevation: true
+  perMachine: false
+  allowElevation: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
   runAfterFinish: true
   createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: "Apposition"
+  include: build/installer.nsh
   installerIcon: assets/icon.ico
   uninstallerIcon: assets/icon.ico
   installerHeaderIcon: assets/icon.ico

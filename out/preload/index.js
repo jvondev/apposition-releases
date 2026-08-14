@@ -9,6 +9,7 @@ const api = {
   minimizeWindow: () => electron.ipcRenderer.send("window.minimize"),
   maximizeWindow: () => electron.ipcRenderer.send("window.maximize"),
   closeWindow: () => electron.ipcRenderer.send("window.close"),
+  getInitialAppState: () => electron.ipcRenderer.invoke("db.getInitialAppState"),
   getWorkspaces: () => electron.ipcRenderer.invoke("db.getWorkspaces"),
   createWorkspace: (id, name) => electron.ipcRenderer.invoke("db.createWorkspace", id, name),
   updateWorkspace: (id, name) => electron.ipcRenderer.invoke("db.updateWorkspace", id, name),
