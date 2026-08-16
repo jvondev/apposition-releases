@@ -6,16 +6,16 @@ const require$$1$1 = require("path");
 const require$$1$2 = require("fs");
 const os = require("os");
 const crypto = require("crypto");
+const require$$4 = require("http");
 const require$$0 = require("constants");
 const require$$0$1 = require("stream");
-const require$$4 = require("util");
+const require$$4$1 = require("util");
 const require$$5 = require("assert");
 const require$$1$4 = require("child_process");
 const require$$0$2 = require("events");
 const require$$1$3 = require("tty");
 const require$$2 = require("url");
 const require$$14 = require("zlib");
-const require$$4$1 = require("http");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -325,6 +325,195 @@ function getInitialAppState() {
     return null;
   }
 }
+const ANTI_DETECTION_SCRIPT = `(function() {
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  } catch {}
+
+  try {
+    if (!navigator.plugins || navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client Executable' }
+        ]
+      });
+    }
+  } catch {}
+
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en']
+      });
+    }
+  } catch {}
+
+
+  try {
+    const ua = navigator.userAgent || '';
+    if (ua.includes('Electron') || ua.includes('Apposition')) {
+      const cleanUa = ua
+        .replace(/s+Electron/S+/gi, '')
+        .replace(/s+Appositionw*/S+/gi, '')
+        .replace(/()s+)S+s+(Chrome/)/, '$1$2')
+        .replace(/s{2,}/g, ' ')
+        .trim();
+      try {
+        Object.defineProperty(navigator, 'userAgent', {
+          get: () => cleanUa,
+          configurable: true,
+          enumerable: true
+        });
+      } catch {}
+      try {
+        Object.defineProperty(navigator, 'appVersion', {
+          get: () => cleanUa.replace(/^Mozilla//, ''),
+          configurable: true,
+          enumerable: true
+        });
+      } catch {}
+    }
+
+    const isGoogleAuth =
+      typeof location !== 'undefined' &&
+      (location.hostname === 'accounts.google.com' ||
+        location.hostname === 'accounts.youtube.com' ||
+        (location.hostname.includes('google.com') &&
+          (location.pathname.startsWith('/signin') ||
+            location.pathname.startsWith('/o/oauth2') ||
+            location.pathname.startsWith('/ServiceLogin') ||
+            location.pathname.startsWith('/AccountChooser') ||
+            location.pathname.startsWith('/v3/signin') ||
+            location.pathname.startsWith('/gsi/'))) ||
+        ua.includes('Firefox'));
+
+    if (isGoogleAuth) {
+      try {
+        Object.defineProperty(navigator, 'userAgentData', {
+          get: () => undefined,
+          configurable: true,
+          enumerable: false
+        });
+      } catch {}
+      return;
+    }
+
+    const isMac = ua.includes('Macintosh') || ua.includes('Mac OS X');
+    const isLinux = ua.includes('Linux');
+    const platform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
+    const chromeMatch = ua.match(/Chrome/([d.]+)/);
+    const majorVersion = chromeMatch ? chromeMatch[1].split('.')[0] : '144';
+    const brands = [
+      { brand: 'Google Chrome', version: majorVersion },
+      { brand: 'Chromium', version: majorVersion },
+      { brand: 'Not/A)Brand', version: '24' }
+    ];
+    if (!navigator.userAgentData || !navigator.userAgentData.brands || !navigator.userAgentData.brands.some(b => b.brand === 'Google Chrome')) {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: () => ({
+          brands: brands,
+          mobile: false,
+          platform: platform,
+          getHighEntropyValues: (hints) => Promise.resolve({
+            brands: brands,
+            mobile: false,
+            platform: platform,
+            platformVersion: isMac ? '15.0.0' : isLinux ? '6.5.0' : '10.0.0',
+            architecture: 'x86',
+            bitness: '64',
+            model: ''
+          })
+        }),
+        configurable: true
+      });
+    }
+  } catch {}
+})();`;
+const DEFAULT_CHROME_VERSION$1 = "144.0.7550.80";
+function getHostPlatformName() {
+  if (typeof process !== "undefined" && process.platform) {
+    if (process.platform === "darwin") return "macOS";
+    if (process.platform === "linux") return "Linux";
+  }
+  return "Windows";
+}
+function getDefaultChromeUserAgent() {
+  const chromeVersion = typeof process !== "undefined" && process.versions?.chrome && Number(process.versions.chrome.split(".")[0]) >= 144 ? process.versions.chrome : DEFAULT_CHROME_VERSION$1;
+  const platform = getHostPlatformName();
+  if (platform === "macOS") {
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  }
+  if (platform === "Linux") {
+    return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  }
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+}
+function generateClientHints$1(chromeVersion = DEFAULT_CHROME_VERSION$1, platform = getHostPlatformName()) {
+  const major = chromeVersion.split(".")[0] || "144";
+  const brand = "Google Chrome";
+  const secChUa = `"${brand}";v="${major}", "Chromium";v="${major}", "Not/A)Brand";v="24"`;
+  const secChUaFull = `"${brand}";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not/A)Brand";v="24.0.0.0"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+({
+  userAgent: getDefaultChromeUserAgent(),
+  clientHints: generateClientHints$1()
+});
+const activeOAuthPopupIds = /* @__PURE__ */ new Set();
+function registerOAuthPopup(webContentsId) {
+  activeOAuthPopupIds.add(webContentsId);
+}
+function unregisterOAuthPopup(webContentsId) {
+  activeOAuthPopupIds.delete(webContentsId);
+}
+const IPC_CHANNELS = {
+  DB: {
+    GET_INITIAL_STATE: "db.getInitialAppState",
+    GET_WORKSPACES: "db.getWorkspaces",
+    CREATE_WORKSPACE: "db.createWorkspace",
+    UPDATE_WORKSPACE: "db.updateWorkspace",
+    DELETE_WORKSPACE: "db.deleteWorkspace",
+    SET_WORKSPACE_DEFAULT_PROFILE: "db.setWorkspaceDefaultProfile",
+    SET_TAB_DEFAULT_PROFILE: "db.setTabDefaultProfile",
+    UPDATE_PANE_PROFILES_FOR_WORKSPACE: "db.updatePaneProfilesForWorkspace",
+    UPDATE_PANE_PROFILES_FOR_TAB: "db.updatePaneProfilesForTab",
+    GET_TABS: "db.getTabs",
+    CREATE_TAB: "db.createTab",
+    UPDATE_TAB: "db.updateTab",
+    DELETE_TAB: "db.deleteTab",
+    MOVE_NODE_TO_TAB: "db.moveNodeToTab",
+    GET_PROFILES: "db.getProfiles",
+    CREATE_PROFILE: "db.createProfile",
+    UPDATE_PROFILE: "db.updateProfile",
+    DELETE_PROFILE: "db.deleteProfile",
+    GET_NODES: "db.getNodes",
+    SAVE_NODE: "db.saveNode",
+    DELETE_NODE: "db.deleteNode",
+    SAVE_TAB_LAYOUT: "db.saveTabLayout"
+  },
+  LICENSING: {
+    ACTIVATE: "licensing.activate",
+    VALIDATE: "licensing.validate",
+    GET_KEY: "licensing.getKey",
+    GET_STATE: "licensing.getState",
+    CHECK_PREMIUM: "licensing.checkPremium",
+    IS_DEV: "licensing.isDev"
+  },
+  AUTH: {
+    CLEAR_SITE_DATA: "auth.clearSiteData",
+    START_RELAY: "auth.startRelay",
+    OPEN_GOOGLE_AUTH: "auth.openGoogleAuth",
+    EXPORT_VAULT: "vault.exportSession",
+    IMPORT_VAULT: "vault.importSession"
+  }
+};
 function getMachineKeyFilePath() {
   const userDataPath = require$$1.app.getPath("userData");
   return require$$1$1.join(userDataPath, "apposition_machine.key");
@@ -696,12 +885,12 @@ function configureAllSessions() {
   }
 }
 function initDbIpc() {
-  require$$1.ipcMain.handle("db.getProfiles", () => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_PROFILES, () => {
     configureAllSessions();
     return getProfiles();
   });
   require$$1.ipcMain.handle(
-    "db.createProfile",
+    IPC_CHANNELS.DB.CREATE_PROFILE,
     async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       const isPremium = await checkPremiumStatus();
       if (!isPremium) {
@@ -716,14 +905,14 @@ function initDbIpc() {
     }
   );
   require$$1.ipcMain.handle(
-    "db.updateProfile",
+    IPC_CHANNELS.DB.UPDATE_PROFILE,
     (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
       configureSessionForProfile(id);
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
-  require$$1.ipcMain.handle("db.deleteProfile", async (_, id) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_PROFILE, async (_, id) => {
     for (const [paneId, profileId] of viewProfile.entries()) {
       if (profileId === id) {
         const view = activeViews.get(paneId);
@@ -750,16 +939,15 @@ function initDbIpc() {
     }
     deleteProfile(id);
     try {
-      const { session: session2 } = require("electron");
-      const ses = session2.fromPartition(isEphemeral ? id : `persist:${id}`);
+      const ses = require$$1.session.fromPartition(isEphemeral ? id : `persist:${id}`);
       await ses.clearStorageData();
     } catch (e) {
       console.error("[Profile Engine] Failed to wipe session data:", e);
     }
   });
-  require$$1.ipcMain.handle("db.getInitialAppState", () => getInitialAppState());
-  require$$1.ipcMain.handle("db.getWorkspaces", () => getWorkspaces());
-  require$$1.ipcMain.handle("db.createWorkspace", async (_, id, name) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const workspaces = getWorkspaces();
@@ -769,29 +957,29 @@ function initDbIpc() {
     }
     createWorkspace(id, name);
   });
-  require$$1.ipcMain.handle("db.updateWorkspace", (_, id, name) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name) => {
     updateWorkspace(id, name);
   });
-  require$$1.ipcMain.handle("db.deleteWorkspace", (_, id) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
     deleteWorkspace(id);
   });
-  require$$1.ipcMain.handle("db.setWorkspaceDefaultProfile", (_, id, profileId) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, (_, id, profileId) => {
     setWorkspaceDefaultProfile(id, profileId);
   });
-  require$$1.ipcMain.handle("db.setTabDefaultProfile", (_, id, profileId) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, (_, id, profileId) => {
     setTabDefaultProfile(id, profileId);
   });
   require$$1.ipcMain.handle(
-    "db.updatePaneProfilesForWorkspace",
+    IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE,
     (_, workspaceId, profileId) => {
       updatePaneProfilesForWorkspace(workspaceId, profileId);
     }
   );
-  require$$1.ipcMain.handle("db.updatePaneProfilesForTab", (_, tabId, profileId) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, (_, tabId, profileId) => {
     updatePaneProfilesForTab(tabId, profileId);
   });
-  require$$1.ipcMain.handle("db.getTabs", (_, workspaceId) => getTabs(workspaceId));
-  require$$1.ipcMain.handle("db.createTab", async (_, id, workspaceId, name) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_TABS, (_, workspaceId) => getTabs(workspaceId));
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_TAB, async (_, id, workspaceId, name) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const tabs = getTabs(workspaceId);
@@ -802,34 +990,692 @@ function initDbIpc() {
     createTab(id, workspaceId, name);
     return { id, workspaceId, name };
   });
-  require$$1.ipcMain.handle("db.updateTab", (_, id, name) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name) => {
     updateTab(id, name);
   });
-  require$$1.ipcMain.handle("db.deleteTab", (_, id) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
     deleteTab(id);
   });
-  require$$1.ipcMain.handle("db.moveNodeToTab", (_, nodeId, targetTabId) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, (_, nodeId, targetTabId) => {
     moveNodeToTab(nodeId, targetTabId);
   });
-  require$$1.ipcMain.handle("db.getNodes", (_, tabId) => getNodesForTab(tabId));
-  require$$1.ipcMain.on("db.saveNode", (event, node2) => saveNode(node2));
-  require$$1.ipcMain.on("db.deleteNode", (event, id) => deleteNode(id));
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_NODES, (_, tabId) => getNodesForTab(tabId));
+  require$$1.ipcMain.on(IPC_CHANNELS.DB.SAVE_NODE, (_, node2) => saveNode(node2));
+  require$$1.ipcMain.on(IPC_CHANNELS.DB.DELETE_NODE, (_, id) => deleteNode(id));
   require$$1.ipcMain.on(
-    "db.saveTabLayout",
-    (event, tabId, layoutState) => saveTabLayout(tabId, layoutState)
+    IPC_CHANNELS.DB.SAVE_TAB_LAYOUT,
+    (_, tabId, layoutState) => saveTabLayout(tabId, layoutState)
   );
 }
 function initLicensingIpc() {
-  require$$1.ipcMain.handle("licensing.activate", (_, key) => activateLicenseKey(key));
-  require$$1.ipcMain.handle("licensing.validate", (_, key) => validateLicenseKey(key));
-  require$$1.ipcMain.handle("licensing.getKey", () => getSavedLicenseKey());
-  require$$1.ipcMain.handle("licensing.getState", () => getSavedLicenseState());
-  require$$1.ipcMain.handle("licensing.checkPremium", () => checkPremiumStatus());
-  require$$1.ipcMain.handle("licensing.isDev", () => isDevMode$1());
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.ACTIVATE,
+    (_, key) => activateLicenseKey(key)
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.VALIDATE,
+    (_, key) => validateLicenseKey(key)
+  );
+  require$$1.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.GET_STATE,
+    () => getSavedLicenseState()
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.CHECK_PREMIUM,
+    () => checkPremiumStatus()
+  );
+  require$$1.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
+}
+const ALGORITHM = "aes-256-gcm";
+const KEY_LEN = 32;
+const SALT_LEN = 16;
+const IV_LEN = 12;
+const ITERATIONS = 1e5;
+function encryptSessionPayload(payload, passphrase) {
+  if (!passphrase || passphrase.length < 6) {
+    throw new Error("Passphrase must be at least 6 characters long");
+  }
+  const salt = crypto.randomBytes(SALT_LEN);
+  const iv = crypto.randomBytes(IV_LEN);
+  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+  const jsonStr = JSON.stringify(payload);
+  const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const bundle = {
+    version: 1,
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: tag.toString("base64"),
+    ciphertext: encrypted.toString("base64")
+  };
+  return JSON.stringify(bundle);
+}
+function decryptSessionPayload(bundleJson, passphrase) {
+  let bundle;
+  try {
+    bundle = JSON.parse(bundleJson);
+  } catch {
+    throw new Error("Invalid session bundle format");
+  }
+  if (bundle.version !== 1 || !bundle.salt || !bundle.iv || !bundle.tag || !bundle.ciphertext) {
+    throw new Error("Corrupted or unsupported session bundle");
+  }
+  const salt = Buffer.from(bundle.salt, "base64");
+  const iv = Buffer.from(bundle.iv, "base64");
+  const tag = Buffer.from(bundle.tag, "base64");
+  const ciphertext = Buffer.from(bundle.ciphertext, "base64");
+  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(tag);
+  try {
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(decrypted.toString("utf8"));
+  } catch {
+    throw new Error("Decryption failed: Incorrect passphrase or corrupted data");
+  }
+}
+function generateCodeVerifier(length = 64) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const bytes = crypto.randomBytes(length);
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += chars[bytes[i] % chars.length];
+  }
+  return result;
+}
+function generateCodeChallenge(verifier) {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+function generatePkcePair() {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+  return {
+    codeVerifier,
+    codeChallenge,
+    codeChallengeMethod: "S256"
+  };
+}
+function createSignedState(payload, secret) {
+  const json2 = JSON.stringify({ ...payload, ts: Date.now() });
+  const data = Buffer.from(json2).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+  return `${data}.${signature}`;
+}
+function verifySignedState(state, secret) {
+  if (!state || !state.includes(".")) return null;
+  const [data, signature] = state.split(".");
+  const expectedSig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+  if (signature !== expectedSig) return null;
+  try {
+    const json2 = Buffer.from(data, "base64url").toString("utf8");
+    return JSON.parse(json2);
+  } catch {
+    return null;
+  }
+}
+const activeRelays = /* @__PURE__ */ new Map();
+const RELAY_SECRET = "apposition-relay-secret-v1";
+const TIMEOUT_MS = 3e5;
+function startAuthRelay(targetAuthUrl, profileId = "main", paneId) {
+  return new Promise((resolve) => {
+    try {
+      const pkce = generatePkcePair();
+      const server = require$$4.createServer(async (req, res) => {
+        try {
+          const reqUrl = new URL(req.url || "/", `http://127.0.0.1:${server.address()}`);
+          if (reqUrl.pathname === "/callback" || reqUrl.pathname === "/oauth/callback") {
+            const state = reqUrl.searchParams.get("state");
+            const code = reqUrl.searchParams.get("code");
+            const token = reqUrl.searchParams.get("token") || reqUrl.searchParams.get("access_token");
+            if (!state || !verifySignedState(state, RELAY_SECRET)) {
+              res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+              res.end("<h3>Authentication Failed: Invalid or expired state token.</h3>");
+              return;
+            }
+            const relay = activeRelays.get(state);
+            if (relay) {
+              const partition = relay.profileId === "main" ? "persist:main" : `persist:${relay.profileId}`;
+              const targetSession = require$$1.session.fromPartition(partition);
+              if (token) {
+                try {
+                  const targetOrigin = new URL(targetAuthUrl).origin;
+                  await targetSession.cookies.set({
+                    url: targetOrigin,
+                    name: "auth_token",
+                    value: token,
+                    secure: true,
+                    httpOnly: true
+                  });
+                } catch {
+                }
+              }
+              if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+                global.mainWindow.webContents.send("app.auth-completed", {
+                  profileId: relay.profileId,
+                  paneId: relay.paneId,
+                  code,
+                  token,
+                  success: true
+                });
+              }
+              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+              res.end(`
+                <!DOCTYPE html>
+                <html>
+                  <head>
+                    <title>Authentication Successful</title>
+                    <style>
+                      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #FAF9F6; color: #121212; }
+                      .card { background: white; padding: 32px 40px; border-radius: 12px; border: 1px solid #E5E5E0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; max-width: 380px; }
+                      h2 { font-size: 18px; margin: 0 0 8px 0; font-weight: 600; }
+                      p { font-size: 13px; color: #78716C; margin: 0; line-height: 1.5; }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="card">
+                      <h2>Authentication Completed</h2>
+                      <p>You can close this tab and return to Apposition. Your workspace is now authenticated.</p>
+                    </div>
+                    <script>setTimeout(() => window.close(), 1500);<\/script>
+                  </body>
+                </html>
+              `);
+              cleanupRelay(state);
+            }
+          } else {
+            res.writeHead(404);
+            res.end();
+          }
+        } catch {
+          res.writeHead(500);
+          res.end();
+        }
+      });
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const state = createSignedState({ profileId, paneId, port }, RELAY_SECRET);
+        const relaySession = {
+          port,
+          state,
+          codeVerifier: pkce.codeVerifier,
+          profileId,
+          paneId,
+          server,
+          createdAt: Date.now()
+        };
+        activeRelays.set(state, relaySession);
+        setTimeout(() => cleanupRelay(state), TIMEOUT_MS);
+        const parsedUrl = new URL(targetAuthUrl);
+        parsedUrl.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
+        parsedUrl.searchParams.set("state", state);
+        parsedUrl.searchParams.set("code_challenge", pkce.codeChallenge);
+        parsedUrl.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
+        const finalAuthUrl = parsedUrl.toString();
+        require$$1.shell.openExternal(finalAuthUrl);
+        resolve({ success: true, port, authUrl: finalAuthUrl });
+      });
+      server.on("error", (err) => {
+        resolve({ success: false, port: 0, authUrl: "", error: err.message });
+      });
+    } catch (err) {
+      resolve({ success: false, port: 0, authUrl: "", error: err.message });
+    }
+  });
+}
+function cleanupRelay(state) {
+  const relay = activeRelays.get(state);
+  if (relay) {
+    activeRelays.delete(state);
+    try {
+      relay.server.close();
+    } catch {
+    }
+  }
+}
+const DEFAULT_CHROME_VERSION = "144.0.7550.80";
+const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
+const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
+function cleanUserAgent(ua) {
+  if (!ua || typeof ua !== "string" || !ua.trim()) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const cleaned = ua.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
+}
+function isGoogleAuthUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.includes("accounts.google.com") || lower.includes("google.com/gsi/");
+  }
+}
+function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
+  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
+  const major = cleanVersion.split(".")[0] || "144";
+  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
+  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
+  const result = { ...headers };
+  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
+    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+    result[uaKey2] = FIREFOX_AUTH_UA;
+    for (const key of Object.keys(result)) {
+      if (key.toLowerCase().startsWith("sec-ch-ua")) {
+        delete result[key];
+      }
+    }
+    return result;
+  }
+  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+  result[uaKey] = cleanUserAgent(result[uaKey]);
+  const clientHintKeys = /* @__PURE__ */ new Set([
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-ch-ua-full-version-list"
+  ]);
+  for (const key of Object.keys(result)) {
+    const lower = key.toLowerCase();
+    if (clientHintKeys.has(lower) && lower !== key) {
+      delete result[key];
+    }
+  }
+  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
+  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
+  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
+  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
+  return result;
+}
+let activeAuthWindow = null;
+function openGoogleAuthModal(options) {
+  try {
+    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+      activeAuthWindow.focus();
+      return { success: true };
+    }
+    const { url, profileId = "main", paneId, returnUrl, parentWebContentsId } = options;
+    const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
+    const authWin = new require$$1.BrowserWindow({
+      width: 520,
+      height: 680,
+      center: true,
+      title: "Google Sign-In",
+      titleBarStyle: "hidden",
+      titleBarOverlay: {
+        color: "#fafaf9",
+        symbolColor: "#121212",
+        height: 36
+      },
+      backgroundColor: "#FFFFFF",
+      show: false,
+      icon: require$$1$1.join(
+        __dirname,
+        process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
+      ),
+      webPreferences: {
+        partition,
+        preload: void 0,
+        sandbox: true,
+        contextIsolation: true
+      }
+    });
+    activeAuthWindow = authWin;
+    const authWebContentsId = authWin.webContents.id;
+    registerOAuthPopup(authWebContentsId);
+    try {
+      authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+    } catch {
+    }
+    authWin.once("ready-to-show", () => {
+      if (!authWin.isDestroyed()) authWin.show();
+    });
+    const notifyAndClose = () => {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.auth-completed", {
+          profileId,
+          paneId,
+          returnUrl,
+          success: true
+        });
+      }
+      if (parentWebContentsId) {
+        const parentWc = require$$1.webContents.fromId(parentWebContentsId);
+        if (parentWc && !parentWc.isDestroyed()) {
+          try {
+            if (returnUrl) {
+              parentWc.loadURL(returnUrl);
+            } else {
+              parentWc.reload();
+            }
+          } catch {
+          }
+        }
+      }
+      setTimeout(() => {
+        if (!authWin.isDestroyed()) authWin.close();
+      }, 500);
+    };
+    authWin.webContents.on("did-navigate", (_e, navUrl) => {
+      const lower = (navUrl || "").toLowerCase();
+      const isAuthCompleted = lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success") || returnUrl && lower.startsWith(returnUrl.toLowerCase()) || !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2");
+      if (isAuthCompleted && !lower.includes("accounts.google.com/v3/signin")) {
+        notifyAndClose();
+      }
+    });
+    authWin.once("closed", () => {
+      unregisterOAuthPopup(authWebContentsId);
+      if (activeAuthWindow === authWin) {
+        activeAuthWindow = null;
+      }
+    });
+    authWin.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to open Google Auth modal:", err);
+    return { success: false, error: err.message };
+  }
+}
+function initAuthIpc() {
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
+    async (_event, origin, profileId) => {
+      try {
+        if (!origin) return { success: false, error: "Missing origin" };
+        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
+        const targetSession = require$$1.session.fromPartition(partition);
+        await targetSession.clearStorageData({
+          origin,
+          storages: [
+            "cookies",
+            "localstorage",
+            "serviceworkers",
+            "cachestorage"
+          ]
+        });
+        return { success: true };
+      } catch (err) {
+        console.error("Failed to clear site data:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.AUTH.START_RELAY,
+    async (_event, targetUrl, profileId, paneId) => {
+      if (!targetUrl) return { success: false, error: "Missing URL" };
+      return startAuthRelay(targetUrl, profileId || "main", paneId);
+    }
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH,
+    async (_event, options) => {
+      return openGoogleAuthModal(options);
+    }
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.AUTH.EXPORT_VAULT,
+    async (_event, profileId, secretKey) => {
+      try {
+        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
+        const targetSession = require$$1.session.fromPartition(partition);
+        const cookies = await targetSession.cookies.get({});
+        const encrypted = encryptSessionPayload(
+          { profileId, cookies, exportedAt: Date.now() },
+          secretKey
+        );
+        return { success: true, payload: encrypted };
+      } catch (err) {
+        console.error("Failed to export session vault:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  require$$1.ipcMain.handle(
+    IPC_CHANNELS.AUTH.IMPORT_VAULT,
+    async (_event, encryptedPayload, secretKey) => {
+      try {
+        const decrypted = decryptSessionPayload(encryptedPayload, secretKey);
+        if (!decrypted || !decrypted.profileId || !Array.isArray(decrypted.cookies)) {
+          return { success: false, error: "Invalid session payload or key" };
+        }
+        const partition = decrypted.profileId === "main" ? "persist:main" : `persist:${decrypted.profileId}`;
+        const targetSession = require$$1.session.fromPartition(partition);
+        for (const cookie of decrypted.cookies) {
+          const scheme = cookie.secure ? "https" : "http";
+          const domain = cookie.domain?.startsWith(".") ? cookie.domain.slice(1) : cookie.domain;
+          const url = `${scheme}://${domain}${cookie.path || "/"}`;
+          try {
+            await targetSession.cookies.set({
+              url,
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path,
+              secure: cookie.secure,
+              httpOnly: cookie.httpOnly,
+              expirationDate: cookie.expirationDate,
+              sameSite: cookie.sameSite
+            });
+          } catch {
+          }
+        }
+        return { success: true, profileId: decrypted.profileId };
+      } catch (err) {
+        console.error("Failed to import session vault:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+}
+const OAUTH_DOMAINS = [
+  "accounts.google.com",
+  "google.com/gsi",
+  "firebaseapp.com",
+  "github.com/login/oauth",
+  "login.microsoftonline.com",
+  "appleid.apple.com",
+  "discord.com/oauth2",
+  "twitter.com/i/oauth2",
+  "x.com/i/oauth2",
+  "auth0.com",
+  "okta.com",
+  "id.atlassian.com"
+];
+const SSO_KEYWORDS = ["login", "signin", "auth", "sso", "oauth"];
+function isOAuthOrAuthEndpoint(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return OAUTH_DOMAINS.some((domain) => lower.includes(domain)) || SSO_KEYWORDS.some((kw) => lower.includes(kw));
+}
+function isGoogleOAuthEndpoint(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return lower.includes("accounts.google.com") || lower.includes("google.com/gsi") || lower.includes("firebaseapp.com");
+}
+function evaluateWindowOpenRequest(url, disposition, features) {
+  const urlLower = (url || "").toLowerCase();
+  const isBlank = urlLower === "about:blank" || urlLower === "about:blank#blocked";
+  const isPopup = Boolean(features) && (features.includes("width=") || features.includes("height="));
+  const isGoogle = isGoogleOAuthEndpoint(urlLower);
+  const isSSO = isOAuthOrAuthEndpoint(urlLower);
+  if (isGoogle) {
+    return {
+      type: "SYSTEM_AUTH_RELAY",
+      url
+    };
+  }
+  if (disposition === "new-window" || isPopup || isBlank) {
+    return {
+      type: "ALLOW_OAUTH_POPUP",
+      width: 600,
+      height: 720,
+      autoHideMenuBar: true,
+      sandbox: true,
+      contextIsolation: true,
+      isGoogle: false
+    };
+  }
+  if (isSSO) {
+    return {
+      type: "NAVIGATE_CURRENT_PANE",
+      url
+    };
+  }
+  return {
+    type: "OPEN_SYSTEM_BROWSER",
+    url
+  };
+}
+function configureWebAuthnForSession(sess) {
+  sess.setDevicePermissionHandler(() => false);
+  const selectHidHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(void 0);
+  };
+  const selectAccountHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(null);
+  };
+  sess.removeListener("select-hid-device", selectHidHandler);
+  sess.on("select-hid-device", selectHidHandler);
+  sess.removeListener("select-webauthn-account", selectAccountHandler);
+  sess.on("select-webauthn-account", selectAccountHandler);
+}
+function isProxyFailureError(error2) {
+  if (!error2) return false;
+  const proxyErrors = [
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_PROXY_AUTH_REQUESTED",
+    "ERR_SOCKS_CONNECTION_FAILED",
+    "ERR_PROXY_CERTIFICATE_INVALID",
+    "ERR_MANDATORY_PROXY_CONFIGURATION_FAILED"
+  ];
+  return proxyErrors.some((code) => error2.includes(code));
+}
+function configureSessionProxy(ses, proxyServer, profileId) {
+  if (!proxyServer || !proxyServer.trim()) {
+    ses.setProxy({}).catch(() => {
+    });
+    return;
+  }
+  const sanitizedProxy = proxyServer.trim();
+  ses.setProxy({
+    proxyRules: sanitizedProxy,
+    proxyBypassRules: "<-loopback>"
+  }).catch((err) => {
+    console.error(`Failed to configure proxy for profile ${profileId}:`, err);
+  });
 }
 function getTargetWindow() {
   const win = global.mainWindow || global.overlayWindow;
   return win && !win.isDestroyed() ? win : null;
+}
+function bindViewEvents(paneId, view) {
+  view.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.console-message", {
+        paneId,
+        level,
+        message,
+        line,
+        sourceId,
+        timestamp: Date.now()
+      });
+    }
+  });
+  view.webContents.on("focus", () => {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.focus", { paneId });
+      win.webContents.send("pane.focused", paneId);
+    }
+  });
+  view.webContents.on("before-input-event", (event, input) => {
+    if (input.type === "keyDown") {
+      const isReload = (input.control || input.meta) && input.key.toLowerCase() === "r" || input.key === "F5";
+      if (input.key === "F12" || input.alt && input.code === "Space" || isReload) {
+        event.preventDefault();
+      }
+      if (isReload && global.mainWindow && view.webContents.id !== global.mainWindow.webContents.id) {
+        if (input.shift) {
+          view.webContents.reloadIgnoringCache();
+        } else {
+          view.webContents.reload();
+        }
+        if (!global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("pane.reloaded-wc", view.webContents.id);
+        }
+        return;
+      }
+      const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
+      const payload = {
+        key: input.key,
+        code: input.code,
+        control: input.control,
+        meta: input.meta,
+        shift: input.shift,
+        alt: input.alt,
+        isAutoRepeat: input.isAutoRepeat,
+        isInputFocused: false,
+        eventId: sharedId
+      };
+      const win = getTargetWindow();
+      if (win) win.webContents.send("forwarded-key", payload);
+    }
+  });
+  const sendNav = (url) => {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.navigated", {
+        paneId,
+        url,
+        title: view.webContents.getTitle() || url,
+        canGoBack: view.webContents.canGoBack(),
+        canGoForward: view.webContents.canGoForward()
+      });
+    }
+  };
+  view.webContents.on("did-navigate", (_e, url) => sendNav(url));
+  view.webContents.on("did-navigate-in-page", (_e, url) => sendNav(url));
+  view.webContents.on("page-title-updated", () => sendNav(view.webContents.getURL()));
+  view.webContents.on("media-started-playing", () => {
+    getTargetWindow()?.webContents.send("view.media-status", { paneId, isPlaying: true });
+  });
+  view.webContents.on("media-paused", () => {
+    getTargetWindow()?.webContents.send("view.media-status", { paneId, isPlaying: false });
+  });
+  view.webContents.on("context-menu", (_e, params) => {
+    getTargetWindow()?.webContents.send("view.context-menu", {
+      paneId,
+      x: params.x,
+      y: params.y,
+      linkURL: params.linkURL,
+      srcURL: params.srcURL
+    });
+  });
+  view.webContents.on("render-process-gone", (_e, details) => {
+    getTargetWindow()?.webContents.send("view.crashed", {
+      paneId,
+      reason: details.reason,
+      exitCode: details.exitCode
+    });
+  });
 }
 function configureViewAndSession(paneId, view, profileId) {
   let partitionString = void 0;
@@ -850,41 +1696,47 @@ function configureViewAndSession(paneId, view, profileId) {
     partitionString = isEphemeral ? profileId : `persist:${profileId}`;
   }
   const ses = partitionString ? require$$1.session.fromPartition(partitionString) : require$$1.session.defaultSession;
-  if (isEphemeral) {
-    ses.clearCache().catch(() => {
-    });
-  }
-  if (proxyServer) {
-    ses.setProxy({ proxyRules: proxyServer }).catch((e) => {
-      console.error(`Failed to set proxy for profile ${profileId}:`, e);
-    });
-  } else {
-    ses.setProxy({}).catch(() => {
-    });
-  }
-  if (userAgent && userAgent.trim()) {
-    ses.setUserAgent(userAgent.trim());
-  } else {
-    ses.setUserAgent(require$$1.app.userAgentFallback);
-  }
-  ses.setPermissionRequestHandler(
-    (_webContents, permission, callback) => {
-      const allowed = ["notifications", "geolocation", "media", "screen"];
-      callback(allowed.includes(permission));
+  if (isEphemeral) ses.clearCache().catch(() => {
+  });
+  configureSessionProxy(ses, proxyServer, profileId);
+  ses.setUserAgent(userAgent && userAgent.trim() ? userAgent.trim() : require$$1.app.userAgentFallback);
+  ses.setPermissionRequestHandler((_wc, permission, callback) => {
+    const allowed = [
+      "notifications",
+      "geolocation",
+      "media",
+      "screen",
+      "persistent-storage",
+      "clipboard-read",
+      "clipboard-sanitized-write",
+      "fullscreen",
+      "pointerLock"
+    ];
+    callback(allowed.includes(permission));
+  });
+  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
+    if (permission === "private-network-access" || permission === "local-network-access") {
+      if (!requestingOrigin) return false;
+      try {
+        const url = new URL(requestingOrigin);
+        return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+      } catch {
+        return false;
+      }
     }
-  );
+    return true;
+  });
   if (!ses.__networkErrorTrackingBound) {
     ses.__networkErrorTrackingBound = true;
     ses.webRequest.onErrorOccurred((details) => {
-      const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(
-        details.webContentsId ?? -1
-      );
+      const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(details.webContentsId ?? -1);
       const win = getTargetWindow();
       if (trackedPaneId && win) {
         win.webContents.send("view.network-error", {
           paneId: trackedPaneId,
           url: details.url,
           errorDescription: details.error,
+          isProxyFailure: isProxyFailureError(details.error),
           errorCode: 0,
           isMainFrame: details.resourceType === "mainFrame",
           timestamp: Date.now()
@@ -892,109 +1744,7 @@ function configureViewAndSession(paneId, view, profileId) {
       }
     });
   }
-  view.webContents.on(
-    "console-message",
-    (_event, level, message, line, sourceId) => {
-      const win = getTargetWindow();
-      if (win) {
-        win.webContents.send("view.console-message", {
-          paneId,
-          level,
-          message,
-          line,
-          sourceId,
-          timestamp: Date.now()
-        });
-      }
-    }
-  );
-  view.webContents.on("focus", () => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.focus", { paneId });
-      win.webContents.send("pane.focused", paneId);
-    }
-  });
-  view.webContents.on("before-input-event", (event, input) => {
-    if (input.type === "keyDown") {
-      if (input.key === "F12" || input.alt && input.code === "Space") {
-        event.preventDefault();
-      }
-      const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-      const payload = {
-        key: input.key,
-        code: input.code,
-        control: input.control,
-        meta: input.meta,
-        shift: input.shift,
-        alt: input.alt,
-        isAutoRepeat: input.isAutoRepeat,
-        isInputFocused: false,
-        eventId: sharedId
-      };
-      const win = getTargetWindow();
-      if (win) {
-        win.webContents.send("forwarded-key", payload);
-      }
-    }
-  });
-  const handleNav = (url) => {
-    const win = getTargetWindow();
-    if (win) {
-      const title = view.webContents.getTitle() || url;
-      const canGoBack = view.webContents.canGoBack();
-      const canGoForward = view.webContents.canGoForward();
-      win.webContents.send("view.navigated", {
-        paneId,
-        url,
-        title,
-        canGoBack,
-        canGoForward
-      });
-    }
-  };
-  view.webContents.on("did-navigate", (_event, url) => handleNav(url));
-  view.webContents.on("did-navigate-in-page", (_event, url) => handleNav(url));
-  view.webContents.on("page-title-updated", (_event, title) => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.navigated", {
-        paneId,
-        url: view.webContents.getURL(),
-        title,
-        canGoBack: view.webContents.canGoBack(),
-        canGoForward: view.webContents.canGoForward()
-      });
-    }
-  });
-  view.webContents.on("media-started-playing", () => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.media-status", {
-        paneId,
-        isPlaying: true
-      });
-    }
-  });
-  view.webContents.on("media-paused", () => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.media-status", {
-        paneId,
-        isPlaying: false
-      });
-    }
-  });
-  view.webContents.on("render-process-gone", (_event, details) => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.crashed", {
-        paneId,
-        reason: details.reason,
-        exitCode: details.exitCode
-      });
-    }
-  });
+  bindViewEvents(paneId, view);
 }
 function createOrUpdateView(paneId, url, profileId = "main") {
   const existing = viewRegistry.getView(paneId);
@@ -1030,6 +1780,7 @@ function createOrUpdateView(paneId, url, profileId = "main") {
     global.mainWindow.contentView.addChildView(view);
   }
   view.setBackgroundColor("#FFFFFF");
+  view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
   configureViewAndSession(paneId, view, profileId);
   if (url) {
     view.webContents.loadURL(url);
@@ -1234,6 +1985,11 @@ function initCaptureIpc() {
   );
 }
 function initViewIpc() {
+  require$$1.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
+    if (paneId && typeof wcId === "number") {
+      viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
+    }
+  });
   require$$1.ipcMain.on("view.reload", (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
@@ -1587,35 +2343,134 @@ function initWindowManagerIpc() {
   });
   initTearWindowIpc();
 }
+const patchedSessions = /* @__PURE__ */ new WeakSet();
+function configureSessionSecurity(session) {
+  if (!session || patchedSessions.has(session)) return;
+  patchedSessions.add(session);
+  const chromeVersion = process.versions.chrome || "144.0.7550.80";
+  const clientHints = generateClientHints(chromeVersion, "Windows");
+  session.setUserAgent(DEFAULT_DESKTOP_UA);
+  configureWebAuthnForSession(session);
+  session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    if (permission === "private-network-access" || permission === "local-network-access") {
+      if (!requestingOrigin) return false;
+      try {
+        const url = new URL(requestingOrigin);
+        return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  });
+  try {
+    session.cookies.on("changed", (_event, cookie, cause) => {
+      if (cause === "explicit" || cause === "overwrite") {
+        if (cookie.name.includes("token") || cookie.name.includes("session") || cookie.name.includes("auth") || cookie.name === "d" || cookie.name === "SID") {
+          session.cookies.flushStore().catch(() => {
+          });
+        }
+      }
+    });
+  } catch {
+  }
+  session.webRequest.onBeforeSendHeaders(
+    { urls: ["https://*/*", "http://*/*"] },
+    (details, callback) => {
+      const sanitized = sanitizeRequestHeaders(
+        details.requestHeaders,
+        clientHints,
+        details.url
+      );
+      callback({ requestHeaders: sanitized });
+    }
+  );
+}
 function initSessionSecurity() {
-  const patchedSessions = /* @__PURE__ */ new WeakSet();
+  if (require$$1.session.defaultSession) {
+    configureSessionSecurity(require$$1.session.defaultSession);
+  }
+  require$$1.app.on("session-created", (session) => {
+    configureSessionSecurity(session);
+  });
+  require$$1.app.on("browser-window-created", (_, popupWin) => {
+    if (popupWin !== global.mainWindow) {
+      const watchdog = setTimeout(() => {
+        if (!popupWin.isDestroyed()) popupWin.close();
+      }, 3e5);
+      popupWin.once("closed", () => clearTimeout(watchdog));
+      popupWin.webContents.on("will-navigate", (_e, navUrl) => {
+        if (isGoogleAuthUrl(navUrl)) {
+          popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+        }
+      });
+      popupWin.webContents.on("did-navigate", (_e, navUrl) => {
+        if (isGoogleAuthUrl(navUrl)) {
+          popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+        }
+        popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+        });
+        const lower = (navUrl || "").toLowerCase();
+        if (lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success")) {
+          setTimeout(() => {
+            if (!popupWin.isDestroyed()) popupWin.close();
+          }, 300);
+        }
+      });
+      popupWin.webContents.on("dom-ready", () => {
+        popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+        });
+      });
+    }
+  });
   require$$1.app.on("web-contents-created", (_, webContents) => {
-    console.log(
-      `[DEBUG] WebContents created. ID: ${webContents.id}, Type: ${webContents.getType()}`
-    );
-    webContents.on(
-      "did-start-navigation",
-      (event, url, isInPlace, isMainFrame, frameProcessId, frameRoutingId) => {
-        console.log(
-          `[DEBUG] Navigation started. URL: ${url}, MainFrame: ${isMainFrame}`
-        );
+    configureSessionSecurity(webContents.session);
+    webContents.on("dom-ready", () => {
+      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
+    webContents.on("did-navigate", () => {
+      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
+    webContents.on("focus", () => {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("view.focus-wc", webContents.id);
       }
-    );
-    webContents.on(
-      "did-fail-load",
-      (event, errorCode, errorDescription, validatedURL) => {
-        console.error(
-          `[DEBUG] Failed to load. URL: ${validatedURL}, Error: ${errorDescription} (${errorCode})`
-        );
+    });
+    webContents.on("context-menu", (_event, params) => {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("view.context-menu-native", {
+          webContentsId: webContents.id,
+          x: params.x,
+          y: params.y,
+          linkURL: params.linkURL || "",
+          srcURL: params.srcURL || "",
+          pageURL: params.pageURL || (typeof webContents.getURL === "function" ? webContents.getURL() : ""),
+          selectionText: params.selectionText || ""
+        });
       }
-    );
+    });
     webContents.on("before-input-event", (event, input) => {
       if (input.type === "keyDown") {
-        if (input.key === "F12" || input.alt && input.code === "Space") {
+        const isReload = (input.control || input.meta) && input.key.toLowerCase() === "r" || input.key === "F5";
+        if (input.key === "F12" || input.alt && input.code === "Space" || isReload) {
           event.preventDefault();
+        }
+        if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
+          if (input.shift) {
+            webContents.reloadIgnoringCache();
+          } else {
+            webContents.reload();
+          }
+          if (!global.mainWindow.isDestroyed()) {
+            global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
+          }
+          return;
         }
         const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
         const payload = {
+          webContentsId: webContents.id,
           key: input.key,
           code: input.code,
           control: input.control,
@@ -1631,102 +2486,57 @@ function initSessionSecurity() {
         }
       }
     });
-    const session = webContents.session;
-    if (!patchedSessions.has(session)) {
-      patchedSessions.add(session);
-      const chromeVersion = process.versions.chrome;
-      const chromeMajor = chromeVersion.split(".")[0];
-      let cleanUA = session.getUserAgent();
-      cleanUA = cleanUA.replace(/\s+Electron\/\S+/i, "").replace(/\s+Apposition\/\S+/i, "").replace(/(\)\s+)\S+\s+(Chrome\/)/, "$1$2");
-      session.setUserAgent(cleanUA);
-      session.webRequest.onBeforeSendHeaders(
-        { urls: ["https://*/*", "http://*/*"] },
-        (details, callback) => {
-          const requestHeaders = { ...details.requestHeaders };
-          const uaKey = Object.keys(requestHeaders).find(
-            (k) => k.toLowerCase() === "user-agent"
-          );
-          if (uaKey && requestHeaders[uaKey]) {
-            requestHeaders[uaKey] = requestHeaders[uaKey].replace(/\s+Electron\/\S+/i, "").replace(/\s+Apposition\/\S+/i, "").replace(/(\)\s+)\S+\s+(Chrome\/)/, "$1$2");
-          }
-          const secChUa = `"Google Chrome";v="${chromeMajor}", "Chromium";v="${chromeMajor}", "Not.A/Brand";v="24"`;
-          const secChUaFull = `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not.A/Brand";v="24.0.0.0"`;
-          for (const key of Object.keys(requestHeaders)) {
-            const lower = key.toLowerCase();
-            if (lower === "sec-ch-ua") {
-              requestHeaders[key] = secChUa;
-            } else if (lower === "sec-ch-ua-full-version-list") {
-              requestHeaders[key] = secChUaFull;
-            }
-          }
-          callback({ requestHeaders });
-        }
-      );
-      session.webRequest.onHeadersReceived((details, callback) => {
-        const responseHeaders = { ...details.responseHeaders };
-        let modified = false;
-        const removeHeader = (headerName) => {
-          const key = Object.keys(responseHeaders).find(
-            (k) => k.toLowerCase() === headerName.toLowerCase()
-          );
-          if (key) {
-            delete responseHeaders[key];
-            modified = true;
-          }
-        };
-        removeHeader("Cross-Origin-Embedder-Policy");
-        removeHeader("Cross-Origin-Opener-Policy");
-        removeHeader("X-Frame-Options");
-        if (modified) {
-          callback({ cancel: false, responseHeaders });
-        } else {
-          callback({ cancel: false });
-        }
-      });
-    }
     webContents.setWindowOpenHandler((details) => {
-      console.log(
-        "setWindowOpenHandler called with URL:",
+      const decision = evaluateWindowOpenRequest(
         details.url,
-        "disposition:",
         details.disposition,
-        "features:",
         details.features
       );
-      const isPopup = details.features && (details.features.includes("width=") || details.features.includes("height="));
-      const urlLower = details.url.toLowerCase();
-      const isBlank = urlLower === "about:blank" || urlLower === "about:blank#blocked";
-      const isGoogleAuth = urlLower.includes("google.com/gsi") || urlLower.includes("accounts.google.com") || urlLower.includes("firebaseapp.com");
-      const isSSO = urlLower.includes("login") || urlLower.includes("signin") || urlLower.includes("auth") || urlLower.includes("sso") || urlLower.includes("id.atlassian") || urlLower.includes("okta") || urlLower.includes("oauth");
-      if (details.disposition === "new-window" || isPopup || isBlank || isGoogleAuth) {
-        console.log("Allowing as popup:", details.url);
+      if (decision.type === "SYSTEM_AUTH_RELAY") {
+        startAuthRelay(details.url).catch(() => {
+          require$$1.shell.openExternal(details.url);
+        });
+        return { action: "deny" };
+      }
+      if (decision.type === "ALLOW_OAUTH_POPUP") {
         return {
           action: "allow",
           overrideBrowserWindowOptions: {
-            width: 600,
-            height: 700,
-            autoHideMenuBar: true,
+            width: decision.width,
+            height: decision.height,
+            center: true,
+            titleBarStyle: "hidden",
+            titleBarOverlay: {
+              color: "#fafaf9",
+              symbolColor: "#121212",
+              height: 36
+            },
+            backgroundColor: "#FFFFFF",
             show: true,
+            icon: require$$1$1.join(
+              __dirname,
+              process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
+            ),
+            userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
             webPreferences: {
+              preload: void 0,
               sandbox: true,
               contextIsolation: true
             }
           }
         };
-      } else if (isSSO) {
-        console.log(
-          "Intercepting as SSO redirect to current pane:",
-          details.url
-        );
-        webContents.loadURL(details.url);
+      }
+      if (decision.type === "NAVIGATE_CURRENT_PANE") {
+        webContents.loadURL(decision.url);
         return { action: "deny" };
       }
-      console.log("Denying and opening in OS browser:", details.url);
-      require$$1.shell.openExternal(details.url);
+      if (decision.type === "OPEN_SYSTEM_BROWSER") {
+        require$$1.shell.openExternal(decision.url);
+        return { action: "deny" };
+      }
       return { action: "deny" };
     });
-    webContents.on("render-process-gone", (event, details) => {
-      console.error(`WebContents crashed: ${details.reason}`);
+    webContents.on("render-process-gone", (_event, details) => {
       if (details.reason === "oom" || details.reason === "crashed") {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
           global.mainWindow.webContents.send("pane.crashed", webContents.id);
@@ -1734,15 +2544,48 @@ function initSessionSecurity() {
       }
     });
   });
-  require$$1.app.on("child-process-gone", (event, details) => {
-    console.error(`Process gone: ${details.type} (${details.reason})`);
+  require$$1.app.on("child-process-gone", (_event, details) => {
     if (details.type === "GPU" && details.reason === "crashed") {
-      console.warn(
-        "GPU Process Crashed. Electron will attempt to restart it automatically."
-      );
+      console.warn("GPU Process Crashed. Electron will restart it.");
     }
   });
-  require$$1.app.on("browser-window-created", (_, window2) => {
+}
+const BLOCKED_PATTERNS = [
+  "*://*.google-analytics.com/*",
+  "*://*.googletagmanager.com/gtm.js*",
+  "*://*.facebook.net/*/fbevents.js*",
+  "*://*.doubleclick.net/*",
+  "*://*.hotjar.com/*",
+  "*://*.clarity.ms/*",
+  "*://*.scorecardresearch.com/*",
+  "*://*.outbrain.com/*",
+  "*://*.taboola.com/*"
+];
+function initNetworkOptimizer() {
+  const defaultSession = require$$1.session.defaultSession;
+  defaultSession.webRequest.onBeforeRequest(
+    { urls: BLOCKED_PATTERNS },
+    (details, callback) => {
+      if (details.resourceType === "mainFrame") {
+        callback({ cancel: false });
+        return;
+      }
+      callback({ cancel: true });
+    }
+  );
+  require$$1.ipcMain.on("net.prefetch", (_, rawUrl) => {
+    if (!rawUrl) return;
+    try {
+      let hostname = rawUrl;
+      if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+        hostname = new URL(rawUrl).hostname;
+      }
+      if (hostname && typeof defaultSession.resolveHost === "function") {
+        defaultSession.resolveHost(hostname).catch(() => {
+        });
+      }
+    } catch {
+    }
   });
 }
 const handleDeepLink = (url) => {
@@ -1751,17 +2594,21 @@ const handleDeepLink = (url) => {
   if (deepPath.startsWith("workspace/")) {
     const workspaceId = deepPath.replace("workspace/", "");
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send(
-        "app.deep-link.workspace",
-        workspaceId
-      );
+      global.mainWindow.webContents.send("app.deep-link.workspace", workspaceId);
     }
-  } else if (deepPath.startsWith("oauth-callback")) {
+  } else if (deepPath.startsWith("oauth-callback") || deepPath.startsWith("auth/callback")) {
     try {
       const urlObj = new URL(url);
       const token = urlObj.searchParams.get("token");
-      if (token && global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.deep-link.oauth", token);
+      const code = urlObj.searchParams.get("code");
+      const state = urlObj.searchParams.get("state");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.deep-link.oauth", {
+          token,
+          code,
+          state,
+          rawUrl: url
+        });
       }
     } catch (e) {
       console.error("Failed to parse oauth callback url", e);
@@ -1782,7 +2629,7 @@ function initDeepLinking() {
   if (!gotTheLock2) {
     require$$1.app.quit();
   } else {
-    require$$1.app.on("second-instance", (event, commandLine) => {
+    require$$1.app.on("second-instance", (_event, commandLine) => {
       if (global.mainWindow) {
         if (global.mainWindow.isMinimized()) global.mainWindow.restore();
         global.mainWindow.focus();
@@ -2248,7 +3095,7 @@ function requireGracefulFs() {
   var polyfills2 = requirePolyfills();
   var legacy = requireLegacyStreams();
   var clone = requireClone();
-  var util2 = require$$4;
+  var util2 = require$$4$1;
   var gracefulQueue;
   var previousSymbol;
   if (typeof Symbol === "function" && typeof Symbol.for === "function") {
@@ -2828,7 +3675,7 @@ function requireStat() {
   hasRequiredStat = 1;
   const fs2 = /* @__PURE__ */ requireFs();
   const path = require$$1$1;
-  const util2 = require$$4;
+  const util2 = require$$4$1;
   function getStats(src2, dest, opts) {
     const statFunc = opts.dereference ? (file2) => fs2.stat(file2, { bigint: true }) : (file2) => fs2.lstat(file2, { bigint: true });
     return Promise.all([
@@ -4995,7 +5842,7 @@ function requireNode() {
   hasRequiredNode = 1;
   (function(module, exports) {
     const tty = require$$1$3;
-    const util2 = require$$4;
+    const util2 = require$$4$1;
     exports.init = init;
     exports.log = log;
     exports.formatArgs = formatArgs;
@@ -17073,7 +17920,7 @@ function requireMacUpdater() {
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const fs_1 = require$$1$2;
   const path = require$$1$1;
-  const http_1 = require$$4$1;
+  const http_1 = require$$4;
   const AppUpdater_1 = requireAppUpdater();
   const Provider_1 = requireProvider();
   const child_process_1 = require$$1$4;
@@ -17729,12 +18576,27 @@ function initAutoUpdater() {
     });
   });
 }
+require$$1.app.userAgentFallback = getDefaultChromeUserAgent();
 require$$1.app.commandLine.appendSwitch("disable-background-timer-throttling");
 require$$1.app.commandLine.appendSwitch("disable-renderer-backgrounding");
 require$$1.app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-require$$1.app.commandLine.appendSwitch("enable-lcd-text");
+require$$1.app.commandLine.appendSwitch("max-active-webgl-contexts", "128");
 require$$1.app.commandLine.appendSwitch("hide-scrollbars");
-require$$1.app.commandLine.appendSwitch("disable-features", "FedCm");
+if (process.platform === "darwin") {
+  require$$1.app.commandLine.appendSwitch("disable-skia-graphite");
+}
+require$$1.app.commandLine.appendSwitch(
+  "disable-features",
+  "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
+);
+require$$1.app.commandLine.appendSwitch(
+  "disable-blink-features",
+  "WebAuthentication,WebAuthenticationConditionalUI"
+);
+require$$1.app.commandLine.appendSwitch(
+  "force-webrtc-ip-handling-policy",
+  "default_public_interface_only"
+);
 const isDevMode = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
 if (isDevMode) {
   require$$1.app.setName("Apposition Dev");
@@ -17809,11 +18671,13 @@ if (!gotTheLock) {
     });
     require$$1.nativeTheme.themeSource = "light";
     gcDeletedSessions();
+    initNetworkOptimizer();
     initSessionSecurity();
     initWindowManagerIpc();
     initViewManager();
     initDbIpc();
     initLicensingIpc();
+    initAuthIpc();
     require$$1.ipcMain.handle("pane.ping", () => "pong");
     require$$1.ipcMain.on("pane.log", (event, level, ...args) => {
       const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
