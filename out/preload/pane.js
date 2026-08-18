@@ -30,6 +30,43 @@ try {
     },
     { passive: true }
   );
+  window.addEventListener(
+    "play",
+    (e) => {
+      if (e.target instanceof HTMLMediaElement) {
+        electron.ipcRenderer.send("pane.media-playing", true);
+      }
+    },
+    true
+  );
+  window.addEventListener(
+    "pause",
+    (e) => {
+      if (e.target instanceof HTMLMediaElement) {
+        const anyPlaying = Array.from(
+          document.querySelectorAll("video, audio")
+        ).some(
+          (m) => !m.paused && !m.ended && m.currentTime > 0 && !m.muted
+        );
+        electron.ipcRenderer.send("pane.media-playing", anyPlaying);
+      }
+    },
+    true
+  );
+  window.addEventListener(
+    "ended",
+    (e) => {
+      if (e.target instanceof HTMLMediaElement) {
+        const anyPlaying = Array.from(
+          document.querySelectorAll("video, audio")
+        ).some(
+          (m) => !m.paused && !m.ended && m.currentTime > 0 && !m.muted
+        );
+        electron.ipcRenderer.send("pane.media-playing", anyPlaying);
+      }
+    },
+    true
+  );
   electron.webFrame.insertCSS(`
     html, body {
       -webkit-font-smoothing: antialiased !important;

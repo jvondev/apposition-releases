@@ -83,7 +83,9 @@ const IPC_CHANNELS = {
     SPLIT_PANE_WC: "app:split-pane-wc",
     MAXIMIZE_PANE_WC: "app:maximize-pane-wc",
     CLOSE_PANE_WC: "app:close-pane-wc",
-    PANE_RELOADED_WC: "pane.reloaded-wc"
+    PANE_RELOADED_WC: "pane.reloaded-wc",
+    VIEW_LOAD_START: "view.load-start",
+    VIEW_LOADED: "view.loaded"
   }
 };
 function createIpcClient(ipcRenderer) {
@@ -91,8 +93,8 @@ function createIpcClient(ipcRenderer) {
     db: {
       getInitialAppState: () => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_INITIAL_STATE),
       getWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_WORKSPACES),
-      createWorkspace: (id, name) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_WORKSPACE, id, name),
-      updateWorkspace: (id, name) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_WORKSPACE, id, name),
+      createWorkspace: (id, name, icon) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_WORKSPACE, id, name, icon),
+      updateWorkspace: (id, name, icon) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_WORKSPACE, id, name, icon),
       deleteWorkspace: (id) => ipcRenderer.invoke(IPC_CHANNELS.DB.DELETE_WORKSPACE, id),
       setWorkspaceDefaultProfile: (id, profileId) => ipcRenderer.invoke(
         IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE,
@@ -116,7 +118,7 @@ function createIpcClient(ipcRenderer) {
       ),
       getTabs: (workspaceId) => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_TABS, workspaceId),
       createTab: (id, workspaceId, name) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_TAB, id, workspaceId, name),
-      updateTab: (id, name) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_TAB, id, name),
+      updateTab: (id, name, customName) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_TAB, id, name, customName),
       deleteTab: (id) => ipcRenderer.invoke(IPC_CHANNELS.DB.DELETE_TAB, id),
       moveNodeToTab: (nodeId, targetTabId) => ipcRenderer.invoke(
         IPC_CHANNELS.DB.MOVE_NODE_TO_TAB,
@@ -223,6 +225,11 @@ function createIpcEvents(ipcRenderer) {
       ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_NAVIGATED, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.VIEW_NAVIGATED, handler);
     },
+    onViewFaviconUpdated: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on("view.favicon-updated", handler);
+      return () => ipcRenderer.removeListener("view.favicon-updated", handler);
+    },
     onViewMediaStatus: (callback) => {
       const handler = (_, data) => callback(data);
       ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, handler);
@@ -316,6 +323,19 @@ function createIpcEvents(ipcRenderer) {
         IPC_CHANNELS.EVENTS.OPEN_IN_NEW_PANE,
         handler
       );
+    },
+    onViewLoadStart: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_LOAD_START, handler);
+      return () => ipcRenderer.removeListener(
+        IPC_CHANNELS.EVENTS.VIEW_LOAD_START,
+        handler
+      );
+    },
+    onViewLoaded: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
     }
   };
 }
@@ -385,9 +405,18 @@ const webviewHelpers = {
         } catch {
         }
       }
+      try {
+        const current = typeof el.getURL === "function" ? el.getURL() : el.src;
+        if (current === url) return;
+      } catch {
+      }
       if (typeof el.loadURL === "function") {
         try {
-          el.loadURL(url);
+          const p = el.loadURL(url);
+          if (p && typeof p.catch === "function") {
+            p.catch(() => {
+            });
+          }
           return;
         } catch {
         }
@@ -431,8 +460,31 @@ const webviewHelpers = {
   },
   viewToggleMute: (paneId) => {
     const el = getWebview(paneId);
-    if (el && typeof el.isAudioMuted === "function") {
-      el.setAudioMuted(!el.isAudioMuted());
+    if (el) {
+      try {
+        if (typeof el.isAudioMuted === "function" && typeof el.setAudioMuted === "function") {
+          const nextMuted = !el.isAudioMuted();
+          el.setAudioMuted(nextMuted);
+          window.dispatchEvent(
+            new CustomEvent("app:media-status", {
+              detail: { paneId, isPlaying: !nextMuted }
+            })
+          );
+          return;
+        }
+      } catch {
+      }
+      try {
+        el.executeJavaScript(`
+          (function() {
+            const medias = document.querySelectorAll('video, audio');
+            const isAnyMuted = Array.from(medias).some(m => m.muted);
+            medias.forEach(m => m.muted = !isAnyMuted);
+          })()
+        `).catch(() => {
+        });
+      } catch {
+      }
     }
   },
   viewZoomIn: (paneId) => {
@@ -572,9 +624,14 @@ const api = {
     client.view.reload(paneId, hard);
   },
   viewScreenshot: (paneId) => client.view.screenshot(paneId),
+  viewToggleMute: webviewHelpers.viewToggleMute,
+  viewUpdateProfile: (paneId, profileId) => {
+    electron.ipcRenderer.send("view.updateProfile", paneId, profileId);
+  },
   registerWebContents: (paneId, wcId) => client.view.registerWebContents(paneId, wcId),
   // Push Event Subscriptions
   onNavigated: events.onViewNavigated,
+  onFaviconUpdated: events.onViewFaviconUpdated,
   onMediaStatus: events.onViewMediaStatus,
   onViewCrashed: events.onViewCrashed,
   onForwardedKey: events.onForwardedKey,
@@ -588,7 +645,13 @@ const api = {
   onPaneReloadedWc: events.onPaneReloadedWc,
   onWorkspaceDeepLink: events.onWorkspaceDeepLink,
   onOpenInNewPane: events.onOpenInNewPane,
+  onViewLoadStart: events.onViewLoadStart,
   onAuthDetected: (callback) => electron.ipcRenderer.on("pane.auth-detected", callback),
+  onPartitionCookieChanged: (callback) => {
+    const handler = (_, data) => callback(data);
+    electron.ipcRenderer.on("partition.cookie-changed", handler);
+    return () => electron.ipcRenderer.removeListener("partition.cookie-changed", handler);
+  },
   // DOM Event Bridges
   onViewNavigated: (callback) => {
     const handler = (e) => callback(e.detail);
@@ -598,7 +661,11 @@ const api = {
   onViewLoaded: (callback) => {
     const handler = (e) => callback(e.detail);
     window.addEventListener("app:webview-loaded", handler);
-    return () => window.removeEventListener("app:webview-loaded", handler);
+    const unsub = events.onViewLoaded(callback);
+    return () => {
+      window.removeEventListener("app:webview-loaded", handler);
+      unsub();
+    };
   },
   onViewConsoleMessage: (callback) => {
     const handler = (e) => callback(e.detail);

@@ -1747,7 +1747,9 @@ const [layoutStore, setLayoutStore] = createStore({
   settingsAnchor: null,
   showChangelog: false,
   changelogAnchor: null,
-  isDevToolsOpen: false
+  isDevToolsOpen: false,
+  splitPreview: null,
+  lastSplitDirection: "right"
 });
 function generateUniqueId(prefix) {
   const rand = Math.random().toString(36).substring(2, 9);
@@ -2584,14 +2586,12 @@ function useLayoutMutator(state, dependencies) {
     findFirstPane
   } = state;
   const { loadNodesForTab, handleCreateTab, saveLayout } = dependencies;
-  const getCurrentTree = () => {
-    return {
-      rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
-      nodes: layoutStore.nodes,
-      generation: 1
-    };
-  };
-  const handleSplit = (paneId, direction) => {
+  const getCurrentTree = () => ({
+    rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
+    nodes: layoutStore.nodes,
+    generation: 1
+  });
+  const handleSplit = (paneId, direction, initialUrl, profileIdOverride) => {
     let targetPaneId = paneId;
     if (!targetPaneId || !layoutStore.nodes[targetPaneId] || layoutStore.nodes[targetPaneId]?.type !== "pane") {
       targetPaneId = activePaneId();
@@ -2601,32 +2601,27 @@ function useLayoutMutator(state, dependencies) {
     }
     const paneNode = layoutStore.nodes[targetPaneId];
     if (!paneNode || paneNode.type !== "pane") return;
-    const activePanesCount = Object.values(layoutStore.nodes).filter(
-      (n) => n?.type === "pane"
-    ).length;
+    const activePanesCount = Object.values(layoutStore.nodes).filter((n) => n?.type === "pane").length;
     if (!layoutStore.isPremium && activePanesCount >= 3) {
       const paneEl = document.querySelector(`[data-pane-id="${targetPaneId}"]`);
       if (paneEl) {
         const rect = paneEl.getBoundingClientRect();
-        setLayoutStore("paywallAnchor", {
-          top: rect.top,
-          left: rect.left,
-          width: rect.width,
-          height: rect.height
-        });
+        setLayoutStore("paywallAnchor", { top: rect.top, left: rect.left, width: rect.width, height: rect.height });
       }
       setLayoutStore("paywallReason", "tab");
       setLayoutStore("showPaywall", true);
       return;
     }
+    const currentWs = state.workspaces?.().find((w) => w.id === state.activeWorkspace?.());
+    const defaultProfile = profileIdOverride || currentWs?.default_profile_id || paneNode.profileId || "main";
     const newPaneId = asPaneId(generateUniqueId("pane"));
     const newPaneData = {
       type: "pane",
       id: newPaneId,
       paneType: "web",
-      url: "",
-      title: "New Tab",
-      profileId: paneNode.profileId || "main"
+      url: initialUrl || "",
+      title: initialUrl ? "Loading..." : "New Tab",
+      profileId: defaultProfile
     };
     const [nextTree, effects] = reduceLayout(getCurrentTree(), {
       type: "SPLIT_PANE",
@@ -2636,27 +2631,29 @@ function useLayoutMutator(state, dependencies) {
       ratio: 0.5
     });
     batch(() => {
-      if (nextTree.rootId) {
-        setLayoutStore("rootId", nextTree.rootId);
-      }
+      if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
       setLayoutStore("nodes", reconcile(nextTree.nodes));
     });
     setActivePaneId(newPaneId);
     saveLayout(true);
     EffectRunner.runLayoutEffects(effects, (id) => layoutStore.nodes[id]);
+    if (initialUrl) {
+      window.dispatchEvent(
+        new CustomEvent("pane.force-gate", {
+          detail: { id: newPaneId, url: initialUrl }
+        })
+      );
+      window.api?.viewLoadURL(newPaneId, initialUrl);
+    }
   };
   const handleClose = async (paneId, killTerminal = true, preventTabDelete = false) => {
-    EffectRunner.runLayoutEffect({
-      type: "DESTROY_NATIVE_VIEW",
-      paneId: asPaneId(paneId)
-    });
+    EffectRunner.runLayoutEffect({ type: "DESTROY_NATIVE_VIEW", paneId: asPaneId(paneId) });
     const closingNode = layoutStore.nodes[paneId];
     if (closingNode?.paneType === "terminal" && killTerminal) {
-      EffectRunner.runLayoutEffect({
-        type: "KILL_TERMINAL_SESSION",
-        paneId: asPaneId(paneId)
-      });
+      EffectRunner.runLayoutEffect({ type: "KILL_TERMINAL_SESSION", paneId: asPaneId(paneId) });
     }
+    const currentWs = state.workspaces?.().find((w) => w.id === state.activeWorkspace?.());
+    const defaultProfile = currentWs?.default_profile_id || "main";
     if (layoutStore.rootId === paneId) {
       if (!activeTabId() || !activeWorkspace()) return;
       const currentTabs = tabs();
@@ -2670,7 +2667,7 @@ function useLayoutMutator(state, dependencies) {
               paneType: "web",
               title: "New Tab",
               url: "",
-              profileId: closingNode?.profileId || "main"
+              profileId: defaultProfile
             }
           })
         );
@@ -2685,31 +2682,23 @@ function useLayoutMutator(state, dependencies) {
         saveLayout(true);
         return;
       }
-      const currentTabId = activeTabId();
-      const tabToClose = currentTabs.find((tb) => tb.id === currentTabId);
-      const tabIndex = currentTabs.findIndex(
-        (tb) => tb.id === currentTabId
-      );
-      if (tabToClose) {
-        setClosedItemsStack((prev) => [
-          ...prev,
-          {
-            type: "tab",
-            workspaceId: activeWorkspace(),
-            layout: tabToClose.layout_state,
-            name: tabToClose.name
-          }
-        ]);
-      }
-      await window.api?.deleteTab(currentTabId).catch(console.error);
-      const newTabs = await window.api?.getTabs(activeWorkspace()).catch(() => []);
+      const closedTabId = activeTabId();
+      await window.api?.deleteTab(closedTabId);
+      const newTabs = await window.api?.getTabs(activeWorkspace());
       setTabs(newTabs || []);
       if (newTabs && newTabs.length > 0) {
-        const nextTab = newTabs[tabIndex > 0 ? tabIndex - 1 : 0];
-        dependencies.performTransition("horizontal", "backward", () => {
-          state.setActiveTabId(nextTab.id);
-          loadNodesForTab(nextTab.id, newTabs);
-        });
+        const closedIdx = currentTabs.findIndex((t) => t.id === closedTabId);
+        let nextTab = newTabs[closedIdx];
+        const isBackward = !nextTab;
+        if (!nextTab) nextTab = newTabs[closedIdx - 1] || newTabs[0];
+        if (nextTab) {
+          if (dependencies.switchTab) {
+            await dependencies.switchTab(nextTab.id, isBackward ? "backward" : "forward");
+          } else {
+            state.setActiveTabId(nextTab.id);
+            loadNodesForTab(nextTab.id, newTabs);
+          }
+        }
       } else {
         handleCreateTab();
       }
@@ -2730,19 +2719,12 @@ function useLayoutMutator(state, dependencies) {
         wasA: parent[1] === "a"
       }
     ]);
-    const [nextTree, effects] = reduceLayout(getCurrentTree(), {
-      type: "CLOSE_PANE",
-      paneId: asPaneId(paneId)
-    });
+    const [nextTree, effects] = reduceLayout(getCurrentTree(), { type: "CLOSE_PANE", paneId: asPaneId(paneId) });
     batch(() => {
-      if (nextTree.rootId) {
-        setLayoutStore("rootId", nextTree.rootId);
-      }
+      if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
       setLayoutStore("nodes", reconcile(nextTree.nodes));
     });
-    if (activePaneId() === paneId) {
-      setActivePaneId(findFirstPane(siblingId));
-    }
+    if (activePaneId() === paneId) setActivePaneId(findFirstPane(siblingId));
     saveLayout(true);
     EffectRunner.runLayoutEffects(effects, (id) => layoutStore.nodes[id]);
   };
@@ -2762,12 +2744,28 @@ function useLayoutMutator(state, dependencies) {
       data
     });
     setLayoutStore("nodes", reconcile(nextTree.nodes));
-    if (data.profileId) {
-      window.api?.viewUpdateProfile?.(paneId, data.profileId);
-    }
+    if (data.profileId) window.api?.viewUpdateProfile?.(paneId, data.profileId);
     saveLayout(true);
   };
-  return { handleSplit, handleClose, handleRatioChange, handleUpdatePane };
+  const handleOpenUrlInPaneOrTab = async (url) => {
+    if (!url) return;
+    const activePanesCount = Object.values(layoutStore.nodes).filter(
+      (n) => n?.type === "pane"
+    ).length;
+    const currentActivePaneId = activePaneId();
+    if (activePanesCount > 0 && activePanesCount < 4 && !layoutStore.maximizedPaneId && currentActivePaneId && layoutStore.nodes[currentActivePaneId]) {
+      handleSplit(currentActivePaneId, "right", url);
+    } else {
+      await handleCreateTab(void 0, url);
+    }
+  };
+  return {
+    handleSplit,
+    handleClose,
+    handleRatioChange,
+    handleUpdatePane,
+    handleOpenUrlInPaneOrTab
+  };
 }
 function useLayoutTemplates(state, dependencies) {
   const {
@@ -3385,6 +3383,63 @@ function useLayoutHistory(activeTabId, setActivePaneId, saveLayout) {
     }
   };
 }
+const domainCache = /* @__PURE__ */ new Map();
+const faviconUrlCache = /* @__PURE__ */ new Map();
+const nativeFaviconCache = /* @__PURE__ */ new Map();
+const failedFaviconCache = /* @__PURE__ */ new Set();
+function setNativeFavicon(rawUrlOrDomain, faviconUrl) {
+  const domain = extractDomain(rawUrlOrDomain);
+  if (domain && faviconUrl) {
+    nativeFaviconCache.set(domain, faviconUrl);
+  }
+}
+function extractDomain(rawUrl) {
+  if (!rawUrl || rawUrl === "about:blank") return "";
+  const cached = domainCache.get(rawUrl);
+  if (cached !== void 0) return cached;
+  let domain = "";
+  try {
+    const parsed = new URL(
+      rawUrl.includes("://") ? rawUrl : `https://${rawUrl}`
+    );
+    domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    domain = rawUrl.split("/")[0].replace(/^www\./, "").toLowerCase();
+  }
+  if (domainCache.size > 500) domainCache.clear();
+  domainCache.set(rawUrl, domain);
+  return domain;
+}
+function getFaviconUrl(rawUrlOrDomain, size = 64) {
+  if (!rawUrlOrDomain || rawUrlOrDomain === "about:blank") return "";
+  const domain = extractDomain(rawUrlOrDomain);
+  if (!domain) return "";
+  const native = nativeFaviconCache.get(domain);
+  if (native) return native;
+  if (domain === "localhost" || domain.startsWith("127.0.0.1")) {
+    return "";
+  }
+  if (failedFaviconCache.has(domain)) {
+    return "";
+  }
+  const cacheKey = `${domain}_${size}`;
+  const cached = faviconUrlCache.get(cacheKey);
+  if (cached) return cached;
+  const url = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=${size}`;
+  if (faviconUrlCache.size > 500) faviconUrlCache.clear();
+  faviconUrlCache.set(cacheKey, url);
+  return url;
+}
+function markFaviconFailed(rawUrlOrDomain) {
+  const domain = extractDomain(rawUrlOrDomain);
+  if (domain) {
+    failedFaviconCache.add(domain);
+  }
+}
+function isFaviconFailed(rawUrlOrDomain) {
+  const domain = extractDomain(rawUrlOrDomain);
+  return domain ? failedFaviconCache.has(domain) : false;
+}
 const validateLayoutState = (layout) => {
   if (!layout || typeof layout !== "object") return false;
   if (typeof layout.rootId !== "string" || !layout.rootId) return false;
@@ -3571,7 +3626,8 @@ function useWorkspaceManager() {
   const navigation = useWorkspaceNavigation(state, dependencies);
   const layout = useWorkspaceLayout(state, {
     ...dependencies,
-    handleCreateTab: navigation.handleCreateTab
+    handleCreateTab: navigation.handleCreateTab,
+    switchTab: navigation.switchTab
   });
   onMount(() => {
     window.api?.getProfiles().then((p) => {
@@ -3635,6 +3691,11 @@ function useWorkspaceManager() {
           ...data.title ? { title: data.title } : {}
         }));
         saveLayout(false);
+      }
+    });
+    window.api?.onFaviconUpdated?.((_e, data) => {
+      if (data?.url && data?.favicon) {
+        setNativeFavicon(data.url, data.favicon);
       }
     });
   });
@@ -4183,6 +4244,13 @@ const DEFAULT_SHORTCUTS = [
     category: "General"
   },
   {
+    id: "focus_address_d",
+    key: "d",
+    alt: true,
+    label: "Focus Address Bar (Alt+D)",
+    category: "General"
+  },
+  {
     id: "zen_mode",
     key: "z",
     alt: true,
@@ -4281,6 +4349,13 @@ const DEFAULT_SHORTCUTS = [
     shift: true,
     label: "Pin / Unpin Tab",
     category: "General"
+  },
+  {
+    id: "switch_profile",
+    key: "p",
+    alt: true,
+    label: "Cycle Session Profile",
+    category: "Workspace"
   },
   {
     id: "new_workspace",
@@ -4485,6 +4560,29 @@ function matchShortcut(e, isMac) {
   if (mod && e.shiftKey && !e.altKey && key >= "1" && key <= "9")
     return "jump_profile_" + key;
   return null;
+}
+function getShortcutDisplay(id) {
+  const isMac = navigator.userAgent.toLowerCase().includes("mac");
+  const s = activeShortcuts().find((item) => item.id === id);
+  if (!s) return void 0;
+  const parts = [];
+  if (s.mod) parts.push(isMac ? "⌘" : "Ctrl");
+  if (s.alt) parts.push(isMac ? "⌥" : "Alt");
+  if (s.shift) parts.push(isMac ? "⇧" : "Shift");
+  if (s.key) {
+    if (s.key === "arrowright") parts.push("→");
+    else if (s.key === "arrowleft") parts.push("←");
+    else if (s.key === "arrowup") parts.push("↑");
+    else if (s.key === "arrowdown") parts.push("↓");
+    else if (s.key === " ") parts.push("Space");
+    else parts.push(s.key.toUpperCase());
+  } else if (s.code) {
+    if (s.code === "BracketLeft") parts.push("[");
+    else if (s.code === "BracketRight") parts.push("]");
+    else if (s.code === "Backslash") parts.push("\\");
+    else parts.push(s.code);
+  }
+  return parts.join(isMac ? "" : "+");
 }
 function findSpatialTargetPane(activeId, dir, treeOverride) {
   const tree = {
@@ -4838,6 +4936,7 @@ function executeShortcutAction(action, e, isMac, ws, ui) {
       break;
     case "focus_address":
     case "focus_address_alt":
+    case "focus_address_d":
       e.preventDefault();
       window.dispatchEvent(
         new CustomEvent("focus-address-bar", {
@@ -4850,7 +4949,11 @@ function executeShortcutAction(action, e, isMac, ws, ui) {
     case "toggle_immersion":
       if (e.repeat) return;
       e.preventDefault();
-      ui.setIsUiCollapsed(!ui.isUiCollapsed());
+      if (ui.uiMode() === "collapse") {
+        ui.setUiMode("inset");
+      } else {
+        ui.setUiMode("collapse");
+      }
       ui.setTempShowHeader(false);
       break;
     case "maximize_pane":
@@ -4863,10 +4966,21 @@ function executeShortcutAction(action, e, isMac, ws, ui) {
         if (activeId) ws.setLayoutStore("maximizedPaneId", activeId);
       }
       break;
+    case "switch_profile": {
+      if (e.repeat) return;
+      e.preventDefault();
+      const activeId = ws.activePaneId();
+      window.dispatchEvent(
+        new CustomEvent("app:toggle-active-profile-menu", {
+          detail: { paneId: activeId }
+        })
+      );
+      break;
+    }
     case "escape":
-      if (ui.isUiCollapsed()) {
+      if (ui.uiMode() === "collapse") {
         e.preventDefault();
-        ui.setIsUiCollapsed(false);
+        ui.setUiMode("inset");
         ui.setTempShowHeader(false);
       } else if (ws.layoutStore.maximizedPaneId) {
         e.preventDefault();
@@ -5063,15 +5177,6 @@ function useShortcutEngine(ws, ui) {
       if (mod && ["a", "c", "v", "x", "z", "y"].includes(key)) return;
     }
     const action = matchShortcut(e, isMac);
-    console.log("[Shortcut Engine] keydown event:", {
-      key,
-      code: e.code,
-      ctrl: e.ctrlKey,
-      shift: e.shiftKey,
-      alt: e.altKey,
-      isInput,
-      action
-    });
     if (!action) return;
     const now = Date.now();
     const lastAction = window._lastShortcutAction;
@@ -5094,45 +5199,73 @@ function useShortcutEngine(ws, ui) {
   });
 }
 const logo = "" + new URL("logo-yHKUUx0t.svg", import.meta.url).href;
-var _tmpl$$Y = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain">`), _tmpl$2$H = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$4$i = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[24px] h-[24px] rounded-md hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-colors active:scale-95"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Docked Inset"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$S = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Floating Overlap"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$J = /* @__PURE__ */ template(`<div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$w = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95"style=-webkit-app-region:no-drag>`);
 function AppUiHub(props) {
+  const cycleMode = () => {
+    const current = props.uiMode();
+    props.justCollapsedRef.current = true;
+    if (current === "inset") {
+      props.setUiMode("overlap");
+    } else if (current === "overlap") {
+      props.setUiMode("collapse");
+    } else {
+      props.setUiMode("inset");
+    }
+  };
+  const getTitle = () => {
+    switch (props.uiMode()) {
+      case "inset":
+        return "UI Mode: Docked Inset (Click for Floating Overlap)";
+      case "overlap":
+        return "UI Mode: Floating Overlap (Click for Full Collapse)";
+      case "collapse":
+        return "UI Mode: Full Collapse (Click for Docked Inset)";
+    }
+  };
   return (() => {
-    var _el$ = _tmpl$4$i(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$4$w(), _el$2 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
-    _el$2.$$click = () => {
-      props.justCollapsedRef.current = true;
-      props.setIsUiCollapsed(!props.isUiCollapsed());
-    };
-    insert(_el$2, createComponent(Show, {
-      get when() {
-        return props.isUiCollapsed();
-      },
+    _el$2.$$click = cycleMode;
+    insert(_el$2, createComponent(Switch, {
       get children() {
-        return [(() => {
-          var _el$3 = _tmpl$$Y(), _el$4 = _el$3.firstChild;
-          setAttribute(_el$4, "src", logo);
-          return _el$3;
-        })(), _tmpl$2$H()];
+        return [createComponent(Match, {
+          get when() {
+            return props.uiMode() === "inset";
+          },
+          get children() {
+            return _tmpl$$1b();
+          }
+        }), createComponent(Match, {
+          get when() {
+            return props.uiMode() === "overlap";
+          },
+          get children() {
+            return _tmpl$2$S();
+          }
+        }), createComponent(Match, {
+          get when() {
+            return props.uiMode() === "collapse";
+          },
+          get children() {
+            var _el$5 = _tmpl$3$J(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild;
+            setAttribute(_el$7, "src", logo);
+            return _el$5;
+          }
+        })];
       }
-    }), null);
-    insert(_el$2, createComponent(Show, {
-      get when() {
-        return !props.isUiCollapsed();
-      },
-      get children() {
-        return _tmpl$3$x();
-      }
-    }), null);
+    }));
     createRenderEffect((_p$) => {
-      var _v$ = `absolute z-[60] pointer-events-auto items-center justify-center w-[40px] h-[40px] bg-white border border-neutral-200/60 shadow-md top-3 left-3 rounded-2xl hover:bg-neutral-50 ${props.isMaximized ? "hidden" : "flex"}`, _v$2 = props.isUiCollapsed() ? "Expand UI (Alt+Z)" : "Collapse UI (Alt+Z)";
+      var _v$ = `absolute z-[60] pointer-events-auto items-center justify-center w-[40px] h-[40px] bg-white border border-neutral-200/60 shadow-md top-2 left-2 rounded-2xl hover:bg-neutral-50 select-none ${props.isMaximized ? "hidden" : "flex"}`, _v$2 = getTitle(), _v$3 = getTitle();
       _v$ !== _p$.e && className(_el$, _p$.e = _v$);
       _v$2 !== _p$.t && setAttribute(_el$2, "title", _p$.t = _v$2);
+      _v$3 !== _p$.a && setAttribute(_el$2, "aria-label", _p$.a = _v$3);
       return _p$;
     }, {
       e: void 0,
-      t: void 0
+      t: void 0,
+      a: void 0
     });
     return _el$;
   })();
@@ -5156,7 +5289,7 @@ var defaultAttributes = {
   "stroke-linejoin": "round"
 };
 var defaultAttributes_default = defaultAttributes;
-var _tmpl$$X = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<svg>`);
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 var mergeClasses = (...classes) => classes.filter((className2, index, array) => {
   return Boolean(className2) && className2.trim() !== "" && array.indexOf(className2) === index;
@@ -5164,7 +5297,7 @@ var mergeClasses = (...classes) => classes.filter((className2, index, array) => 
 var Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$X();
+    var _el$ = _tmpl$$1a();
     spread(_el$, mergeProps(defaultAttributes_default, {
       get width() {
         return localProps.size ?? defaultAttributes_default.width;
@@ -5196,7 +5329,138 @@ var Icon = (props) => {
   })();
 };
 var Icon_default = Icon;
-var iconNode$o = [["path", {
+var iconNode$1R = [["rect", {
+  width: "20",
+  height: "5",
+  x: "2",
+  y: "3",
+  rx: "1",
+  key: "1wp1u1"
+}], ["path", {
+  d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8",
+  key: "1s80jp"
+}], ["path", {
+  d: "M10 12h4",
+  key: "a56b0p"
+}]];
+var Archive = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Archive",
+  iconNode: iconNode$1R
+}));
+var archive_default = Archive;
+var iconNode$1Q = [["path", {
+  d: "M10.268 21a2 2 0 0 0 3.464 0",
+  key: "vwvbt9"
+}], ["path", {
+  d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
+  key: "11g9vi"
+}]];
+var Bell = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Bell",
+  iconNode: iconNode$1Q
+}));
+var bell_default = Bell;
+var iconNode$1P = [["circle", {
+  cx: "18.5",
+  cy: "17.5",
+  r: "3.5",
+  key: "15x4ox"
+}], ["circle", {
+  cx: "5.5",
+  cy: "17.5",
+  r: "3.5",
+  key: "1noe27"
+}], ["circle", {
+  cx: "15",
+  cy: "5",
+  r: "1",
+  key: "19l28e"
+}], ["path", {
+  d: "M12 17.5V14l-3-3 4-3 2 3h2",
+  key: "1npguv"
+}]];
+var Bike = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Bike",
+  iconNode: iconNode$1P
+}));
+var bike_default = Bike;
+var iconNode$1O = [["path", {
+  d: "M12 7v14",
+  key: "1akyts"
+}], ["path", {
+  d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z",
+  key: "ruj8y"
+}]];
+var BookOpen = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "BookOpen",
+  iconNode: iconNode$1O
+}));
+var book_open_default = BookOpen;
+var iconNode$1N = [["path", {
+  d: "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z",
+  key: "1fy3hk"
+}]];
+var Bookmark = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Bookmark",
+  iconNode: iconNode$1N
+}));
+var bookmark_default = Bookmark;
+var iconNode$1M = [["path", {
+  d: "M12 8V4H8",
+  key: "hb8ula"
+}], ["rect", {
+  width: "16",
+  height: "12",
+  x: "4",
+  y: "8",
+  rx: "2",
+  key: "enze0r"
+}], ["path", {
+  d: "M2 14h2",
+  key: "vft8re"
+}], ["path", {
+  d: "M20 14h2",
+  key: "4cs60a"
+}], ["path", {
+  d: "M15 13v2",
+  key: "1xurst"
+}], ["path", {
+  d: "M9 13v2",
+  key: "rq6x2g"
+}]];
+var Bot = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Bot",
+  iconNode: iconNode$1M
+}));
+var bot_default = Bot;
+var iconNode$1L = [["path", {
+  d: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z",
+  key: "hh9hay"
+}], ["path", {
+  d: "m3.3 7 8.7 5 8.7-5",
+  key: "g66t2b"
+}], ["path", {
+  d: "M12 22V12",
+  key: "d0xqtd"
+}]];
+var Box = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Box",
+  iconNode: iconNode$1L
+}));
+var box_default = Box;
+var iconNode$1K = [["path", {
+  d: "M16 3h3v18h-3",
+  key: "1yor1f"
+}], ["path", {
+  d: "M8 21H5V3h3",
+  key: "1qrfwo"
+}]];
+var Brackets = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Brackets",
+  iconNode: iconNode$1K
+}));
+var brackets_default = Brackets;
+var iconNode$1J = [["path", {
   d: "M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16",
   key: "jecpp"
 }], ["rect", {
@@ -5209,10 +5473,156 @@ var iconNode$o = [["path", {
 }]];
 var Briefcase = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Briefcase",
-  iconNode: iconNode$o
+  iconNode: iconNode$1J
 }));
 var briefcase_default = Briefcase;
-var iconNode$n = [["path", {
+var iconNode$1I = [["path", {
+  d: "m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08",
+  key: "1styjt"
+}], ["path", {
+  d: "M7.07 14.94c-1.66 0-3 1.35-3 3.02 0 1.33-2.5 1.52-2 2.02 1.08 1.1 2.49 2.02 4 2.02 2.2 0 4-1.8 4-4.04a3.01 3.01 0 0 0-3-3.02z",
+  key: "z0l1mu"
+}]];
+var Brush = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Brush",
+  iconNode: iconNode$1I
+}));
+var brush_default = Brush;
+var iconNode$1H = [["path", {
+  d: "m8 2 1.88 1.88",
+  key: "fmnt4t"
+}], ["path", {
+  d: "M14.12 3.88 16 2",
+  key: "qol33r"
+}], ["path", {
+  d: "M9 7.13v-1a3.003 3.003 0 1 1 6 0v1",
+  key: "d7y7pr"
+}], ["path", {
+  d: "M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6",
+  key: "xs1cw7"
+}], ["path", {
+  d: "M12 20v-9",
+  key: "1qisl0"
+}], ["path", {
+  d: "M6.53 9C4.6 8.8 3 7.1 3 5",
+  key: "32zzws"
+}], ["path", {
+  d: "M6 13H2",
+  key: "82j7cp"
+}], ["path", {
+  d: "M3 21c0-2.1 1.7-3.9 3.8-4",
+  key: "4p0ekp"
+}], ["path", {
+  d: "M20.97 5c0 2.1-1.6 3.8-3.5 4",
+  key: "18gb23"
+}], ["path", {
+  d: "M22 13h-4",
+  key: "1jl80f"
+}], ["path", {
+  d: "M17.2 17c2.1.1 3.8 1.9 3.8 4",
+  key: "k3fwyw"
+}]];
+var Bug = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Bug",
+  iconNode: iconNode$1H
+}));
+var bug_default = Bug;
+var iconNode$1G = [["path", {
+  d: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z",
+  key: "1b4qmf"
+}], ["path", {
+  d: "M6 12H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h2",
+  key: "i71pzd"
+}], ["path", {
+  d: "M18 9h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-2",
+  key: "10jefs"
+}], ["path", {
+  d: "M10 6h4",
+  key: "1itunk"
+}], ["path", {
+  d: "M10 10h4",
+  key: "tcdvrf"
+}], ["path", {
+  d: "M10 14h4",
+  key: "kelpxr"
+}], ["path", {
+  d: "M10 18h4",
+  key: "1ulq68"
+}]];
+var Building2 = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Building2",
+  iconNode: iconNode$1G
+}));
+var building_2_default = Building2;
+var iconNode$1F = [["rect", {
+  width: "16",
+  height: "20",
+  x: "4",
+  y: "2",
+  rx: "2",
+  key: "1nb95v"
+}], ["line", {
+  x1: "8",
+  x2: "16",
+  y1: "6",
+  y2: "6",
+  key: "x4nwl0"
+}], ["line", {
+  x1: "16",
+  x2: "16",
+  y1: "14",
+  y2: "18",
+  key: "wjye3r"
+}], ["path", {
+  d: "M16 10h.01",
+  key: "1m94wz"
+}], ["path", {
+  d: "M12 10h.01",
+  key: "1nrarc"
+}], ["path", {
+  d: "M8 10h.01",
+  key: "19clt8"
+}], ["path", {
+  d: "M12 14h.01",
+  key: "1etili"
+}], ["path", {
+  d: "M8 14h.01",
+  key: "6423bh"
+}], ["path", {
+  d: "M12 18h.01",
+  key: "mhygvu"
+}], ["path", {
+  d: "M8 18h.01",
+  key: "lrp35t"
+}]];
+var Calculator = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Calculator",
+  iconNode: iconNode$1F
+}));
+var calculator_default = Calculator;
+var iconNode$1E = [["path", {
+  d: "M8 2v4",
+  key: "1cmpym"
+}], ["path", {
+  d: "M16 2v4",
+  key: "4m81vk"
+}], ["rect", {
+  width: "18",
+  height: "18",
+  x: "3",
+  y: "4",
+  rx: "2",
+  key: "1hopcy"
+}], ["path", {
+  d: "M3 10h18",
+  key: "8toen8"
+}]];
+var Calendar = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Calendar",
+  iconNode: iconNode$1E
+}));
+var calendar_default = Calendar;
+var iconNode$1D = [["path", {
   d: "M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z",
   key: "1tc9qg"
 }], ["circle", {
@@ -5223,10 +5633,113 @@ var iconNode$n = [["path", {
 }]];
 var Camera = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Camera",
-  iconNode: iconNode$n
+  iconNode: iconNode$1D
 }));
 var camera_default = Camera;
-var iconNode$m = [["path", {
+var iconNode$1C = [["path", {
+  d: "M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2",
+  key: "5owen"
+}], ["circle", {
+  cx: "7",
+  cy: "17",
+  r: "2",
+  key: "u2ysq9"
+}], ["path", {
+  d: "M9 17h6",
+  key: "r8uit2"
+}], ["circle", {
+  cx: "17",
+  cy: "17",
+  r: "2",
+  key: "axvx0g"
+}]];
+var Car = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Car",
+  iconNode: iconNode$1C
+}));
+var car_default = Car;
+var iconNode$1B = [["rect", {
+  width: "18",
+  height: "18",
+  x: "3",
+  y: "3",
+  rx: "2",
+  key: "afitv7"
+}], ["path", {
+  d: "M11 9h4a2 2 0 0 0 2-2V3",
+  key: "1ve2rv"
+}], ["circle", {
+  cx: "9",
+  cy: "9",
+  r: "2",
+  key: "af1f0g"
+}], ["path", {
+  d: "M7 21v-4a2 2 0 0 1 2-2h4",
+  key: "1fwkro"
+}], ["circle", {
+  cx: "15",
+  cy: "15",
+  r: "2",
+  key: "3i40o0"
+}]];
+var CircuitBoard = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "CircuitBoard",
+  iconNode: iconNode$1B
+}));
+var circuit_board_default = CircuitBoard;
+var iconNode$1A = [["rect", {
+  width: "8",
+  height: "4",
+  x: "8",
+  y: "2",
+  rx: "1",
+  ry: "1",
+  key: "tgr4d6"
+}], ["path", {
+  d: "M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2",
+  key: "116196"
+}], ["path", {
+  d: "M12 11h4",
+  key: "1jrz19"
+}], ["path", {
+  d: "M12 16h4",
+  key: "n85exb"
+}], ["path", {
+  d: "M8 11h.01",
+  key: "1dfujw"
+}], ["path", {
+  d: "M8 16h.01",
+  key: "18s6g9"
+}]];
+var ClipboardList = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ClipboardList",
+  iconNode: iconNode$1A
+}));
+var clipboard_list_default = ClipboardList;
+var iconNode$1z = [["circle", {
+  cx: "12",
+  cy: "12",
+  r: "10",
+  key: "1mglay"
+}], ["polyline", {
+  points: "12 6 12 12 16 14",
+  key: "68esgv"
+}]];
+var Clock = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Clock",
+  iconNode: iconNode$1z
+}));
+var clock_default = Clock;
+var iconNode$1y = [["path", {
+  d: "M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z",
+  key: "p7xjir"
+}]];
+var Cloud = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Cloud",
+  iconNode: iconNode$1y
+}));
+var cloud_default = Cloud;
+var iconNode$1x = [["path", {
   d: "m18 16 4-4-4-4",
   key: "1inbqp"
 }], ["path", {
@@ -5238,10 +5751,85 @@ var iconNode$m = [["path", {
 }]];
 var CodeXml = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "CodeXml",
-  iconNode: iconNode$m
+  iconNode: iconNode$1x
 }));
 var code_xml_default = CodeXml;
-var iconNode$l = [["rect", {
+var iconNode$1w = [["path", {
+  d: "M10 2v2",
+  key: "7u0qdc"
+}], ["path", {
+  d: "M14 2v2",
+  key: "6buw04"
+}], ["path", {
+  d: "M16 8a1 1 0 0 1 1 1v8a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1h14a4 4 0 1 1 0 8h-1",
+  key: "pwadti"
+}], ["path", {
+  d: "M6 2v2",
+  key: "colzsn"
+}]];
+var Coffee = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Coffee",
+  iconNode: iconNode$1w
+}));
+var coffee_default = Coffee;
+var iconNode$1v = [["circle", {
+  cx: "8",
+  cy: "8",
+  r: "6",
+  key: "3yglwk"
+}], ["path", {
+  d: "M18.09 10.37A6 6 0 1 1 10.34 18",
+  key: "t5s6rm"
+}], ["path", {
+  d: "M7 6h1v4",
+  key: "1obek4"
+}], ["path", {
+  d: "m16.71 13.88.7.71-2.82 2.82",
+  key: "1rbuyh"
+}]];
+var Coins = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Coins",
+  iconNode: iconNode$1v
+}));
+var coins_default = Coins;
+var iconNode$1u = [["path", {
+  d: "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
+  key: "11bfej"
+}]];
+var Command = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Command",
+  iconNode: iconNode$1u
+}));
+var command_default = Command;
+var iconNode$1t = [["path", {
+  d: "m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z",
+  key: "9ktpf1"
+}], ["circle", {
+  cx: "12",
+  cy: "12",
+  r: "10",
+  key: "1mglay"
+}]];
+var Compass = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Compass",
+  iconNode: iconNode$1t
+}));
+var compass_default = Compass;
+var iconNode$1s = [["circle", {
+  cx: "12",
+  cy: "12",
+  r: "10",
+  key: "1mglay"
+}], ["path", {
+  d: "M12 18a6 6 0 0 0 0-12v12z",
+  key: "j4l70d"
+}]];
+var Contrast = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Contrast",
+  iconNode: iconNode$1s
+}));
+var contrast_default = Contrast;
+var iconNode$1r = [["rect", {
   width: "14",
   height: "14",
   x: "8",
@@ -5255,10 +5843,139 @@ var iconNode$l = [["rect", {
 }]];
 var Copy = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Copy",
-  iconNode: iconNode$l
+  iconNode: iconNode$1r
 }));
 var copy_default = Copy;
-var iconNode$k = [["path", {
+var iconNode$1q = [["rect", {
+  width: "16",
+  height: "16",
+  x: "4",
+  y: "4",
+  rx: "2",
+  key: "14l7u7"
+}], ["rect", {
+  width: "6",
+  height: "6",
+  x: "9",
+  y: "9",
+  rx: "1",
+  key: "5aljv4"
+}], ["path", {
+  d: "M15 2v2",
+  key: "13l42r"
+}], ["path", {
+  d: "M15 20v2",
+  key: "15mkzm"
+}], ["path", {
+  d: "M2 15h2",
+  key: "1gxd5l"
+}], ["path", {
+  d: "M2 9h2",
+  key: "1bbxkp"
+}], ["path", {
+  d: "M20 15h2",
+  key: "19e6y8"
+}], ["path", {
+  d: "M20 9h2",
+  key: "19tzq7"
+}], ["path", {
+  d: "M9 2v2",
+  key: "165o2o"
+}], ["path", {
+  d: "M9 20v2",
+  key: "i2bqo8"
+}]];
+var Cpu = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Cpu",
+  iconNode: iconNode$1q
+}));
+var cpu_default = Cpu;
+var iconNode$1p = [["rect", {
+  width: "20",
+  height: "14",
+  x: "2",
+  y: "5",
+  rx: "2",
+  key: "ynyp8z"
+}], ["line", {
+  x1: "2",
+  x2: "22",
+  y1: "10",
+  y2: "10",
+  key: "1b3vmo"
+}]];
+var CreditCard = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "CreditCard",
+  iconNode: iconNode$1p
+}));
+var credit_card_default = CreditCard;
+var iconNode$1o = [["path", {
+  d: "M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z",
+  key: "1vdc57"
+}], ["path", {
+  d: "M5 21h14",
+  key: "11awu3"
+}]];
+var Crown = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Crown",
+  iconNode: iconNode$1o
+}));
+var crown_default = Crown;
+var iconNode$1n = [["ellipse", {
+  cx: "12",
+  cy: "5",
+  rx: "9",
+  ry: "3",
+  key: "msslwz"
+}], ["path", {
+  d: "M3 5V19A9 3 0 0 0 21 19V5",
+  key: "1wlel7"
+}], ["path", {
+  d: "M3 12A9 3 0 0 0 21 12",
+  key: "mv7ke4"
+}]];
+var Database = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Database",
+  iconNode: iconNode$1n
+}));
+var database_default = Database;
+var iconNode$1m = [["line", {
+  x1: "12",
+  x2: "12",
+  y1: "2",
+  y2: "22",
+  key: "7eqyqh"
+}], ["path", {
+  d: "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6",
+  key: "1b0p4s"
+}]];
+var DollarSign = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "DollarSign",
+  iconNode: iconNode$1m
+}));
+var dollar_sign_default = DollarSign;
+var iconNode$1l = [["path", {
+  d: "M14.4 14.4 9.6 9.6",
+  key: "ic80wn"
+}], ["path", {
+  d: "M18.657 21.485a2 2 0 1 1-2.829-2.828l-1.767 1.768a2 2 0 1 1-2.829-2.829l6.364-6.364a2 2 0 1 1 2.829 2.829l-1.768 1.767a2 2 0 1 1 2.828 2.829z",
+  key: "nnl7wr"
+}], ["path", {
+  d: "m21.5 21.5-1.4-1.4",
+  key: "1f1ice"
+}], ["path", {
+  d: "M3.9 3.9 2.5 2.5",
+  key: "1evmna"
+}], ["path", {
+  d: "M6.404 12.768a2 2 0 1 1-2.829-2.829l1.768-1.767a2 2 0 1 1-2.828-2.829l2.828-2.828a2 2 0 1 1 2.829 2.828l1.767-1.768a2 2 0 1 1 2.829 2.829z",
+  key: "yhosts"
+}]];
+var Dumbbell = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Dumbbell",
+  iconNode: iconNode$1l
+}));
+var dumbbell_default = Dumbbell;
+var iconNode$1k = [["path", {
   d: "M15 3h6v6",
   key: "1q9fwt"
 }], ["path", {
@@ -5270,19 +5987,139 @@ var iconNode$k = [["path", {
 }]];
 var ExternalLink = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ExternalLink",
-  iconNode: iconNode$k
+  iconNode: iconNode$1k
 }));
 var external_link_default = ExternalLink;
-var iconNode$j = [["path", {
+var iconNode$1j = [["path", {
+  d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
+  key: "1nclc0"
+}], ["circle", {
+  cx: "12",
+  cy: "12",
+  r: "3",
+  key: "1v7zrd"
+}]];
+var Eye = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Eye",
+  iconNode: iconNode$1j
+}));
+var eye_default = Eye;
+var iconNode$1i = [["path", {
+  d: "M10 12.5 8 15l2 2.5",
+  key: "1tg20x"
+}], ["path", {
+  d: "m14 12.5 2 2.5-2 2.5",
+  key: "yinavb"
+}], ["path", {
+  d: "M14 2v4a2 2 0 0 0 2 2h4",
+  key: "tnqrlb"
+}], ["path", {
+  d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z",
+  key: "1mlx9k"
+}]];
+var FileCode = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "FileCode",
+  iconNode: iconNode$1i
+}));
+var file_code_default = FileCode;
+var iconNode$1h = [["path", {
+  d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
+  key: "1rqfz7"
+}], ["path", {
+  d: "M14 2v4a2 2 0 0 0 2 2h4",
+  key: "tnqrlb"
+}], ["path", {
+  d: "M10 9H8",
+  key: "b1mrlr"
+}], ["path", {
+  d: "M16 13H8",
+  key: "t4e002"
+}], ["path", {
+  d: "M16 17H8",
+  key: "z1uh3a"
+}]];
+var FileText = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "FileText",
+  iconNode: iconNode$1h
+}));
+var file_text_default = FileText;
+var iconNode$1g = [["rect", {
+  width: "18",
+  height: "18",
+  x: "3",
+  y: "3",
+  rx: "2",
+  key: "afitv7"
+}], ["path", {
+  d: "M7 3v18",
+  key: "bbkbws"
+}], ["path", {
+  d: "M3 7.5h4",
+  key: "zfgn84"
+}], ["path", {
+  d: "M3 12h18",
+  key: "1i2n21"
+}], ["path", {
+  d: "M3 16.5h4",
+  key: "1230mu"
+}], ["path", {
+  d: "M17 3v18",
+  key: "in4fa5"
+}], ["path", {
+  d: "M17 7.5h4",
+  key: "myr1c1"
+}], ["path", {
+  d: "M17 16.5h4",
+  key: "go4c1d"
+}]];
+var Film = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Film",
+  iconNode: iconNode$1g
+}));
+var film_default = Film;
+var iconNode$1f = [["path", {
+  d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z",
+  key: "i9b6wo"
+}], ["line", {
+  x1: "4",
+  x2: "4",
+  y1: "22",
+  y2: "15",
+  key: "1cm3nv"
+}]];
+var Flag = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Flag",
+  iconNode: iconNode$1f
+}));
+var flag_default = Flag;
+var iconNode$1e = [["path", {
+  d: "M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z",
+  key: "1fr9dc"
+}], ["path", {
+  d: "M8 10v4",
+  key: "tgpxqk"
+}], ["path", {
+  d: "M12 10v2",
+  key: "hh53o1"
+}], ["path", {
+  d: "M16 10v6",
+  key: "1d6xys"
+}]];
+var FolderKanban = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "FolderKanban",
+  iconNode: iconNode$1e
+}));
+var folder_kanban_default = FolderKanban;
+var iconNode$1d = [["path", {
   d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
   key: "1kt360"
 }]];
 var Folder = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Folder",
-  iconNode: iconNode$j
+  iconNode: iconNode$1d
 }));
 var folder_default = Folder;
-var iconNode$i = [["line", {
+var iconNode$1c = [["line", {
   x1: "6",
   x2: "10",
   y1: "11",
@@ -5312,10 +6149,47 @@ var iconNode$i = [["line", {
 }]];
 var Gamepad2 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Gamepad2",
-  iconNode: iconNode$i
+  iconNode: iconNode$1c
 }));
 var gamepad_2_default = Gamepad2;
-var iconNode$h = [["circle", {
+var iconNode$1b = [["path", {
+  d: "m12 14 4-4",
+  key: "9kzdfg"
+}], ["path", {
+  d: "M3.34 19a10 10 0 1 1 17.32 0",
+  key: "19p75a"
+}]];
+var Gauge = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Gauge",
+  iconNode: iconNode$1b
+}));
+var gauge_default = Gauge;
+var iconNode$1a = [["line", {
+  x1: "6",
+  x2: "6",
+  y1: "3",
+  y2: "15",
+  key: "17qcm7"
+}], ["circle", {
+  cx: "18",
+  cy: "6",
+  r: "3",
+  key: "1h7g24"
+}], ["circle", {
+  cx: "6",
+  cy: "18",
+  r: "3",
+  key: "fqmcym"
+}], ["path", {
+  d: "M18 9a9 9 0 0 1-9 9",
+  key: "n2h4wq"
+}]];
+var GitBranch = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "GitBranch",
+  iconNode: iconNode$1a
+}));
+var git_branch_default = GitBranch;
+var iconNode$19 = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -5329,10 +6203,58 @@ var iconNode$h = [["circle", {
 }]];
 var Globe = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Globe",
-  iconNode: iconNode$h
+  iconNode: iconNode$19
 }));
 var globe_default = Globe;
-var iconNode$g = [["path", {
+var iconNode$18 = [["line", {
+  x1: "4",
+  x2: "20",
+  y1: "9",
+  y2: "9",
+  key: "4lhtct"
+}], ["line", {
+  x1: "4",
+  x2: "20",
+  y1: "15",
+  y2: "15",
+  key: "vyu0kd"
+}], ["line", {
+  x1: "10",
+  x2: "8",
+  y1: "3",
+  y2: "21",
+  key: "1ggp8o"
+}], ["line", {
+  x1: "16",
+  x2: "14",
+  y1: "3",
+  y2: "21",
+  key: "weycgp"
+}]];
+var Hash = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Hash",
+  iconNode: iconNode$18
+}));
+var hash_default = Hash;
+var iconNode$17 = [["path", {
+  d: "M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3",
+  key: "1xhozi"
+}]];
+var Headphones = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Headphones",
+  iconNode: iconNode$17
+}));
+var headphones_default = Headphones;
+var iconNode$16 = [["path", {
+  d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z",
+  key: "c3ymky"
+}]];
+var Heart = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Heart",
+  iconNode: iconNode$16
+}));
+var heart_default = Heart;
+var iconNode$15 = [["path", {
   d: "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8",
   key: "5wwlr5"
 }], ["path", {
@@ -5341,10 +6263,10 @@ var iconNode$g = [["path", {
 }]];
 var House = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "House",
-  iconNode: iconNode$g
+  iconNode: iconNode$15
 }));
 var house_default = House;
-var iconNode$f = [["rect", {
+var iconNode$14 = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -5363,10 +6285,123 @@ var iconNode$f = [["rect", {
 }]];
 var Image = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Image",
-  iconNode: iconNode$f
+  iconNode: iconNode$14
 }));
 var image_default = Image;
-var iconNode$e = [["path", {
+var iconNode$13 = [["polyline", {
+  points: "22 12 16 12 14 15 10 15 8 12 2 12",
+  key: "o97t9d"
+}], ["path", {
+  d: "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z",
+  key: "oot6mr"
+}]];
+var Inbox = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Inbox",
+  iconNode: iconNode$13
+}));
+var inbox_default = Inbox;
+var iconNode$12 = [["path", {
+  d: "M6 5v11",
+  key: "mdvv1e"
+}], ["path", {
+  d: "M12 5v6",
+  key: "14ar3b"
+}], ["path", {
+  d: "M18 5v14",
+  key: "7ji314"
+}]];
+var Kanban = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Kanban",
+  iconNode: iconNode$12
+}));
+var kanban_default = Kanban;
+var iconNode$11 = [["path", {
+  d: "m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4",
+  key: "g0fldk"
+}], ["path", {
+  d: "m21 2-9.6 9.6",
+  key: "1j0ho8"
+}], ["circle", {
+  cx: "7.5",
+  cy: "15.5",
+  r: "5.5",
+  key: "yqb3hr"
+}]];
+var Key = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Key",
+  iconNode: iconNode$11
+}));
+var key_default = Key;
+var iconNode$10 = [["line", {
+  x1: "3",
+  x2: "21",
+  y1: "22",
+  y2: "22",
+  key: "j8o0r"
+}], ["line", {
+  x1: "6",
+  x2: "6",
+  y1: "18",
+  y2: "11",
+  key: "10tf0k"
+}], ["line", {
+  x1: "10",
+  x2: "10",
+  y1: "18",
+  y2: "11",
+  key: "54lgf6"
+}], ["line", {
+  x1: "14",
+  x2: "14",
+  y1: "18",
+  y2: "11",
+  key: "380y"
+}], ["line", {
+  x1: "18",
+  x2: "18",
+  y1: "18",
+  y2: "11",
+  key: "1kevvc"
+}], ["polygon", {
+  points: "12 2 20 7 4 7",
+  key: "jkujk7"
+}]];
+var Landmark = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Landmark",
+  iconNode: iconNode$10
+}));
+var landmark_default = Landmark;
+var iconNode$$ = [["path", {
+  d: "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z",
+  key: "zw3jo"
+}], ["path", {
+  d: "M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12",
+  key: "1wduqc"
+}], ["path", {
+  d: "M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17",
+  key: "kqbvx6"
+}]];
+var Layers = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Layers",
+  iconNode: iconNode$$
+}));
+var layers_default = Layers;
+var iconNode$_ = [["path", {
+  d: "M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5",
+  key: "1gvzjb"
+}], ["path", {
+  d: "M9 18h6",
+  key: "x1upvd"
+}], ["path", {
+  d: "M10 22h4",
+  key: "ceow96"
+}]];
+var Lightbulb = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Lightbulb",
+  iconNode: iconNode$_
+}));
+var lightbulb_default = Lightbulb;
+var iconNode$Z = [["path", {
   d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
   key: "1cjeqo"
 }], ["path", {
@@ -5375,10 +6410,97 @@ var iconNode$e = [["path", {
 }]];
 var Link = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Link",
-  iconNode: iconNode$e
+  iconNode: iconNode$Z
 }));
 var link_default = Link;
-var iconNode$d = [["path", {
+var iconNode$Y = [["rect", {
+  x: "3",
+  y: "5",
+  width: "6",
+  height: "6",
+  rx: "1",
+  key: "1defrl"
+}], ["path", {
+  d: "m3 17 2 2 4-4",
+  key: "1jhpwq"
+}], ["path", {
+  d: "M13 6h8",
+  key: "15sg57"
+}], ["path", {
+  d: "M13 12h8",
+  key: "h98zly"
+}], ["path", {
+  d: "M13 18h8",
+  key: "oe0vm4"
+}]];
+var ListTodo = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ListTodo",
+  iconNode: iconNode$Y
+}));
+var list_todo_default = ListTodo;
+var iconNode$X = [["rect", {
+  width: "18",
+  height: "11",
+  x: "3",
+  y: "11",
+  rx: "2",
+  ry: "2",
+  key: "1w4ew1"
+}], ["path", {
+  d: "M7 11V7a5 5 0 0 1 10 0v4",
+  key: "fwvmzm"
+}]];
+var Lock = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Lock",
+  iconNode: iconNode$X
+}));
+var lock_default = Lock;
+var iconNode$W = [["rect", {
+  width: "20",
+  height: "16",
+  x: "2",
+  y: "4",
+  rx: "2",
+  key: "18n3k1"
+}], ["path", {
+  d: "m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7",
+  key: "1ocrg3"
+}]];
+var Mail = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Mail",
+  iconNode: iconNode$W
+}));
+var mail_default = Mail;
+var iconNode$V = [["path", {
+  d: "M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0",
+  key: "1r0f0z"
+}], ["circle", {
+  cx: "12",
+  cy: "10",
+  r: "3",
+  key: "ilqhr7"
+}]];
+var MapPin = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "MapPin",
+  iconNode: iconNode$V
+}));
+var map_pin_default = MapPin;
+var iconNode$U = [["path", {
+  d: "M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z",
+  key: "169xi5"
+}], ["path", {
+  d: "M15 5.764v15",
+  key: "1pn4in"
+}], ["path", {
+  d: "M9 3.236v15",
+  key: "1uimfh"
+}]];
+var Map$1 = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Map",
+  iconNode: iconNode$U
+}));
+var map_default = Map$1;
+var iconNode$T = [["path", {
   d: "M8 3H5a2 2 0 0 0-2 2v3",
   key: "1dcmit"
 }], ["path", {
@@ -5393,10 +6515,43 @@ var iconNode$d = [["path", {
 }]];
 var Maximize = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Maximize",
-  iconNode: iconNode$d
+  iconNode: iconNode$T
 }));
 var maximize_default = Maximize;
-var iconNode$c = [["path", {
+var iconNode$S = [["path", {
+  d: "m3 11 18-5v12L3 14v-3z",
+  key: "n962bs"
+}], ["path", {
+  d: "M11.6 16.8a3 3 0 1 1-5.8-1.6",
+  key: "1yl0tm"
+}]];
+var Megaphone = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Megaphone",
+  iconNode: iconNode$S
+}));
+var megaphone_default = Megaphone;
+var iconNode$R = [["path", {
+  d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+  key: "1lielz"
+}]];
+var MessageSquare = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "MessageSquare",
+  iconNode: iconNode$R
+}));
+var message_square_default = MessageSquare;
+var iconNode$Q = [["path", {
+  d: "M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z",
+  key: "p1xzt8"
+}], ["path", {
+  d: "M18 9h2a2 2 0 0 1 2 2v11l-4-4h-6a2 2 0 0 1-2-2v-1",
+  key: "1cx29u"
+}]];
+var MessagesSquare = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "MessagesSquare",
+  iconNode: iconNode$Q
+}));
+var messages_square_default = MessagesSquare;
+var iconNode$P = [["path", {
   d: "M8 3v3a2 2 0 0 1-2 2H3",
   key: "hohbtr"
 }], ["path", {
@@ -5411,10 +6566,71 @@ var iconNode$c = [["path", {
 }]];
 var Minimize = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Minimize",
-  iconNode: iconNode$c
+  iconNode: iconNode$P
 }));
 var minimize_default = Minimize;
-var iconNode$b = [["circle", {
+var iconNode$O = [["path", {
+  d: "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z",
+  key: "a7tn18"
+}]];
+var Moon = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Moon",
+  iconNode: iconNode$O
+}));
+var moon_default = Moon;
+var iconNode$N = [["path", {
+  d: "M9 18V5l12-2v13",
+  key: "1jmyc2"
+}], ["circle", {
+  cx: "6",
+  cy: "18",
+  r: "3",
+  key: "fqmcym"
+}], ["circle", {
+  cx: "18",
+  cy: "16",
+  r: "3",
+  key: "1hluhg"
+}]];
+var Music = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Music",
+  iconNode: iconNode$N
+}));
+var music_default = Music;
+var iconNode$M = [["rect", {
+  x: "16",
+  y: "16",
+  width: "6",
+  height: "6",
+  rx: "1",
+  key: "4q2zg0"
+}], ["rect", {
+  x: "2",
+  y: "16",
+  width: "6",
+  height: "6",
+  rx: "1",
+  key: "8cvhb9"
+}], ["rect", {
+  x: "9",
+  y: "2",
+  width: "6",
+  height: "6",
+  rx: "1",
+  key: "1egb70"
+}], ["path", {
+  d: "M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3",
+  key: "1jsf9p"
+}], ["path", {
+  d: "M12 12V8",
+  key: "2874zd"
+}]];
+var Network = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Network",
+  iconNode: iconNode$M
+}));
+var network_default = Network;
+var iconNode$L = [["circle", {
   cx: "13.5",
   cy: "6.5",
   r: ".5",
@@ -5444,10 +6660,10 @@ var iconNode$b = [["circle", {
 }]];
 var Palette = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Palette",
-  iconNode: iconNode$b
+  iconNode: iconNode$L
 }));
 var palette_default = Palette;
-var iconNode$a = [["rect", {
+var iconNode$K = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -5460,10 +6676,10 @@ var iconNode$a = [["rect", {
 }]];
 var PanelBottom = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "PanelBottom",
-  iconNode: iconNode$a
+  iconNode: iconNode$K
 }));
 var panel_bottom_default = PanelBottom;
-var iconNode$9 = [["rect", {
+var iconNode$J = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -5476,10 +6692,60 @@ var iconNode$9 = [["rect", {
 }]];
 var PanelRight = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "PanelRight",
-  iconNode: iconNode$9
+  iconNode: iconNode$J
 }));
 var panel_right_default = PanelRight;
-var iconNode$8 = [["path", {
+var iconNode$I = [["path", {
+  d: "M15.707 21.293a1 1 0 0 1-1.414 0l-1.586-1.586a1 1 0 0 1 0-1.414l5.586-5.586a1 1 0 0 1 1.414 0l1.586 1.586a1 1 0 0 1 0 1.414z",
+  key: "nt11vn"
+}], ["path", {
+  d: "m18 13-1.375-6.874a1 1 0 0 0-.746-.776L3.235 2.028a1 1 0 0 0-1.207 1.207L5.35 15.879a1 1 0 0 0 .776.746L13 18",
+  key: "15qc1e"
+}], ["path", {
+  d: "m2.3 2.3 7.286 7.286",
+  key: "1wuzzi"
+}], ["circle", {
+  cx: "11",
+  cy: "11",
+  r: "2",
+  key: "xmgehs"
+}]];
+var PenTool = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "PenTool",
+  iconNode: iconNode$I
+}));
+var pen_tool_default = PenTool;
+var iconNode$H = [["path", {
+  d: "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z",
+  key: "foiqr5"
+}]];
+var Phone = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Phone",
+  iconNode: iconNode$H
+}));
+var phone_default = Phone;
+var iconNode$G = [["path", {
+  d: "M12 17v5",
+  key: "bb1du9"
+}], ["path", {
+  d: "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
+  key: "1nkz8b"
+}]];
+var Pin = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Pin",
+  iconNode: iconNode$G
+}));
+var pin_default = Pin;
+var iconNode$F = [["path", {
+  d: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z",
+  key: "1v9wt8"
+}]];
+var Plane = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Plane",
+  iconNode: iconNode$F
+}));
+var plane_default = Plane;
+var iconNode$E = [["path", {
   d: "M5 12h14",
   key: "1ays0h"
 }], ["path", {
@@ -5488,10 +6754,122 @@ var iconNode$8 = [["path", {
 }]];
 var Plus = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Plus",
-  iconNode: iconNode$8
+  iconNode: iconNode$E
 }));
 var plus_default = Plus;
-var iconNode$7 = [["path", {
+var iconNode$D = [["path", {
+  d: "M16.85 18.58a9 9 0 1 0-9.7 0",
+  key: "d71mpg"
+}], ["path", {
+  d: "M8 14a5 5 0 1 1 8 0",
+  key: "fc81rn"
+}], ["circle", {
+  cx: "12",
+  cy: "11",
+  r: "1",
+  key: "1gvufo"
+}], ["path", {
+  d: "M13 17a1 1 0 1 0-2 0l.5 4.5a.5.5 0 1 0 1 0Z",
+  key: "za5kbj"
+}]];
+var Podcast = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Podcast",
+  iconNode: iconNode$D
+}));
+var podcast_default = Podcast;
+var iconNode$C = [["rect", {
+  width: "5",
+  height: "5",
+  x: "3",
+  y: "3",
+  rx: "1",
+  key: "1tu5fj"
+}], ["rect", {
+  width: "5",
+  height: "5",
+  x: "16",
+  y: "3",
+  rx: "1",
+  key: "1v8r4q"
+}], ["rect", {
+  width: "5",
+  height: "5",
+  x: "3",
+  y: "16",
+  rx: "1",
+  key: "1x03jg"
+}], ["path", {
+  d: "M21 16h-3a2 2 0 0 0-2 2v3",
+  key: "177gqh"
+}], ["path", {
+  d: "M21 21v.01",
+  key: "ents32"
+}], ["path", {
+  d: "M12 7v3a2 2 0 0 1-2 2H7",
+  key: "8crl2c"
+}], ["path", {
+  d: "M3 12h.01",
+  key: "nlz23k"
+}], ["path", {
+  d: "M12 3h.01",
+  key: "n36tog"
+}], ["path", {
+  d: "M12 16v.01",
+  key: "133mhm"
+}], ["path", {
+  d: "M16 12h1",
+  key: "1slzba"
+}], ["path", {
+  d: "M21 12v.01",
+  key: "1lwtk9"
+}], ["path", {
+  d: "M12 21v-1",
+  key: "1880an"
+}]];
+var QrCode = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "QrCode",
+  iconNode: iconNode$C
+}));
+var qr_code_default = QrCode;
+var iconNode$B = [["path", {
+  d: "M4.9 19.1C1 15.2 1 8.8 4.9 4.9",
+  key: "1vaf9d"
+}], ["path", {
+  d: "M7.8 16.2c-2.3-2.3-2.3-6.1 0-8.5",
+  key: "u1ii0m"
+}], ["circle", {
+  cx: "12",
+  cy: "12",
+  r: "2",
+  key: "1c9p78"
+}], ["path", {
+  d: "M16.2 7.8c2.3 2.3 2.3 6.1 0 8.5",
+  key: "1j5fej"
+}], ["path", {
+  d: "M19.1 4.9C23 8.8 23 15.1 19.1 19",
+  key: "10b0cb"
+}]];
+var Radio = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Radio",
+  iconNode: iconNode$B
+}));
+var radio_default = Radio;
+var iconNode$A = [["path", {
+  d: "M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z",
+  key: "q3az6g"
+}], ["path", {
+  d: "M16 8h-6a2 2 0 1 0 0 4h4a2 2 0 1 1 0 4H8",
+  key: "1h4pet"
+}], ["path", {
+  d: "M12 17.5v-11",
+  key: "1jc1ny"
+}]];
+var Receipt = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Receipt",
+  iconNode: iconNode$A
+}));
+var receipt_default = Receipt;
+var iconNode$z = [["path", {
   d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",
   key: "v9h5vc"
 }], ["path", {
@@ -5506,10 +6884,10 @@ var iconNode$7 = [["path", {
 }]];
 var RefreshCw = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "RefreshCw",
-  iconNode: iconNode$7
+  iconNode: iconNode$z
 }));
 var refresh_cw_default = RefreshCw;
-var iconNode$6 = [["path", {
+var iconNode$y = [["path", {
   d: "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z",
   key: "m3kijz"
 }], ["path", {
@@ -5524,10 +6902,10 @@ var iconNode$6 = [["path", {
 }]];
 var Rocket = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Rocket",
-  iconNode: iconNode$6
+  iconNode: iconNode$y
 }));
 var rocket_default = Rocket;
-var iconNode$5 = [["path", {
+var iconNode$x = [["path", {
   d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
   key: "1357e3"
 }], ["path", {
@@ -5536,10 +6914,56 @@ var iconNode$5 = [["path", {
 }]];
 var RotateCcw = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "RotateCcw",
-  iconNode: iconNode$5
+  iconNode: iconNode$x
 }));
 var rotate_ccw_default = RotateCcw;
-var iconNode$4 = [["circle", {
+var iconNode$w = [["path", {
+  d: "m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z",
+  key: "7g6ntu"
+}], ["path", {
+  d: "m2 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z",
+  key: "ijws7r"
+}], ["path", {
+  d: "M7 21h10",
+  key: "1b0cd5"
+}], ["path", {
+  d: "M12 3v18",
+  key: "108xh3"
+}], ["path", {
+  d: "M3 7h2c2 0 5-1 7-2 2 1 5 2 7 2h2",
+  key: "3gwbw2"
+}]];
+var Scale = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Scale",
+  iconNode: iconNode$w
+}));
+var scale_default = Scale;
+var iconNode$v = [["circle", {
+  cx: "6",
+  cy: "6",
+  r: "3",
+  key: "1lh9wr"
+}], ["path", {
+  d: "M8.12 8.12 12 12",
+  key: "1alkpv"
+}], ["path", {
+  d: "M20 4 8.12 15.88",
+  key: "xgtan2"
+}], ["circle", {
+  cx: "6",
+  cy: "18",
+  r: "3",
+  key: "fqmcym"
+}], ["path", {
+  d: "M14.8 14.8 20 20",
+  key: "ptml3r"
+}]];
+var Scissors = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Scissors",
+  iconNode: iconNode$v
+}));
+var scissors_default = Scissors;
+var iconNode$u = [["circle", {
   cx: "11",
   cy: "11",
   r: "8",
@@ -5550,10 +6974,110 @@ var iconNode$4 = [["circle", {
 }]];
 var Search = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Search",
-  iconNode: iconNode$4
+  iconNode: iconNode$u
 }));
 var search_default = Search;
-var iconNode$3 = [["path", {
+var iconNode$t = [["path", {
+  d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
+  key: "1ffxy3"
+}], ["path", {
+  d: "m21.854 2.147-10.94 10.939",
+  key: "12cjpa"
+}]];
+var Send = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Send",
+  iconNode: iconNode$t
+}));
+var send_default = Send;
+var iconNode$s = [["rect", {
+  width: "20",
+  height: "8",
+  x: "2",
+  y: "2",
+  rx: "2",
+  ry: "2",
+  key: "ngkwjq"
+}], ["rect", {
+  width: "20",
+  height: "8",
+  x: "2",
+  y: "14",
+  rx: "2",
+  ry: "2",
+  key: "iecqi9"
+}], ["line", {
+  x1: "6",
+  x2: "6.01",
+  y1: "6",
+  y2: "6",
+  key: "16zg32"
+}], ["line", {
+  x1: "6",
+  x2: "6.01",
+  y1: "18",
+  y2: "18",
+  key: "nzw8ys"
+}]];
+var Server = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Server",
+  iconNode: iconNode$s
+}));
+var server_default = Server;
+var iconNode$r = [["path", {
+  d: "M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z",
+  key: "1bo67w"
+}], ["rect", {
+  x: "3",
+  y: "14",
+  width: "7",
+  height: "7",
+  rx: "1",
+  key: "1bkyp8"
+}], ["circle", {
+  cx: "17.5",
+  cy: "17.5",
+  r: "3.5",
+  key: "w3z12y"
+}]];
+var Shapes = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Shapes",
+  iconNode: iconNode$r
+}));
+var shapes_default = Shapes;
+var iconNode$q = [["circle", {
+  cx: "18",
+  cy: "5",
+  r: "3",
+  key: "gq8acd"
+}], ["circle", {
+  cx: "6",
+  cy: "12",
+  r: "3",
+  key: "w7nqdw"
+}], ["circle", {
+  cx: "18",
+  cy: "19",
+  r: "3",
+  key: "1xt0gg"
+}], ["line", {
+  x1: "8.59",
+  x2: "15.42",
+  y1: "13.51",
+  y2: "17.49",
+  key: "47mynk"
+}], ["line", {
+  x1: "15.41",
+  x2: "8.59",
+  y1: "6.51",
+  y2: "10.49",
+  key: "1n3mei"
+}]];
+var Share2 = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Share2",
+  iconNode: iconNode$q
+}));
+var share_2_default = Share2;
+var iconNode$p = [["path", {
   d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
   key: "oel41y"
 }], ["path", {
@@ -5562,10 +7086,195 @@ var iconNode$3 = [["path", {
 }]];
 var ShieldCheck = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ShieldCheck",
-  iconNode: iconNode$3
+  iconNode: iconNode$p
 }));
 var shield_check_default = ShieldCheck;
-var iconNode$2 = [["path", {
+var iconNode$o = [["path", {
+  d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+  key: "oel41y"
+}]];
+var Shield = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Shield",
+  iconNode: iconNode$o
+}));
+var shield_default = Shield;
+var iconNode$n = [["path", {
+  d: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z",
+  key: "hou9p0"
+}], ["path", {
+  d: "M3 6h18",
+  key: "d0wm0j"
+}], ["path", {
+  d: "M16 10a4 4 0 0 1-8 0",
+  key: "1ltviw"
+}]];
+var ShoppingBag = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ShoppingBag",
+  iconNode: iconNode$n
+}));
+var shopping_bag_default = ShoppingBag;
+var iconNode$m = [["circle", {
+  cx: "8",
+  cy: "21",
+  r: "1",
+  key: "jimo8o"
+}], ["circle", {
+  cx: "19",
+  cy: "21",
+  r: "1",
+  key: "13723u"
+}], ["path", {
+  d: "M2.05 2.05h2l2.66 12.42a2 2 0 0 0 2 1.58h9.78a2 2 0 0 0 1.95-1.57l1.65-7.43H5.12",
+  key: "9zh506"
+}]];
+var ShoppingCart = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ShoppingCart",
+  iconNode: iconNode$m
+}));
+var shopping_cart_default = ShoppingCart;
+var iconNode$l = [["circle", {
+  cx: "12",
+  cy: "12",
+  r: "10",
+  key: "1mglay"
+}], ["path", {
+  d: "M8 14s1.5 2 4 2 4-2 4-2",
+  key: "1y1vjs"
+}], ["line", {
+  x1: "9",
+  x2: "9.01",
+  y1: "9",
+  y2: "9",
+  key: "yxxnd0"
+}], ["line", {
+  x1: "15",
+  x2: "15.01",
+  y1: "9",
+  y2: "9",
+  key: "1p4y9e"
+}]];
+var Smile = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Smile",
+  iconNode: iconNode$l
+}));
+var smile_default = Smile;
+var iconNode$k = [["path", {
+  d: "M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z",
+  key: "4pj2yx"
+}], ["path", {
+  d: "M20 3v4",
+  key: "1olli1"
+}], ["path", {
+  d: "M22 5h-4",
+  key: "1gvqau"
+}], ["path", {
+  d: "M4 17v2",
+  key: "vumght"
+}], ["path", {
+  d: "M5 18H3",
+  key: "zchphs"
+}]];
+var Sparkles = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Sparkles",
+  iconNode: iconNode$k
+}));
+var sparkles_default = Sparkles;
+var iconNode$j = [["path", {
+  d: "M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z",
+  key: "r04s7s"
+}]];
+var Star = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Star",
+  iconNode: iconNode$j
+}));
+var star_default = Star;
+var iconNode$i = [["circle", {
+  cx: "12",
+  cy: "12",
+  r: "4",
+  key: "4exip2"
+}], ["path", {
+  d: "M12 2v2",
+  key: "tus03m"
+}], ["path", {
+  d: "M12 20v2",
+  key: "1lh1kg"
+}], ["path", {
+  d: "m4.93 4.93 1.41 1.41",
+  key: "149t6j"
+}], ["path", {
+  d: "m17.66 17.66 1.41 1.41",
+  key: "ptbguv"
+}], ["path", {
+  d: "M2 12h2",
+  key: "1t8f8n"
+}], ["path", {
+  d: "M20 12h2",
+  key: "1q8mjw"
+}], ["path", {
+  d: "m6.34 17.66-1.41 1.41",
+  key: "1m8zz5"
+}], ["path", {
+  d: "m19.07 4.93-1.41 1.41",
+  key: "1shlcs"
+}]];
+var Sun = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Sun",
+  iconNode: iconNode$i
+}));
+var sun_default = Sun;
+var iconNode$h = [["path", {
+  d: "M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z",
+  key: "vktsd0"
+}], ["circle", {
+  cx: "7.5",
+  cy: "7.5",
+  r: ".5",
+  fill: "currentColor",
+  key: "kqv944"
+}]];
+var Tag = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Tag",
+  iconNode: iconNode$h
+}));
+var tag_default = Tag;
+var iconNode$g = [["circle", {
+  cx: "12",
+  cy: "12",
+  r: "10",
+  key: "1mglay"
+}], ["circle", {
+  cx: "12",
+  cy: "12",
+  r: "6",
+  key: "1vlfrh"
+}], ["circle", {
+  cx: "12",
+  cy: "12",
+  r: "2",
+  key: "1c9p78"
+}]];
+var Target = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Target",
+  iconNode: iconNode$g
+}));
+var target_default = Target;
+var iconNode$f = [["polyline", {
+  points: "4 17 10 11 4 5",
+  key: "akl6gq"
+}], ["line", {
+  x1: "12",
+  x2: "20",
+  y1: "19",
+  y2: "19",
+  key: "q2wloq"
+}]];
+var Terminal = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Terminal",
+  iconNode: iconNode$f
+}));
+var terminal_default = Terminal;
+var iconNode$e = [["path", {
   d: "M3 6h18",
   key: "d0wm0j"
 }], ["path", {
@@ -5589,10 +7298,10 @@ var iconNode$2 = [["path", {
 }]];
 var Trash2 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Trash2",
-  iconNode: iconNode$2
+  iconNode: iconNode$e
 }));
 var trash_2_default = Trash2;
-var iconNode$1 = [["polyline", {
+var iconNode$d = [["polyline", {
   points: "22 7 13.5 15.5 8.5 10.5 2 17",
   key: "126l90"
 }], ["polyline", {
@@ -5601,10 +7310,207 @@ var iconNode$1 = [["polyline", {
 }]];
 var TrendingUp = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "TrendingUp",
-  iconNode: iconNode$1
+  iconNode: iconNode$d
 }));
 var trending_up_default = TrendingUp;
-var iconNode = [["path", {
+var iconNode$c = [["path", {
+  d: "M6 9H4.5a2.5 2.5 0 0 1 0-5H6",
+  key: "17hqa7"
+}], ["path", {
+  d: "M18 9h1.5a2.5 2.5 0 0 0 0-5H18",
+  key: "lmptdp"
+}], ["path", {
+  d: "M4 22h16",
+  key: "57wxv0"
+}], ["path", {
+  d: "M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22",
+  key: "1nw9bq"
+}], ["path", {
+  d: "M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22",
+  key: "1np0yb"
+}], ["path", {
+  d: "M18 2H6v7a6 6 0 0 0 12 0V2Z",
+  key: "u46fv3"
+}]];
+var Trophy = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Trophy",
+  iconNode: iconNode$c
+}));
+var trophy_default = Trophy;
+var iconNode$b = [["rect", {
+  width: "20",
+  height: "15",
+  x: "2",
+  y: "7",
+  rx: "2",
+  ry: "2",
+  key: "10ag99"
+}], ["polyline", {
+  points: "17 2 12 7 7 2",
+  key: "11pgbg"
+}]];
+var Tv = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Tv",
+  iconNode: iconNode$b
+}));
+var tv_default = Tv;
+var iconNode$a = [["path", {
+  d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
+  key: "1yyitq"
+}], ["circle", {
+  cx: "9",
+  cy: "7",
+  r: "4",
+  key: "nufk8"
+}], ["polyline", {
+  points: "16 11 18 13 22 9",
+  key: "1pwet4"
+}]];
+var UserCheck = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "UserCheck",
+  iconNode: iconNode$a
+}));
+var user_check_default = UserCheck;
+var iconNode$9 = [["path", {
+  d: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2",
+  key: "975kel"
+}], ["circle", {
+  cx: "12",
+  cy: "7",
+  r: "4",
+  key: "17ys0d"
+}]];
+var User = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "User",
+  iconNode: iconNode$9
+}));
+var user_default = User;
+var iconNode$8 = [["path", {
+  d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
+  key: "1yyitq"
+}], ["circle", {
+  cx: "9",
+  cy: "7",
+  r: "4",
+  key: "nufk8"
+}], ["path", {
+  d: "M22 21v-2a4 4 0 0 0-3-3.87",
+  key: "kshegd"
+}], ["path", {
+  d: "M16 3.13a4 4 0 0 1 0 7.75",
+  key: "1da9ce"
+}]];
+var Users = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Users",
+  iconNode: iconNode$8
+}));
+var users_default = Users;
+var iconNode$7 = [["path", {
+  d: "M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2",
+  key: "cjf0a3"
+}], ["path", {
+  d: "M7 2v20",
+  key: "1473qp"
+}], ["path", {
+  d: "M21 15V2a5 5 0 0 0-5 5v6c0 1.1.9 2 2 2h3Zm0 0v7",
+  key: "j28e5"
+}]];
+var Utensils = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Utensils",
+  iconNode: iconNode$7
+}));
+var utensils_default = Utensils;
+var iconNode$6 = [["path", {
+  d: "m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5",
+  key: "ftymec"
+}], ["rect", {
+  x: "2",
+  y: "6",
+  width: "14",
+  height: "12",
+  rx: "2",
+  key: "158x01"
+}]];
+var Video = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Video",
+  iconNode: iconNode$6
+}));
+var video_default = Video;
+var iconNode$5 = [["path", {
+  d: "M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1",
+  key: "18etb6"
+}], ["path", {
+  d: "M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4",
+  key: "xoc0q4"
+}]];
+var Wallet = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Wallet",
+  iconNode: iconNode$5
+}));
+var wallet_default = Wallet;
+var iconNode$4 = [["path", {
+  d: "m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72",
+  key: "ul74o6"
+}], ["path", {
+  d: "m14 7 3 3",
+  key: "1r5n42"
+}], ["path", {
+  d: "M5 6v4",
+  key: "ilb8ba"
+}], ["path", {
+  d: "M19 14v4",
+  key: "blhpug"
+}], ["path", {
+  d: "M10 2v2",
+  key: "7u0qdc"
+}], ["path", {
+  d: "M7 8H3",
+  key: "zfb6yr"
+}], ["path", {
+  d: "M21 16h-4",
+  key: "1cnmox"
+}], ["path", {
+  d: "M11 3H9",
+  key: "1obp7u"
+}]];
+var WandSparkles = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "WandSparkles",
+  iconNode: iconNode$4
+}));
+var wand_sparkles_default = WandSparkles;
+var iconNode$3 = [["rect", {
+  width: "8",
+  height: "8",
+  x: "3",
+  y: "3",
+  rx: "2",
+  key: "by2w9f"
+}], ["path", {
+  d: "M7 11v4a2 2 0 0 0 2 2h4",
+  key: "xkn7yn"
+}], ["rect", {
+  width: "8",
+  height: "8",
+  x: "13",
+  y: "13",
+  rx: "2",
+  key: "1cgmvn"
+}]];
+var Workflow = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Workflow",
+  iconNode: iconNode$3
+}));
+var workflow_default = Workflow;
+var iconNode$2 = [["path", {
+  d: "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z",
+  key: "cbrjhi"
+}]];
+var Wrench = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Wrench",
+  iconNode: iconNode$2
+}));
+var wrench_default = Wrench;
+var iconNode$1 = [["path", {
   d: "M18 6 6 18",
   key: "1bl5f8"
 }], ["path", {
@@ -5613,34 +7519,256 @@ var iconNode = [["path", {
 }]];
 var X = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "X",
-  iconNode
+  iconNode: iconNode$1
 }));
 var x_default = X;
-const getSmartIcon = (name, props) => {
-  const n = name.toLowerCase();
-  const p = {
-    size: 14,
-    strokeWidth: 2,
-    ...props
+var iconNode = [["path", {
+  d: "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z",
+  key: "1xq2db"
+}]];
+var Zap = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Zap",
+  iconNode
+}));
+var zap_default = Zap;
+const ICON_CATEGORIES = [
+  "All",
+  "General",
+  "Development",
+  "Business",
+  "Creative",
+  "Productivity",
+  "Social",
+  "Life"
+];
+const ICON_LIST = [
+  // General
+  { id: "folder", name: "Folder", category: "General", keywords: ["dir", "files", "project", "work"], component: folder_default },
+  { id: "folder-kanban", name: "Project Board", category: "General", keywords: ["board", "agile", "flow"], component: folder_kanban_default },
+  { id: "home", name: "Home", category: "General", keywords: ["main", "hq", "base", "personal"], component: house_default },
+  { id: "star", name: "Star", category: "General", keywords: ["favorite", "top", "starred", "best"], component: star_default },
+  { id: "bookmark", name: "Bookmark", category: "General", keywords: ["saved", "reading", "mark"], component: bookmark_default },
+  { id: "archive", name: "Archive", category: "General", keywords: ["storage", "vault", "old", "backup"], component: archive_default },
+  { id: "pin", name: "Pin", category: "General", keywords: ["focus", "sticky", "pinned"], component: pin_default },
+  { id: "tag", name: "Tag", category: "General", keywords: ["label", "category", "badge"], component: tag_default },
+  { id: "box", name: "Box", category: "General", keywords: ["package", "container", "product"], component: box_default },
+  { id: "layers", name: "Layers", category: "General", keywords: ["stack", "system", "structure"], component: layers_default },
+  { id: "sparkles", name: "Sparkles", category: "General", keywords: ["ai", "magic", "smart", "new"], component: sparkles_default },
+  { id: "zap", name: "Zap", category: "General", keywords: ["fast", "energy", "speed", "power"], component: zap_default },
+  { id: "compass", name: "Compass", category: "General", keywords: ["explore", "travel", "navigate"], component: compass_default },
+  { id: "flag", name: "Flag", category: "General", keywords: ["goal", "priority", "marker"], component: flag_default },
+  { id: "globe", name: "Globe", category: "General", keywords: ["web", "internet", "world", "network"], component: globe_default },
+  { id: "hash", name: "Hash", category: "General", keywords: ["channel", "topic", "tag"], component: hash_default },
+  { id: "shield", name: "Shield", category: "General", keywords: ["security", "auth", "protect", "safe"], component: shield_default },
+  { id: "lock", name: "Lock", category: "General", keywords: ["private", "secret", "vault", "secure"], component: lock_default },
+  { id: "key", name: "Key", category: "General", keywords: ["access", "auth", "token", "password"], component: key_default },
+  { id: "crown", name: "Crown", category: "General", keywords: ["vip", "master", "admin", "primary"], component: crown_default },
+  // Development
+  { id: "terminal", name: "Terminal", category: "Development", keywords: ["cli", "bash", "shell", "console"], component: terminal_default },
+  { id: "code-2", name: "Code", category: "Development", keywords: ["dev", "source", "programming", "software"], component: code_xml_default },
+  { id: "git-branch", name: "Git Branch", category: "Development", keywords: ["repo", "github", "vcs", "pr"], component: git_branch_default },
+  { id: "cpu", name: "CPU", category: "Development", keywords: ["engine", "hardware", "compute", "core"], component: cpu_default },
+  { id: "bot", name: "Bot / AI", category: "Development", keywords: ["ai", "agent", "robot", "llm"], component: bot_default },
+  { id: "server", name: "Server", category: "Development", keywords: ["backend", "infra", "host", "cloud"], component: server_default },
+  { id: "database", name: "Database", category: "Development", keywords: ["sql", "db", "postgres", "redis"], component: database_default },
+  { id: "bug", name: "Bug Tracker", category: "Development", keywords: ["issue", "debug", "error", "testing"], component: bug_default },
+  { id: "circuit-board", name: "Circuit", category: "Development", keywords: ["hardware", "system", "chip"], component: circuit_board_default },
+  { id: "brackets", name: "Brackets", category: "Development", keywords: ["json", "code", "syntax"], component: brackets_default },
+  { id: "file-code", name: "Code File", category: "Development", keywords: ["script", "ts", "js", "python"], component: file_code_default },
+  { id: "command", name: "Command", category: "Development", keywords: ["shortcut", "palette", "terminal"], component: command_default },
+  { id: "qr-code", name: "QR Code", category: "Development", keywords: ["scan", "mobile", "auth"], component: qr_code_default },
+  { id: "workflow", name: "Workflow", category: "Development", keywords: ["ci", "pipeline", "automation"], component: workflow_default },
+  { id: "cloud", name: "Cloud", category: "Development", keywords: ["aws", "gcp", "azure", "infra"], component: cloud_default },
+  { id: "network", name: "Network", category: "Development", keywords: ["topology", "connections", "graph"], component: network_default },
+  { id: "wrench", name: "Tools", category: "Development", keywords: ["settings", "config", "maintenance"], component: wrench_default },
+  // Business
+  { id: "briefcase", name: "Briefcase", category: "Business", keywords: ["work", "client", "job", "b2b"], component: briefcase_default },
+  { id: "building-2", name: "Building", category: "Business", keywords: ["company", "corp", "office", "agency"], component: building_2_default },
+  { id: "dollar-sign", name: "Finance", category: "Business", keywords: ["money", "usd", "revenue", "price"], component: dollar_sign_default },
+  { id: "wallet", name: "Wallet", category: "Business", keywords: ["crypto", "funds", "pay", "bank"], component: wallet_default },
+  { id: "receipt", name: "Receipt", category: "Business", keywords: ["invoice", "bill", "expense", "tax"], component: receipt_default },
+  { id: "credit-card", name: "Credit Card", category: "Business", keywords: ["stripe", "billing", "sub"], component: credit_card_default },
+  { id: "trending-up", name: "Analytics", category: "Business", keywords: ["growth", "sales", "stats", "charts"], component: trending_up_default },
+  { id: "landmark", name: "Bank / Gov", category: "Business", keywords: ["legal", "institution", "finance"], component: landmark_default },
+  { id: "scale", name: "Legal", category: "Business", keywords: ["law", "compliance", "policy", "terms"], component: scale_default },
+  { id: "target", name: "Targets", category: "Business", keywords: ["okr", "kpi", "goal", "roadmap"], component: target_default },
+  { id: "calculator", name: "Calculator", category: "Business", keywords: ["math", "accounting", "estimate"], component: calculator_default },
+  { id: "coins", name: "Coins", category: "Business", keywords: ["tokens", "rewards", "crypto"], component: coins_default },
+  // Creative
+  { id: "palette", name: "Palette", category: "Creative", keywords: ["design", "ui", "art", "theme"], component: palette_default },
+  { id: "pen-tool", name: "Pen Tool", category: "Creative", keywords: ["vector", "figma", "draw", "illustration"], component: pen_tool_default },
+  { id: "camera", name: "Camera", category: "Creative", keywords: ["photo", "studio", "picture"], component: camera_default },
+  { id: "video", name: "Video", category: "Creative", keywords: ["record", "stream", "film", "youtube"], component: video_default },
+  { id: "film", name: "Film", category: "Creative", keywords: ["movie", "cinema", "animation"], component: film_default },
+  { id: "music", name: "Music", category: "Creative", keywords: ["audio", "sound", "track", "spotify"], component: music_default },
+  { id: "headphones", name: "Headphones", category: "Creative", keywords: ["listen", "audio", "beats"], component: headphones_default },
+  { id: "image", name: "Image", category: "Creative", keywords: ["picture", "asset", "gallery"], component: image_default },
+  { id: "wand-2", name: "Magic Wand", category: "Creative", keywords: ["fx", "filter", "effects"], component: wand_sparkles_default },
+  { id: "scissors", name: "Scissors", category: "Creative", keywords: ["craft", "edit", "clip"], component: scissors_default },
+  { id: "brush", name: "Brush", category: "Creative", keywords: ["paint", "art", "sketch"], component: brush_default },
+  { id: "contrast", name: "Contrast", category: "Creative", keywords: ["dark", "light", "mode", "tone"], component: contrast_default },
+  { id: "eye", name: "Eye", category: "Creative", keywords: ["preview", "view", "observe"], component: eye_default },
+  { id: "shapes", name: "Shapes", category: "Creative", keywords: ["geometry", "ui", "components"], component: shapes_default },
+  // Productivity
+  { id: "calendar", name: "Calendar", category: "Productivity", keywords: ["schedule", "meeting", "events", "dates"], component: calendar_default },
+  { id: "clock", name: "Clock", category: "Productivity", keywords: ["time", "timer", "pomodoro", "hours"], component: clock_default },
+  { id: "inbox", name: "Inbox", category: "Productivity", keywords: ["mail", "triage", "incoming", "tickets"], component: inbox_default },
+  { id: "send", name: "Send", category: "Productivity", keywords: ["outbox", "dispatch", "post"], component: send_default },
+  { id: "list-todo", name: "To-Do", category: "Productivity", keywords: ["tasks", "checklist", "agenda"], component: list_todo_default },
+  { id: "kanban", name: "Kanban", category: "Productivity", keywords: ["scrum", "agile", "board", "sprint"], component: kanban_default },
+  { id: "clipboard-list", name: "Audit / Notes", category: "Productivity", keywords: ["survey", "review", "checklist"], component: clipboard_list_default },
+  { id: "file-text", name: "Documents", category: "Productivity", keywords: ["doc", "notes", "markdown", "article"], component: file_text_default },
+  { id: "book-open", name: "Wiki / Docs", category: "Productivity", keywords: ["learn", "guide", "handbook", "library"], component: book_open_default },
+  { id: "lightbulb", name: "Ideas", category: "Productivity", keywords: ["brainstorm", "concept", "insight"], component: lightbulb_default },
+  { id: "gauge", name: "Performance", category: "Productivity", keywords: ["speed", "benchmark", "metrics"], component: gauge_default },
+  { id: "bell", name: "Alerts", category: "Productivity", keywords: ["notify", "updates", "ping"], component: bell_default },
+  { id: "search", name: "Search", category: "Productivity", keywords: ["find", "lookup", "explore", "query"], component: search_default },
+  // Social
+  { id: "message-square", name: "Chat", category: "Social", keywords: ["message", "discord", "slack", "comment"], component: message_square_default },
+  { id: "messages-square", name: "Community", category: "Social", keywords: ["forum", "threads", "discussions"], component: messages_square_default },
+  { id: "mail", name: "Mail", category: "Social", keywords: ["email", "newsletter", "inbox"], component: mail_default },
+  { id: "phone", name: "Phone", category: "Social", keywords: ["call", "contact", "dial"], component: phone_default },
+  { id: "users", name: "Team", category: "Social", keywords: ["group", "members", "crew", "squad"], component: users_default },
+  { id: "user", name: "User", category: "Social", keywords: ["profile", "account", "personal", "me"], component: user_default },
+  { id: "user-check", name: "Verified", category: "Social", keywords: ["hired", "approved", "member"], component: user_check_default },
+  { id: "share-2", name: "Share", category: "Social", keywords: ["social", "distribute", "viral"], component: share_2_default },
+  { id: "radio", name: "Radio / Stream", category: "Social", keywords: ["broadcast", "live", "signal"], component: radio_default },
+  { id: "podcast", name: "Podcast", category: "Social", keywords: ["audio", "mic", "voice", "episode"], component: podcast_default },
+  { id: "megaphone", name: "Marketing", category: "Social", keywords: ["ads", "campaign", "promo", "shout"], component: megaphone_default },
+  { id: "heart", name: "Favorites", category: "Social", keywords: ["love", "wellness", "like", "health"], component: heart_default },
+  { id: "smile", name: "Feedback", category: "Social", keywords: ["happy", "satisfaction", "fun"], component: smile_default },
+  // Life
+  { id: "coffee", name: "Coffee", category: "Life", keywords: ["break", "cafe", "lounge", "casual"], component: coffee_default },
+  { id: "gamepad-2", name: "Gaming", category: "Life", keywords: ["game", "play", "fun", "steam"], component: gamepad_2_default },
+  { id: "shopping-bag", name: "Shopping", category: "Life", keywords: ["store", "ecommerce", "buy", "shop"], component: shopping_bag_default },
+  { id: "shopping-cart", name: "Cart", category: "Life", keywords: ["checkout", "cart", "orders"], component: shopping_cart_default },
+  { id: "plane", name: "Travel", category: "Life", keywords: ["flight", "trip", "vacation", "holiday"], component: plane_default },
+  { id: "map-pin", name: "Location", category: "Life", keywords: ["place", "city", "map", "office"], component: map_pin_default },
+  { id: "map", name: "Map", category: "Life", keywords: ["guide", "routes", "world"], component: map_default },
+  { id: "sun", name: "Day / Sun", category: "Life", keywords: ["morning", "light", "weather"], component: sun_default },
+  { id: "moon", name: "Night / Focus", category: "Life", keywords: ["dark", "sleep", "evening"], component: moon_default },
+  { id: "car", name: "Car", category: "Life", keywords: ["auto", "drive", "commute"], component: car_default },
+  { id: "bike", name: "Bike", category: "Life", keywords: ["ride", "cycle", "fitness"], component: bike_default },
+  { id: "dumbbell", name: "Fitness", category: "Life", keywords: ["gym", "workout", "health", "exercise"], component: dumbbell_default },
+  { id: "utensils", name: "Dining", category: "Life", keywords: ["food", "restaurant", "lunch", "dinner"], component: utensils_default },
+  { id: "tv", name: "Media / TV", category: "Life", keywords: ["netflix", "stream", "show", "watch"], component: tv_default },
+  { id: "trophy", name: "Trophy", category: "Life", keywords: ["win", "award", "achievement", "success"], component: trophy_default },
+  { id: "rocket", name: "Launch", category: "Life", keywords: ["ship", "rocket", "startup", "release"], component: rocket_default }
+];
+const ICON_MAP = Object.fromEntries(
+  ICON_LIST.map((item) => [item.id, item])
+);
+function getSmartIconId(name = "") {
+  const n = name.trim().toLowerCase();
+  if (!n) return "folder";
+  if (/\b(ai|llm|gpt|claude|gemini|bot|agent|model|inference|neural|openai|anthropic|mistral)\b/i.test(n))
+    return "bot";
+  if (/\b(terminal|cli|bash|shell|zsh|console|command|script|powershell)\b/i.test(n))
+    return "terminal";
+  if (/\b(github|gitlab|bitbucket|git|branch|pr|commit|merge)\b/i.test(n))
+    return "git-branch";
+  if (/\b(dev|code|frontend|backend|fullstack|repo|bug|debug|api|sdk|react|solid|vue|rust|ts|py|go)\b/i.test(n))
+    return "code-2";
+  if (/\b(infra|cloud|aws|gcp|azure|server|k8s|docker|deploy|prod|staging|vercel|cloudflare)\b/i.test(n))
+    return "server";
+  if (/\b(db|database|sql|postgres|redis|mongo|storage|data|lake|supabase|prisma)\b/i.test(n))
+    return "database";
+  if (/\b(analytics|stats|metrics|posthog|mixpanel|datadog|sentry|monitor|telemetry|grafana)\b/i.test(n))
+    return "activity";
+  if (/\b(sec|security|auth|vault|cert|crypto|guard|safe|lock|pass|key|shield)\b/i.test(n))
+    return "shield";
+  if (/\b(design|ui|ux|art|figma|brand|draw|graphic|vector|sketch|canva|framer)\b/i.test(n))
+    return "palette";
+  if (/\b(video|movie|film|stream|youtube|record|clip|anim|twitch|netflix|loom)\b/i.test(n))
+    return "video";
+  if (/\b(music|audio|sound|spotify|podcast|track|beats|radio|apple-music)\b/i.test(n))
+    return "music";
+  if (/\b(photo|camera|lens|gallery|image|pic|snapshot|unsplash)\b/i.test(n))
+    return "camera";
+  if (/\b(linear|jira|trello|asana|kanban|scrum|sprint|backlog|clickup)\b/i.test(n))
+    return "kanban";
+  if (/\b(notion|obsidian|notes|wiki|docs|guide|manual|spec|doc|memo|readme)\b/i.test(n))
+    return "file-text";
+  if (/\b(market|growth|ad|ads|campaign|seo|funnel|lead|promo|sem)\b/i.test(n))
+    return "trending-up";
+  if (/\b(stripe|finance|money|dollar|pay|bill|revenue|sales|crypto|wallet|invest|bank|tax)\b/i.test(n))
+    return "credit-card";
+  if (/\b(client|work|job|corp|business|agency|enterprise|consult|firm)\b/i.test(n))
+    return "briefcase";
+  if (/\b(legal|law|contract|terms|policy|compliance|court|license)\b/i.test(n))
+    return "scale";
+  if (/\b(project|launch|ship|release|startup|moonshot|orbit|space)\b/i.test(n))
+    return "rocket";
+  if (/\b(slack|discord|chat|telegram|signal|whatsapp|dm|message|inbox)\b/i.test(n))
+    return "message-square";
+  if (/\b(social|team|group|community|forum|meet|people|network)\b/i.test(n))
+    return "users";
+  if (/\b(mail|email|newsletter|outreach|post|letter)\b/i.test(n))
+    return "mail";
+  if (/\b(todo|task|check|checklist|routine|habit)\b/i.test(n))
+    return "list-todo";
+  if (/\b(cal|calendar|event|schedule|meet|agenda|date|booking|zoom)\b/i.test(n))
+    return "calendar";
+  if (/\b(game|gaming|play|steam|draft|arcade|xbox|playstation)\b/i.test(n))
+    return "gamepad-2";
+  if (/\b(shop|store|buy|cart|order|commerce|amazon|shopify|ebay)\b/i.test(n))
+    return "shopping-bag";
+  if (/\b(travel|trip|flight|vacation|tour|map|geo|hotel|booking)\b/i.test(n))
+    return "plane";
+  if (/\b(health|fitness|gym|workout|exercise|diet|sport|med|yoga)\b/i.test(n))
+    return "dumbbell";
+  if (/\b(food|cafe|restaurant|coffee|drink|lunch|dinner|cook|snack)\b/i.test(n))
+    return "coffee";
+  if (/\b(personal|home|hq|headquarters|main|base|hub|root|my)\b/i.test(n))
+    return "home";
+  if (/\b(night|dark|focus|zen|deep|quiet|sleep|study)\b/i.test(n))
+    return "moon";
+  return "folder";
+}
+var _tmpl$$19 = /* @__PURE__ */ template(`<span>`);
+function WorkspaceIcon(props) {
+  const iconId = () => {
+    if (props.icon && props.icon !== "auto") {
+      return props.icon;
+    }
+    return getSmartIconId(props.name || "");
   };
-  if (/\bclient/.test(n)) return createComponent(briefcase_default, p);
-  if (/\bproject/.test(n) || /\blaunch/.test(n)) return createComponent(rocket_default, p);
-  if (/\bdev/.test(n) || /\bcode/.test(n)) return createComponent(code_xml_default, p);
-  if (/\bdesign/.test(n) || /\bart/.test(n)) return createComponent(palette_default, p);
-  if (/\bmarketing/.test(n) || /\bgrowth/.test(n)) return createComponent(trending_up_default, p);
-  if (/\bpersonal/.test(n) || /\bhq/.test(n) || /\bheadquarters/.test(n)) return createComponent(house_default, p);
-  if (/\bdraft/.test(n) || /\bplay/.test(n)) return createComponent(gamepad_2_default, p);
-  return createComponent(folder_default, p);
-};
-var _tmpl$$W = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
+  const IconComp = () => {
+    const item = ICON_MAP[iconId()];
+    return item ? item.component : folder_default;
+  };
+  return (() => {
+    var _el$ = _tmpl$$19();
+    insert(_el$, () => {
+      const Comp = IconComp();
+      return createComponent(Comp, {
+        get size() {
+          return props.size ?? 14;
+        },
+        get strokeWidth() {
+          return props.strokeWidth ?? 1.75;
+        }
+      });
+    });
+    createRenderEffect(() => className(_el$, `inline-flex items-center justify-center ${props.class || ""}`));
+    return _el$;
+  })();
+}
+var _tmpl$$18 = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
 function TabIslandEyebrow(props) {
   return createComponent(Show, {
     get when() {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$W(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-      insert(_el$2, () => getSmartIcon(props.workspaceName || "", {
+      var _el$ = _tmpl$$18(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      insert(_el$2, createComponent(WorkspaceIcon, {
+        get icon() {
+          return props.workspaceIcon;
+        },
+        get name() {
+          return props.workspaceName || "";
+        },
         size: 12,
         strokeWidth: 1.75
       }));
@@ -10972,7 +13100,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$V = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$G = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Tab Name</span><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-2 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$5$d = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes in this tab to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$7$7 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$I = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$v = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$l = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$d = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$9 = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$2 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -10993,17 +13121,18 @@ function TabPopover(props) {
       });
     }
   });
+  const getCustomName = () => props.tab.custom_name || "";
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$V();
+        var _el$ = _tmpl$$17();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$5$d(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$7$9(), _el$3 = _el$2.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -11013,36 +13142,58 @@ function TabPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$12 = _tmpl$6$9(), _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$14.firstChild, _el$17 = _el$15.nextSibling, _el$18 = _el$14.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
-              insert(_el$17, () => props.cascadePrompt?.profileName);
-              _el$19.$$click = (e) => {
+              var _el$17 = _tmpl$8$6(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
+              insert(_el$22, () => props.cascadePrompt?.profileName);
+              _el$24.$$click = (e) => {
                 e.stopPropagation();
                 props.onCascadeResponse(true);
               };
-              _el$20.$$click = (e) => {
+              _el$25.$$click = (e) => {
                 e.stopPropagation();
                 props.onCascadeResponse(false);
               };
-              return _el$12;
+              return _el$17;
             })();
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$G(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
-              _el$7.$$keydown = (e) => {
+              var _el$4 = _tmpl$4$v(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              insert(_el$8, createComponent(Show, {
+                get when() {
+                  return props.isSplit;
+                },
+                get fallback() {
+                  return _tmpl$9$2();
+                },
+                get children() {
+                  return _tmpl$2$R();
+                }
+              }));
+              insert(_el$5, createComponent(Show, {
+                get when() {
+                  return !props.tab.custom_name;
+                },
+                get children() {
+                  return _tmpl$3$I();
+                }
+              }), null);
+              _el$10.$$keydown = (e) => {
                 if (e.key === "Enter") e.currentTarget.blur();
               };
-              _el$7.addEventListener("blur", (e) => {
+              _el$10.addEventListener("blur", (e) => {
                 const val = e.target.value.trim();
-                if (val && val !== props.tab.name) props.onRename(val);
+                if (val !== getCustomName()) {
+                  props.onRename(val);
+                }
               });
-              createRenderEffect(() => _el$7.value = props.tab.name);
+              createRenderEffect(() => setAttribute(_el$10, "placeholder", props.smartPlaceholder || "Auto-named Tab"));
+              createRenderEffect(() => _el$10.value = getCustomName());
               return _el$4;
             })(), (() => {
-              var _el$8 = _tmpl$3$w(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
+              var _el$11 = _tmpl$5$l(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
               var _ref$2 = flipThumbRef;
-              typeof _ref$2 === "function" ? use(_ref$2, _el$1) : flipThumbRef = _el$1;
-              insert(_el$0, createComponent(For, {
+              typeof _ref$2 === "function" ? use(_ref$2, _el$14) : flipThumbRef = _el$14;
+              insert(_el$13, createComponent(For, {
                 get each() {
                   return profilesList();
                 },
@@ -11061,8 +13212,8 @@ function TabPopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$21 = _tmpl$7$7(), _el$22 = _el$21.firstChild, _el$23 = _el$22.nextSibling;
-                    _el$21.$$click = (e) => {
+                    var _el$27 = _tmpl$0$1(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
+                    _el$27.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
                       if (flipThumbRef && btnRef) {
@@ -11077,26 +13228,26 @@ function TabPopover(props) {
                       props.onSelectProfile(profile.id, profile.name);
                     };
                     var _ref$3 = btnRef;
-                    typeof _ref$3 === "function" ? use(_ref$3, _el$21) : btnRef = _el$21;
-                    insert(_el$22, () => profile.name.charAt(0).toUpperCase());
-                    insert(_el$23, () => profile.name);
+                    typeof _ref$3 === "function" ? use(_ref$3, _el$27) : btnRef = _el$27;
+                    insert(_el$28, () => profile.name.charAt(0).toUpperCase());
+                    insert(_el$29, () => profile.name);
                     createRenderEffect((_p$) => {
                       var _v$3 = `relative flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-[10px] z-10 text-[11px] font-semibold transition-colors ${isSelected() ? "text-neutral-900" : "text-neutral-500 hover:text-neutral-700"}`, _v$4 = profile.color;
-                      _v$3 !== _p$.e && className(_el$21, _p$.e = _v$3);
-                      _v$4 !== _p$.t && setStyleProperty(_el$22, "background-color", _p$.t = _v$4);
+                      _v$3 !== _p$.e && className(_el$27, _p$.e = _v$3);
+                      _v$4 !== _p$.t && setStyleProperty(_el$28, "background-color", _p$.t = _v$4);
                       return _p$;
                     }, {
                       e: void 0,
                       t: void 0
                     });
-                    return _el$21;
+                    return _el$27;
                   })();
                 }
               }), null);
-              return _el$8;
+              return _el$11;
             })(), (() => {
-              var _el$10 = _tmpl$4$h(), _el$11 = _el$10.firstChild;
-              _el$11.$$click = (e) => {
+              var _el$15 = _tmpl$6$d(), _el$16 = _el$15.firstChild;
+              _el$16.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
                   props.onDelete();
@@ -11104,7 +13255,7 @@ function TabPopover(props) {
                   e.currentTarget.textContent = "Confirm Delete";
                 }
               };
-              return _el$10;
+              return _el$15;
             })()];
           }
         }));
@@ -11123,20 +13274,390 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$U = /* @__PURE__ */ template(`<span class="flex items-center gap-[1.5px] h-2.5 px-0.5 rounded-sm opacity-80 shrink-0"><span class="w-[2px] h-1.5 bg-current rounded-full animate-pulse"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-pulse"style=animation-delay:150ms></span><span class="w-[2px] h-1 bg-current rounded-full animate-pulse"style=animation-delay:300ms>`), _tmpl$2$F = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab title><span>`);
-function TabItem(props) {
+var _tmpl$$16 = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$Q = /* @__PURE__ */ template(`<div>`), _tmpl$3$H = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+function Favicon(props) {
+  const [hasError, setHasError] = createSignal(false);
+  const [useFallback, setUseFallback] = createSignal(false);
+  const size = () => props.size || 16;
+  const faviconUrl = () => {
+    if (isFaviconFailed(props.url)) return "";
+    if (useFallback()) {
+      const d = extractDomain(props.url);
+      if (!d || d === "localhost" || d.startsWith("127.0.0.1")) return "";
+      return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(d)}&sz=64`;
+    }
+    return getFaviconUrl(props.url, 64);
+  };
+  createEffect(() => {
+    const url = props.url;
+    setHasError(isFaviconFailed(url));
+    setUseFallback(false);
+  });
+  const handleError2 = () => {
+    if (!useFallback()) {
+      setUseFallback(true);
+    } else {
+      setHasError(true);
+      markFaviconFailed(props.url);
+    }
+  };
   return (() => {
-    var _el$ = _tmpl$3$v(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
-    addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
-    addEventListener(_el$3, "click", props.onTabClick, true);
-    insert(_el$4, () => props.tab.name);
-    insert(_el$3, createComponent(Show, {
+    var _el$ = _tmpl$2$Q();
+    insert(_el$, createComponent(Show, {
       get when() {
-        return props.isPlaying;
+        return memo(() => !!faviconUrl())() && !hasError();
+      },
+      get fallback() {
+        return (() => {
+          var _el$3 = _tmpl$3$H();
+          createRenderEffect((_p$) => {
+            var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
+            _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
+            _v$5 !== _p$.t && setAttribute(_el$3, "height", _p$.t = _v$5);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$3;
+        })();
       },
       get children() {
-        var _el$5 = _tmpl$$U(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
-        _el$7.nextSibling;
+        var _el$2 = _tmpl$$16();
+        _el$2.addEventListener("error", handleError2);
+        createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
+        return _el$2;
+      }
+    }));
+    createRenderEffect((_p$) => {
+      var _v$ = `flex items-center justify-center shrink-0 overflow-hidden rounded-[4px] bg-neutral-100 dark:bg-neutral-800 ${props.class || ""}`, _v$2 = `${size()}px`, _v$3 = `${size()}px`;
+      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$, "width", _p$.t = _v$2);
+      _v$3 !== _p$.a && setStyleProperty(_el$, "height", _p$.a = _v$3);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0
+    });
+    return _el$;
+  })();
+}
+var _tmpl$$15 = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$P = /* @__PURE__ */ template(`<div>`);
+function TabFaviconStack(props) {
+  const size = () => props.size || 14;
+  const validUrls = () => props.urls.filter((u) => u && u.trim().length > 0 && u !== "about:blank");
+  const displayUrls = () => {
+    const all = validUrls();
+    if (!props.activeUrl) return all;
+    const activeDomain = extractDomain(props.activeUrl);
+    const activeIdx = all.findIndex((u) => u === props.activeUrl || activeDomain && extractDomain(u) === activeDomain);
+    if (activeIdx <= 0) return all;
+    return [all[activeIdx], ...all.slice(0, activeIdx), ...all.slice(activeIdx + 1)];
+  };
+  return createComponent(Show, {
+    get when() {
+      return validUrls().length > 0;
+    },
+    get children() {
+      var _el$ = _tmpl$2$P();
+      insert(_el$, createComponent(For, {
+        get each() {
+          return displayUrls().slice(0, 3);
+        },
+        children: (url, idx) => {
+          const isFocused = () => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url)));
+          return (() => {
+            var _el$4 = _tmpl$2$P();
+            insert(_el$4, createComponent(Favicon, {
+              url,
+              get size() {
+                return size();
+              }
+            }));
+            createRenderEffect((_p$) => {
+              var _v$3 = `relative rounded-[3.5px] ring-[1px] overflow-hidden shadow-[0_1px_2px_rgba(0,0,0,0.06)] shrink-0 transition-all duration-300 ${isFocused() ? "ring-neutral-900/80 dark:ring-white scale-105 opacity-100 z-20" : "ring-white/90 dark:ring-neutral-900 opacity-80"}`, _v$4 = isFocused() ? 20 : 10 - idx();
+              _v$3 !== _p$.e && className(_el$4, _p$.e = _v$3);
+              _v$4 !== _p$.t && setStyleProperty(_el$4, "z-index", _p$.t = _v$4);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$4;
+          })();
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return validUrls().length > 3;
+        },
+        get children() {
+          var _el$2 = _tmpl$$15();
+          _el$2.firstChild;
+          insert(_el$2, () => validUrls().length - 3, null);
+          createRenderEffect((_p$) => {
+            var _v$ = `${size()}px`, _v$2 = `${size()}px`;
+            _v$ !== _p$.e && setStyleProperty(_el$2, "width", _p$.e = _v$);
+            _v$2 !== _p$.t && setStyleProperty(_el$2, "height", _p$.t = _v$2);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$2;
+        }
+      }), null);
+      createRenderEffect(() => className(_el$, `flex items-center -space-x-1.5 shrink-0 select-none ${props.class || ""}`));
+      return _el$;
+    }
+  });
+}
+function getLeafPanesFromNodes(rootId, nodes) {
+  if (!rootId || !nodes || !nodes[rootId]) return [];
+  const node = nodes[rootId];
+  if (!node) return [];
+  if (node.type === "pane") {
+    return [node];
+  }
+  if (node.type === "split") {
+    const split = node;
+    const left = getLeafPanesFromNodes(split.a, nodes);
+    const right = getLeafPanesFromNodes(split.b, nodes);
+    return [...left, ...right];
+  }
+  return [];
+}
+function extractTabLeafInfo(tabId, activeTabId, liveNodes, liveRootId, tabLayoutState) {
+  let leafPanes = [];
+  if (tabId === activeTabId && liveRootId && liveNodes) {
+    leafPanes = getLeafPanesFromNodes(liveRootId, liveNodes);
+  } else if (tabLayoutState) {
+    try {
+      const parsed = JSON.parse(tabLayoutState);
+      if (parsed && parsed.nodes && parsed.rootId) {
+        leafPanes = getLeafPanesFromNodes(parsed.rootId, parsed.nodes);
+      }
+    } catch {
+    }
+  }
+  const validUrls = [];
+  const validTitles = [];
+  for (const pane of leafPanes) {
+    if (pane.url && pane.url !== "about:blank") {
+      validUrls.push(pane.url);
+    }
+    if (pane.title) {
+      validTitles.push(pane.title);
+    }
+  }
+  return {
+    leafPaneIds: leafPanes.map((p) => p.id),
+    leafUrls: validUrls,
+    leafTitles: validTitles,
+    paneCount: leafPanes.length,
+    isSplit: leafPanes.length > 1
+  };
+}
+const BRAND_MAP = {
+  github: "GitHub",
+  gitlab: "GitLab",
+  youtube: "YouTube",
+  chatgpt: "ChatGPT",
+  openai: "OpenAI",
+  todoist: "Todoist",
+  linear: "Linear",
+  figma: "Figma",
+  notion: "Notion",
+  slack: "Slack",
+  spotify: "Spotify",
+  reddit: "Reddit",
+  twitter: "X (Twitter)",
+  x: "X",
+  netflix: "Netflix",
+  stripe: "Stripe",
+  vercel: "Vercel",
+  cloudflare: "Cloudflare",
+  aws: "AWS",
+  google: "Google",
+  apple: "Apple",
+  microsoft: "Microsoft",
+  stackoverflow: "Stack Overflow",
+  linkedin: "LinkedIn",
+  facebook: "Facebook",
+  instagram: "Instagram",
+  discord: "Discord",
+  twitch: "Twitch",
+  medium: "Medium",
+  substack: "Substack"
+};
+const NOISE_SUBDOMAINS = /* @__PURE__ */ new Set([
+  "www",
+  "app",
+  "web",
+  "m",
+  "mobile",
+  "login",
+  "auth",
+  "accounts",
+  "account",
+  "sso",
+  "secure",
+  "cdn",
+  "static",
+  "prod",
+  "preview"
+]);
+const SERVICE_MAP = {
+  "calendar.google": "Google Calendar",
+  "drive.google": "Google Drive",
+  "mail.google": "Gmail",
+  "maps.google": "Google Maps",
+  "music.youtube": "YouTube Music",
+  "docs.google": "Google Docs",
+  "sheets.google": "Google Sheets",
+  "slides.google": "Google Slides",
+  "meet.google": "Google Meet",
+  "console.aws.amazon": "AWS Console",
+  "portal.azure": "Azure Portal"
+};
+function capitalize(str) {
+  if (!str) return "";
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+function formatSmartDomain(rawUrl) {
+  if (!rawUrl || rawUrl === "about:blank") return "New Tab";
+  let hostname = "";
+  try {
+    const parsed = new URL(
+      rawUrl.includes("://") ? rawUrl : `https://${rawUrl}`
+    );
+    hostname = parsed.hostname.toLowerCase();
+  } catch {
+    hostname = rawUrl.split("/")[0].toLowerCase();
+  }
+  if (!hostname) return "New Tab";
+  if (hostname === "localhost" || hostname.startsWith("127.0.0.1") || hostname.startsWith("192.168.")) {
+    try {
+      const parsed = new URL(
+        rawUrl.includes("://") ? rawUrl : `http://${rawUrl}`
+      );
+      return parsed.port ? `${hostname}:${parsed.port}` : hostname;
+    } catch {
+      return hostname;
+    }
+  }
+  const strippedTld = hostname.replace(/\.(co\.uk|co\.jp|co\.kr|com\.br|co\.in|org\.uk|ac\.uk)$/i, "").replace(
+    /\.(com|org|net|io|app|dev|ai|co|xyz|me|so|gg|tv|cc|tech|info|biz|page)$/i,
+    ""
+  );
+  if (SERVICE_MAP[strippedTld]) {
+    return SERVICE_MAP[strippedTld];
+  }
+  const parts = strippedTld.split(".").filter(Boolean);
+  if (parts.length === 0) return "New Tab";
+  if (parts.length === 1) {
+    const brand2 = parts[0];
+    return BRAND_MAP[brand2] || capitalize(brand2);
+  }
+  const brand = parts[parts.length - 1];
+  const subdomains = parts.slice(0, parts.length - 1).filter((sub) => !NOISE_SUBDOMAINS.has(sub));
+  const brandName = BRAND_MAP[brand] || capitalize(brand);
+  if (subdomains.length === 0) {
+    return brandName;
+  }
+  const formattedSubs = subdomains.map((s) => {
+    if (s === "api") return "API";
+    if (s === "sdk") return "SDK";
+    if (s === "ui") return "UI";
+    return BRAND_MAP[s] || capitalize(s);
+  }).join(" ");
+  return `${brandName} ${formattedSubs}`;
+}
+function computeSmartTabName(customName, leafPanes) {
+  if (customName && customName.trim().length > 0) {
+    return customName.trim();
+  }
+  if (!leafPanes || leafPanes.length === 0) return "New Tab";
+  const validPanes = leafPanes.filter(
+    (p) => p && p.url && p.url !== "about:blank"
+  );
+  if (validPanes.length === 0) {
+    return "New Tab";
+  }
+  if (validPanes.length === 1) {
+    return formatSmartDomain(validPanes[0].url);
+  }
+  if (validPanes.length === 2) {
+    const nameA = formatSmartDomain(validPanes[0].url);
+    const nameB = formatSmartDomain(validPanes[1].url);
+    if (nameA === nameB) {
+      return `${nameA} (2)`;
+    }
+    return `${nameA} + ${nameB}`;
+  }
+  const primaryName = formatSmartDomain(validPanes[0].url);
+  return `${primaryName} + ${validPanes.length - 1}`;
+}
+var _tmpl$$14 = /* @__PURE__ */ template(`<span class="flex items-center gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$O = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$G = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+function TabItem(props) {
+  const leafInfo = createMemo(() => extractTabLeafInfo(props.tab.id, props.activeTabId || (props.isActive ? props.tab.id : ""), layoutStore.nodes, layoutStore.rootId, props.tab.layout_state));
+  const activeUrl = createMemo(() => {
+    if (!props.isActive || !props.activePaneId) return void 0;
+    return layoutStore.nodes[props.activePaneId]?.url;
+  });
+  const isPlaying = createMemo(() => {
+    const ids = leafInfo().leafPaneIds;
+    const pMap = props.playingTabIds;
+    if (!pMap) return false;
+    return Boolean(pMap[props.tab.id] || props.isActive && props.activePaneId && pMap[props.activePaneId] || ids.some((id) => pMap[id]));
+  });
+  const smartName = createMemo(() => {
+    const info = leafInfo();
+    const panes = info.leafUrls.map((url, i) => ({
+      url,
+      title: info.leafTitles[i]
+    }));
+    return computeSmartTabName(props.tab.custom_name || (props.tab.name !== "New Tab" && props.tab.name !== "Main" ? props.tab.name : void 0), panes);
+  });
+  const tooltipText = createMemo(() => {
+    const name = smartName();
+    const info = leafInfo();
+    if (info.isSplit) {
+      return `${name} (${info.paneCount} panes)`;
+    }
+    return name;
+  });
+  return (() => {
+    var _el$ = _tmpl$3$G(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
+    addEventListener(_el$3, "click", props.onTabClick, true);
+    insert(_el$3, createComponent(TabFaviconStack, {
+      get urls() {
+        return leafInfo().leafUrls;
+      },
+      get activeUrl() {
+        return activeUrl();
+      },
+      size: 14
+    }), _el$4);
+    insert(_el$4, smartName);
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return isPlaying();
+      },
+      get children() {
+        var _el$5 = _tmpl$$14();
+        _el$5.$$click = (e) => {
+          e.stopPropagation();
+          const ids = leafInfo().leafPaneIds;
+          for (const id of ids) {
+            window.api?.viewToggleMute?.(id);
+          }
+          if (props.activePaneId) {
+            window.api?.viewToggleMute?.(props.activePaneId);
+          }
+        };
         return _el$5;
       }
     }), null);
@@ -11148,6 +13669,15 @@ function TabItem(props) {
         return createComponent(TabPopover, {
           get tab() {
             return props.tab;
+          },
+          get smartPlaceholder() {
+            return smartName();
+          },
+          get paneCount() {
+            return leafInfo().paneCount;
+          },
+          get isSplit() {
+            return leafInfo().isSplit;
           },
           get configPos() {
             return props.configPos;
@@ -11178,61 +13708,86 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$9 = _tmpl$2$F();
-        _el$9.$$click = (e) => {
+        var _el$6 = _tmpl$2$O();
+        _el$6.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
         };
         createRenderEffect((_p$) => {
-          var _v$ = `Close ${props.tab.name}`, _v$2 = `absolute -right-1 -top-1 z-10 flex items-center justify-center w-4 h-4 rounded-full bg-white text-neutral-500 border border-neutral-200/80 shadow-sm transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] hover:text-red-500 hover:scale-110 active:scale-95 ${props.isActive ? "opacity-100" : "opacity-0 group-hover/tab:opacity-100 pointer-events-none group-hover/tab:pointer-events-auto"}`;
-          _v$ !== _p$.e && setAttribute(_el$9, "aria-label", _p$.e = _v$);
-          _v$2 !== _p$.t && className(_el$9, _p$.t = _v$2);
+          var _v$ = `Close ${smartName()}`, _v$2 = `absolute -right-1 -top-1 z-10 flex items-center justify-center w-4 h-4 rounded-full bg-white text-neutral-500 border border-neutral-200/80 shadow-sm transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] hover:text-red-500 hover:scale-110 active:scale-95 ${props.isActive ? "opacity-100" : "opacity-0 group-hover/tab:opacity-100 pointer-events-none group-hover/tab:pointer-events-auto"}`;
+          _v$ !== _p$.e && setAttribute(_el$6, "aria-label", _p$.e = _v$);
+          _v$2 !== _p$.t && className(_el$6, _p$.t = _v$2);
           return _p$;
         }, {
           e: void 0,
           t: void 0
         });
-        return _el$9;
+        return _el$6;
       }
     }), null);
     createRenderEffect((_p$) => {
-      var _v$3 = `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.isActive ? "bg-neutral-900/10 shadow-[0_4px_12px_-6px_rgba(0,0,0,0.25)]" : "bg-transparent"}`, _v$4 = props.isActive, _v$5 = `tab-island-button flex items-center gap-1.5 px-2.5 py-1 rounded-[10px] text-[12px] font-medium tracking-tight whitespace-nowrap transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40 ${props.isActive ? "bg-neutral-900 text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.18),0_1px_2px_rgba(0,0,0,0.1)]" : "bg-white/70 text-neutral-600 hover:bg-white hover:text-neutral-900 hover:shadow-[0_0_0_1px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,1)]"}`, _v$6 = `truncate transition-all duration-300 ${props.isCompact && !props.isActive ? "max-w-[76px]" : "max-w-[140px]"}`;
+      var _v$3 = `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.isActive ? "bg-neutral-900/10 shadow-[0_4px_12px_-6px_rgba(0,0,0,0.25)]" : "bg-transparent"}`, _v$4 = props.isActive, _v$5 = tooltipText(), _v$6 = `tab-island-button flex items-center gap-1.5 px-2 py-1 rounded-[10px] text-[12px] font-medium tracking-tight whitespace-nowrap transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40 ${props.isActive ? "bg-neutral-900 text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.18),0_1px_2px_rgba(0,0,0,0.1)]" : "bg-white/70 text-neutral-600 hover:bg-white hover:text-neutral-900 hover:shadow-[0_0_0_1px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,1)]"}`, _v$7 = `truncate overflow-hidden transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.isCompact && !props.isActive ? leafInfo().leafUrls.length > 0 ? "max-w-0 opacity-0 group-hover/tab:max-w-[120px] group-hover/tab:opacity-100 group-hover/tab:ml-0.5" : "max-w-[80px] opacity-90" : "max-w-[140px] opacity-100"}`;
       _v$3 !== _p$.e && className(_el$2, _p$.e = _v$3);
       _v$4 !== _p$.t && setAttribute(_el$3, "aria-selected", _p$.t = _v$4);
-      _v$5 !== _p$.a && className(_el$3, _p$.a = _v$5);
-      _v$6 !== _p$.o && className(_el$4, _p$.o = _v$6);
+      _v$5 !== _p$.a && setAttribute(_el$3, "title", _p$.a = _v$5);
+      _v$6 !== _p$.o && className(_el$3, _p$.o = _v$6);
+      _v$7 !== _p$.i && className(_el$4, _p$.i = _v$7);
       return _p$;
     }, {
       e: void 0,
       t: void 0,
       a: void 0,
-      o: void 0
+      o: void 0,
+      i: void 0
     });
     return _el$;
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$T = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$13 = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$N = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
   const [cascadePrompt, setCascadePrompt] = createSignal(null);
   const [playingTabIds, setPlayingTabIds] = createSignal({});
   onMount(() => {
-    const unsub = window.api?.onMediaStatus?.((_e, data) => {
+    window.__testMedia = (isPlaying = true, targetId) => {
+      const paneId = targetId || props.activePaneId || props.tabs[0]?.id;
+      console.log(`%c[Apposition Media Test]%c Setting paneId="${paneId}" isPlaying=${isPlaying}`, "color: #10b981; font-weight: bold", "color: inherit");
       setPlayingTabIds((prev) => ({
         ...prev,
-        [data.paneId]: data.isPlaying
+        [paneId]: isPlaying
       }));
+    };
+    const handleMediaUpdate = (data) => {
+      if (data && data.paneId) {
+        setPlayingTabIds((prev) => ({
+          ...prev,
+          [data.paneId]: Boolean(data.isPlaying)
+        }));
+      }
+    };
+    const unsub = window.api?.onMediaStatus?.((arg1, arg2) => {
+      const data = arg2 && arg2.paneId !== void 0 ? arg2 : arg1;
+      handleMediaUpdate(data);
     });
-    onCleanup(() => unsub?.());
+    const onDomMedia = (e) => handleMediaUpdate(e.detail);
+    window.addEventListener("app:media-status", onDomMedia);
+    onCleanup(() => {
+      unsub?.();
+      window.removeEventListener("app:media-status", onDomMedia);
+      delete window.__testMedia;
+    });
   });
-  const isCompact = () => props.tabs.length > 4;
+  const isCompact = () => props.tabs.length > 3;
   return (() => {
-    var _el$ = _tmpl$2$E(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$N(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
+      },
+      get workspaceIcon() {
+        return props.activeWorkspaceIcon;
       }
     }), _el$2);
     insert(_el$2, createComponent(For, {
@@ -11246,11 +13801,17 @@ function TabIsland(props) {
           get isActive() {
             return isActive();
           },
+          get activeTabId() {
+            return props.activeTabId;
+          },
+          get activePaneId() {
+            return props.activePaneId;
+          },
           get isCompact() {
             return isCompact();
           },
-          get isPlaying() {
-            return !!playingTabIds()[tab.id] || isActive() && !!playingTabIds()[props.activePaneId];
+          get playingTabIds() {
+            return playingTabIds();
           },
           get configOpen() {
             return configOpenId() === tab.id;
@@ -11260,11 +13821,9 @@ function TabIsland(props) {
           },
           onTabClick: (e) => {
             if (isActive()) {
-              if (configOpenId() === tab.id) {
-                setConfigOpenId(null);
-              } else {
-                const el = e.currentTarget;
-                const rect = el ? el.getBoundingClientRect() : {
+              if (configOpenId() === tab.id) setConfigOpenId(null);
+              else {
+                const rect = e.currentTarget?.getBoundingClientRect() || {
                   bottom: 0,
                   left: 0
                 };
@@ -11275,16 +13834,15 @@ function TabIsland(props) {
                 setConfigOpenId(tab.id);
               }
             } else {
-              const oldIndex = props.tabs.findIndex((t) => t.id === props.activeTabId);
-              const newIndex = props.tabs.findIndex((t) => t.id === tab.id);
-              props.onTabSelect(tab.id, newIndex > oldIndex ? "forward" : "backward");
+              const oldIdx = props.tabs.findIndex((t) => t.id === props.activeTabId);
+              const newIdx = props.tabs.findIndex((t) => t.id === tab.id);
+              props.onTabSelect(tab.id, newIdx > oldIdx ? "forward" : "backward");
               setConfigOpenId(null);
             }
           },
           onContextMenu: (e) => {
             e.preventDefault();
-            const el = e.currentTarget;
-            const rect = el ? el.getBoundingClientRect() : {
+            const rect = e.currentTarget?.getBoundingClientRect() || {
               bottom: 0,
               left: 0
             };
@@ -11299,7 +13857,7 @@ function TabIsland(props) {
           },
           onCloseConfig: () => setConfigOpenId(null),
           onRename: (name) => {
-            window.api?.updateTab(tab.id, name);
+            window.api?.updateTab(tab.id, name, name ? name : null);
             props.onTabRename?.(tab.id, name);
           },
           onSelectProfile: (profileId, profileName) => {
@@ -11336,7 +13894,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$T();
+        return _tmpl$$13();
       }
     }), _el$4);
     _el$5.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
@@ -11345,14 +13903,36 @@ function TabIsland(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div id=topbar class="absolute top-3 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-3 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$12 = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
+  const handleCloseTab = async (tabId) => {
+    await window.api?.deleteTab(tabId).catch(console.error);
+    const currentTabs = props.ws.tabs();
+    const remaining = currentTabs.filter((t) => t.id !== tabId);
+    props.ws.setTabs(remaining);
+    if (props.ws.activeTabId() === tabId) {
+      const idx = currentTabs.findIndex((t) => t.id === tabId);
+      const nextTab = remaining[idx - 1] || remaining[0];
+      if (nextTab) {
+        props.ws.switchTab(nextTab.id, "backward");
+      }
+    }
+  };
+  const handleTabRename = (id, name) => {
+    props.ws.setTabs(props.ws.tabs().map((t) => t.id === id ? {
+      ...t,
+      name,
+      custom_name: name ? name : null
+    } : t));
+  };
+  const activeWorkspaceName = () => props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.name || "";
+  const activeWorkspaceIcon = () => props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.icon || null;
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$S(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -11364,7 +13944,10 @@ function AppTopbar(props) {
           return props.ws.activeTabId();
         },
         get activeWorkspaceName() {
-          return props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.name || "";
+          return activeWorkspaceName();
+        },
+        get activeWorkspaceIcon() {
+          return activeWorkspaceIcon();
         },
         get activePaneId() {
           return props.ws.activePaneId();
@@ -11375,1161 +13958,14 @@ function AppTopbar(props) {
         get onCreateTab() {
           return props.ws.handleCreateTab;
         },
-        onTabRename: (id, name) => props.ws.setTabs(props.ws.tabs().map((t) => t.id === id ? {
-          ...t,
-          name
-        } : t)),
-        onCloseTab: async (tabId) => {
-          await window.api?.deleteTab(tabId).catch(console.error);
-          const currentTabs = props.ws.tabs();
-          const remaining = currentTabs.filter((t) => t.id !== tabId);
-          props.ws.setTabs(remaining);
-          if (props.ws.activeTabId() === tabId) {
-            const idx = currentTabs.findIndex((t) => t.id === tabId);
-            const nextTab = remaining[idx - 1] || remaining[0];
-            if (nextTab) {
-              props.ws.switchTab(nextTab.id, "backward");
-            }
-          }
-        }
+        onTabRename: handleTabRename,
+        onCloseTab: handleCloseTab
       }));
       return _el$;
     }
   });
 }
-var _tmpl$$R = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$u = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-2 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$c = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$6$8 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes in this workspace to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$7$6 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
-gsapWithCSS.registerPlugin(Flip);
-function WorkspacePopover(props) {
-  let popoverRef;
-  let flipThumbRef;
-  const profilesList = () => [{
-    id: "main",
-    color: "#6d7f94",
-    name: "Main"
-  }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
-  onMount(() => {
-    if (popoverRef) {
-      gsapWithCSS.from(popoverRef, {
-        x: -10,
-        opacity: 0,
-        scale: 0.96,
-        duration: 0.4,
-        ease: "expo.out"
-      });
-    }
-  });
-  return createComponent(Portal, {
-    get children() {
-      return [(() => {
-        var _el$ = _tmpl$$R();
-        _el$.$$click = (e) => {
-          e.stopPropagation();
-          props.onClose();
-        };
-        return _el$;
-      })(), (() => {
-        var _el$2 = _tmpl$5$c(), _el$3 = _el$2.firstChild;
-        var _ref$ = popoverRef;
-        typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
-        insert(_el$3, createComponent(Show, {
-          get when() {
-            return !props.cascadePrompt;
-          },
-          get fallback() {
-            return (() => {
-              var _el$12 = _tmpl$6$8(), _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$14.firstChild, _el$17 = _el$15.nextSibling, _el$18 = _el$14.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
-              insert(_el$17, () => props.cascadePrompt?.profileName);
-              _el$19.$$click = (e) => {
-                e.stopPropagation();
-                props.onCascadeResponse(true);
-              };
-              _el$20.$$click = (e) => {
-                e.stopPropagation();
-                props.onCascadeResponse(false);
-              };
-              return _el$12;
-            })();
-          },
-          get children() {
-            return [(() => {
-              var _el$4 = _tmpl$2$D(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
-              _el$7.$$keydown = (e) => {
-                if (e.key === "Enter") e.currentTarget.blur();
-              };
-              _el$7.addEventListener("blur", (e) => {
-                const val = e.target.value.trim();
-                if (val && val !== props.ws.name) props.onRename(val);
-              });
-              createRenderEffect(() => _el$7.value = props.ws.name);
-              return _el$4;
-            })(), (() => {
-              var _el$8 = _tmpl$3$u(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
-              var _ref$2 = flipThumbRef;
-              typeof _ref$2 === "function" ? use(_ref$2, _el$1) : flipThumbRef = _el$1;
-              insert(_el$0, createComponent(For, {
-                get each() {
-                  return profilesList();
-                },
-                children: (profile) => {
-                  let btnRef;
-                  const isSelected = () => (props.ws.default_profile_id || "main") === profile.id;
-                  onMount(() => {
-                    if (isSelected() && btnRef && flipThumbRef) {
-                      btnRef.appendChild(flipThumbRef);
-                      gsapWithCSS.set(flipThumbRef, {
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0
-                      });
-                    }
-                  });
-                  return (() => {
-                    var _el$21 = _tmpl$7$6(), _el$22 = _el$21.firstChild, _el$23 = _el$22.nextSibling;
-                    _el$21.$$click = (e) => {
-                      e.stopPropagation();
-                      if (isSelected()) return;
-                      if (flipThumbRef && btnRef) {
-                        const state = Flip.getState(flipThumbRef);
-                        btnRef.appendChild(flipThumbRef);
-                        Flip.from(state, {
-                          duration: 0.4,
-                          ease: "power3.out",
-                          absolute: true
-                        });
-                      }
-                      props.onSelectProfile(profile.id, profile.name);
-                    };
-                    var _ref$3 = btnRef;
-                    typeof _ref$3 === "function" ? use(_ref$3, _el$21) : btnRef = _el$21;
-                    insert(_el$22, () => profile.name.charAt(0).toUpperCase());
-                    insert(_el$23, () => profile.name);
-                    createRenderEffect((_p$) => {
-                      var _v$3 = `relative flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-[10px] z-10 text-[11px] font-semibold transition-colors ${isSelected() ? "text-neutral-900" : "text-neutral-500 hover:text-neutral-700"}`, _v$4 = profile.color;
-                      _v$3 !== _p$.e && className(_el$21, _p$.e = _v$3);
-                      _v$4 !== _p$.t && setStyleProperty(_el$22, "background-color", _p$.t = _v$4);
-                      return _p$;
-                    }, {
-                      e: void 0,
-                      t: void 0
-                    });
-                    return _el$21;
-                  })();
-                }
-              }), null);
-              return _el$8;
-            })(), (() => {
-              var _el$10 = _tmpl$4$g(), _el$11 = _el$10.firstChild;
-              _el$11.$$click = (e) => {
-                e.stopPropagation();
-                if (e.currentTarget.textContent?.includes("Confirm")) {
-                  props.onDelete();
-                } else {
-                  e.currentTarget.textContent = "Confirm Delete";
-                }
-              };
-              return _el$10;
-            })()];
-          }
-        }));
-        createRenderEffect((_p$) => {
-          var _v$ = `${props.configPos?.top || 0}px`, _v$2 = `${props.configPos?.left || 0}px`;
-          _v$ !== _p$.e && setStyleProperty(_el$2, "top", _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$2, "left", _p$.t = _v$2);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0
-        });
-        return _el$2;
-      })()];
-    }
-  });
-}
-delegateEvents(["click", "keydown"]);
-var _tmpl$$Q = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="text-[12px] font-bold tracking-tight"></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`), _tmpl$2$C = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
-function WorkspaceItem(props) {
-  const [isHovered, setIsHovered] = createSignal(false);
-  const [hoveredRect, setHoveredRect] = createSignal(null);
-  return (() => {
-    var _el$ = _tmpl$2$C(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
-    _el$.addEventListener("mouseleave", () => setIsHovered(false));
-    _el$.addEventListener("mouseenter", (e) => {
-      setIsHovered(true);
-      setHoveredRect(e.currentTarget.getBoundingClientRect());
-    });
-    _el$3.$$contextmenu = (e) => {
-      e.preventDefault();
-      const rect = e.currentTarget.getBoundingClientRect();
-      props.setConfigPos({
-        top: rect.top,
-        left: rect.right + 12
-      });
-      props.setConfigOpenId(props.ws.id);
-    };
-    _el$3.$$click = (e) => {
-      if (props.isActive) {
-        if (props.configOpenId === props.ws.id) {
-          props.setConfigOpenId(null);
-        } else {
-          const rect = e.currentTarget.getBoundingClientRect();
-          props.setConfigPos({
-            top: rect.top,
-            left: rect.right + 12
-          });
-          props.setConfigOpenId(props.ws.id);
-        }
-      } else {
-        const oldIndex = props.workspaces.findIndex((w) => w.id === props.activeWorkspace);
-        const newIndex = props.workspaces.findIndex((w) => w.id === props.ws.id);
-        const direction = newIndex > oldIndex ? "forward" : "backward";
-        props.onWorkspaceSelect(props.ws.id, direction);
-        props.setConfigOpenId(null);
-      }
-    };
-    insert(_el$4, () => getSmartIcon(props.ws.name, {
-      size: 14,
-      strokeWidth: 1.75
-    }));
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return props.configOpenId === props.ws.id;
-      },
-      get children() {
-        return createComponent(WorkspacePopover, {
-          get ws() {
-            return props.ws;
-          },
-          get configPos() {
-            return props.configPos;
-          },
-          onClose: () => props.setConfigOpenId(null),
-          onRename: (name) => {
-            window.api?.updateWorkspace(props.ws.id, name);
-            props.onWorkspaceRename?.(props.ws.id, name);
-          },
-          onSelectProfile: (profileId, profileName) => {
-            props.setCascadePrompt({
-              profileId: profileId === "main" ? null : profileId,
-              profileName
-            });
-          },
-          onDelete: async () => {
-            await window.api?.deleteWorkspace(props.ws.id);
-            props.setConfigOpenId(null);
-            props.onWorkspaceDelete?.(props.ws.id);
-            if (props.activeWorkspace === props.ws.id) {
-              const index = props.workspaces.findIndex((w) => w.id === props.ws.id);
-              const nextWs = props.workspaces[index - 1] || props.workspaces[index + 1];
-              if (nextWs) {
-                props.onWorkspaceSelect(nextWs.id, "backward");
-              }
-            }
-          },
-          get cascadePrompt() {
-            return props.cascadePrompt;
-          },
-          onCascadeResponse: async (updatePanes) => {
-            const p = props.cascadePrompt;
-            if (p) {
-              await window.api?.setWorkspaceDefaultProfile?.(props.ws.id, p.profileId);
-              if (updatePanes) {
-                await window.api?.updatePaneProfilesForWorkspace(props.ws.id, p.profileId);
-                props.onWorkspaceSelect(props.ws.id, "forward");
-              }
-            }
-            props.setCascadePrompt(null);
-            props.setConfigOpenId(null);
-          }
-        });
-      }
-    }), null);
-    insert(_el$, createComponent(Portal, {
-      get children() {
-        var _el$5 = _tmpl$$Q(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
-        insert(_el$7, () => props.ws.name);
-        insert(_el$0, (() => {
-          var _c$ = memo(() => !!(props.ws.default_profile_id === "main" || !props.ws.default_profile_id));
-          return () => _c$() ? "Main Session" : layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id)?.name;
-        })());
-        createRenderEffect((_p$) => {
-          var _v$ = `fixed z-[99999] pointer-events-none transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${isHovered() ? "opacity-100 translate-x-0" : "opacity-0 -translate-x-2"}`, _v$2 = `${(hoveredRect()?.top || 0) + (hoveredRect()?.height || 0) / 2}px`, _v$3 = `${(hoveredRect()?.right || 0) + 12}px`, _v$4 = layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id)?.color || "#64748b";
-          _v$ !== _p$.e && className(_el$5, _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$5, "top", _p$.t = _v$2);
-          _v$3 !== _p$.a && setStyleProperty(_el$5, "left", _p$.a = _v$3);
-          _v$4 !== _p$.o && setStyleProperty(_el$9, "background-color", _p$.o = _v$4);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0,
-          a: void 0,
-          o: void 0
-        });
-        return _el$5;
-      }
-    }), null);
-    createRenderEffect((_p$) => {
-      var _v$5 = `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.isActive ? "bg-neutral-900/10 shadow-[0_4px_12px_-6px_rgba(0,0,0,0.25)]" : "bg-transparent"}`, _v$6 = {
-        "bg-neutral-900 text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.18),0_1px_2px_rgba(0,0,0,0.1)]": props.isActive,
-        "bg-white/70 text-neutral-500 hover:bg-white hover:text-neutral-900 hover:shadow-[0_0_0_1px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,1)]": !props.isActive
-      }, _v$7 = `Workspace: ${props.ws.name}`, _v$8 = props.isActive, _v$9 = props.isActive && props.ws.default_profile_id && layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id)?.color ? `0 0 0 2px ${layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id)?.color}40` : void 0;
-      _v$5 !== _p$.e && className(_el$2, _p$.e = _v$5);
-      _p$.t = classList(_el$3, _v$6, _p$.t);
-      _v$7 !== _p$.a && setAttribute(_el$3, "aria-label", _p$.a = _v$7);
-      _v$8 !== _p$.o && setAttribute(_el$3, "aria-pressed", _p$.o = _v$8);
-      _v$9 !== _p$.i && setStyleProperty(_el$3, "box-shadow", _p$.i = _v$9);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0,
-      o: void 0,
-      i: void 0
-    });
-    return _el$;
-  })();
-}
-delegateEvents(["click", "contextmenu"]);
-var _tmpl$$P = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1 pl-2 pr-1.5 py-1 bg-white/85 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><span class="text-[11px] font-semibold text-neutral-400 tracking-[0.18em] uppercase whitespace-nowrap">Name</span><input autofocus class="w-[180px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-2 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
-function WorkspaceCreateFlyout(props) {
-  return createComponent(Show, {
-    get when() {
-      return memo(() => !!props.isCreatingWorkspace)() && props.createPos;
-    },
-    get children() {
-      return createComponent(Portal, {
-        get children() {
-          var _el$ = _tmpl$$P(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling;
-          _el$4.$$keydown = (e) => {
-            if (e.key === "Enter") {
-              const val = e.currentTarget.value.trim();
-              if (val) props.onCreateWorkspace(val);
-            } else if (e.key === "Escape") {
-              props.setIsCreatingWorkspace(false);
-            }
-          };
-          _el$5.$$click = () => props.setIsCreatingWorkspace(false);
-          createRenderEffect((_p$) => {
-            var _v$ = `${props.createPos?.top}px`, _v$2 = `${props.createPos?.left}px`;
-            _v$ !== _p$.e && setStyleProperty(_el$, "top", _p$.e = _v$);
-            _v$2 !== _p$.t && setStyleProperty(_el$, "left", _p$.t = _v$2);
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$;
-        }
-      });
-    }
-  });
-}
-delegateEvents(["keydown", "click"]);
-var _tmpl$$O = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$B = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$t = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$f = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
-function WorkspaceDock(props) {
-  const [isCreatingHover, setIsCreatingHover] = createSignal(false);
-  const [configOpenId, setConfigOpenId] = createSignal(null);
-  const [configPos, setConfigPos] = createSignal(null);
-  const [createPos, setCreatePos] = createSignal(null);
-  const [cascadePrompt, setCascadePrompt] = createSignal(null);
-  onMount(() => {
-  });
-  return (() => {
-    var _el$ = _tmpl$3$t(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
-    insert(_el$4, createComponent(For, {
-      get each() {
-        return props.workspaces;
-      },
-      children: (ws) => createComponent(WorkspaceItem, {
-        ws,
-        get isActive() {
-          return props.activeWorkspace === ws.id;
-        },
-        get workspaces() {
-          return props.workspaces;
-        },
-        get activeWorkspace() {
-          return props.activeWorkspace;
-        },
-        get configOpenId() {
-          return configOpenId();
-        },
-        setConfigOpenId,
-        get configPos() {
-          return configPos();
-        },
-        setConfigPos,
-        get onWorkspaceSelect() {
-          return props.onWorkspaceSelect;
-        },
-        get onWorkspaceRename() {
-          return props.onWorkspaceRename;
-        },
-        get onWorkspaceDelete() {
-          return props.onWorkspaceDelete;
-        },
-        get cascadePrompt() {
-          return cascadePrompt();
-        },
-        setCascadePrompt
-      })
-    }));
-    _el$6.addEventListener("mouseleave", () => setIsCreatingHover(false));
-    _el$6.addEventListener("mouseenter", () => setIsCreatingHover(true));
-    insert(_el$7, createComponent(Show, {
-      get when() {
-        return props.isCreatingWorkspace;
-      },
-      get fallback() {
-        return (() => {
-          var _el$0 = _tmpl$4$f();
-          _el$0.$$click = (e) => {
-            const rect = e.currentTarget.getBoundingClientRect();
-            setCreatePos({
-              top: rect.top + rect.height / 2,
-              left: rect.right + 12
-            });
-            props.setIsCreatingWorkspace(true, rect);
-          };
-          return _el$0;
-        })();
-      },
-      get children() {
-        return _tmpl$$O();
-      }
-    }));
-    insert(_el$6, createComponent(Show, {
-      get when() {
-        return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
-      },
-      get children() {
-        return _tmpl$2$B();
-      }
-    }), null);
-    insert(_el$, createComponent(WorkspaceCreateFlyout, {
-      get isCreatingWorkspace() {
-        return props.isCreatingWorkspace;
-      },
-      get createPos() {
-        return createPos();
-      },
-      get onCreateWorkspace() {
-        return props.onCreateWorkspace;
-      },
-      get setIsCreatingWorkspace() {
-        return props.setIsCreatingWorkspace;
-      }
-    }), null);
-    createRenderEffect(() => className(_el$7, `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${isCreatingHover() || props.isCreatingWorkspace ? "bg-neutral-900/10" : "bg-transparent"}`));
-    return _el$;
-  })();
-}
-delegateEvents(["click"]);
-var _tmpl$$N = /* @__PURE__ */ template(`<div id=workspace-dock class="absolute left-3 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-3 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
-function AppDock(props) {
-  return createComponent(Show, {
-    get when() {
-      return !props.isMaximized;
-    },
-    get children() {
-      var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild;
-      _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
-      var _ref$ = props.dockRef;
-      typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
-      insert(_el$2, createComponent(WorkspaceDock, {
-        get workspaces() {
-          return props.ws.workspaces();
-        },
-        get activeWorkspace() {
-          return props.ws.activeWorkspace();
-        },
-        get isCreatingWorkspace() {
-          return props.ws.isCreatingWorkspace();
-        },
-        setIsCreatingWorkspace: (isCreating, rect) => {
-          if (isCreating && !layoutStore.isPremium && props.ws.workspaces().length >= 1) {
-            if (rect) setLayoutStore("paywallAnchor", {
-              top: rect.top,
-              left: rect.left,
-              width: rect.width,
-              height: rect.height
-            });
-            setLayoutStore("paywallReason", "workspace");
-            setLayoutStore("showPaywall", true);
-            return;
-          }
-          props.ws.setIsCreatingWorkspace(isCreating);
-        },
-        get onWorkspaceSelect() {
-          return props.ws.switchWorkspace;
-        },
-        onCreateWorkspace: (name) => {
-          const id = `ws_${Date.now()}`;
-          window.api?.createWorkspace(id, name).then(() => {
-            props.ws.setWorkspaces([...props.ws.workspaces(), {
-              id,
-              name
-            }]);
-            props.ws.setActiveWorkspace(id);
-            props.ws.saveLayout(true);
-            window.api?.getTabs(id).then((t) => {
-              props.ws.setTabs(t || []);
-              if (t && t.length > 0) {
-                props.ws.setActiveTabId(t[0].id);
-                props.ws.loadNodesForTab(t[0].id, t);
-              }
-            });
-            props.ws.setIsCreatingWorkspace(false);
-          }).catch((e) => {
-            console.error("Failed to create workspace:", e);
-            props.ws.setIsCreatingWorkspace(false);
-          });
-        },
-        onWorkspaceRename: (id, name) => props.ws.setWorkspaces(props.ws.workspaces().map((w) => w.id === id ? {
-          ...w,
-          name
-        } : w)),
-        onWorkspaceDelete: (id) => props.ws.setWorkspaces(props.ws.workspaces().filter((w) => w.id !== id)),
-        onOpenSettings: (e) => {
-          const target = e.currentTarget;
-          const rect = target.getBoundingClientRect();
-          setLayoutStore("settingsAnchor", {
-            top: rect.top,
-            left: rect.left,
-            width: rect.width,
-            height: rect.height
-          });
-          setLayoutStore("showSettings", !layoutStore.showSettings);
-        }
-      }));
-      return _el$;
-    }
-  });
-}
-var _tmpl$$M = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-3 right-3 z-[70] flex items-center gap-1.5 pointer-events-auto bg-white border border-neutral-200/60 p-1.5 rounded-2xl shadow-md ring-1 ring-black/[0.02]"style=-webkit-app-region:no-drag><button class="w-[24px] h-[24px] rounded-md hover:bg-white flex items-center justify-center text-neutral-600 transition-colors"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><path d="M5 12h14"></path></svg></button><button class="w-[24px] h-[24px] rounded-md hover:bg-white flex items-center justify-center text-neutral-600 transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect></svg></button><button class="w-[24px] h-[24px] rounded-md hover:bg-red-500 hover:text-white flex items-center justify-center text-neutral-600 transition-colors"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
-function AppWindowControls(props) {
-  return createComponent(Show, {
-    get when() {
-      return !props.isMaximized;
-    },
-    get children() {
-      var _el$ = _tmpl$$M(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
-      _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
-      _el$2.$$click = () => window.api?.minimizeWindow();
-      _el$3.$$click = () => window.api?.maximizeWindow();
-      _el$4.$$click = () => window.api?.closeWindow();
-      return _el$;
-    }
-  });
-}
-delegateEvents(["click"]);
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$A = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$b = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$4 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
-function AppEdgeZones(props) {
-  return createComponent(Show, {
-    get when() {
-      return memo(() => !!!props.isMaximized)() && props.isUiCollapsed;
-    },
-    get children() {
-      return [(() => {
-        var _el$ = _tmpl$$L();
-        _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
-        return _el$;
-      })(), (() => {
-        var _el$2 = _tmpl$2$A();
-        _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
-        return _el$2;
-      })(), (() => {
-        var _el$3 = _tmpl$3$s();
-        _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
-        return _el$3;
-      })(), (() => {
-        var _el$4 = _tmpl$4$e();
-        _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
-        return _el$4;
-      })(), (() => {
-        var _el$5 = _tmpl$5$b();
-        _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
-        return _el$5;
-      })(), (() => {
-        var _el$6 = _tmpl$6$7();
-        _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
-        return _el$6;
-      })(), (() => {
-        var _el$7 = _tmpl$7$5();
-        _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
-        return _el$7;
-      })(), (() => {
-        var _el$8 = _tmpl$8$4();
-        _el$8.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
-        return _el$8;
-      })()];
-    }
-  });
-}
-function useFeaturebase() {
-  const [hasUnread, setHasUnread] = createSignal(false);
-  onMount(() => {
-    if (document.getElementById("featurebase-sdk")) return;
-    if (typeof window.Featurebase !== "function") {
-      window.Featurebase = function() {
-        (window.Featurebase.q = window.Featurebase.q || []).push(arguments);
-      };
-    }
-    window.Featurebase(
-      "initialize",
-      {
-        organization: "apposition",
-        // Replace with real Org ID later
-        theme: "light"
-      },
-      (err, data) => {
-        if (data?.action === "unread_count_updated" && data.count) {
-          setHasUnread(data.count > 0);
-        }
-      }
-    );
-    const script = document.createElement("script");
-    script.src = "https://do.featurebase.app/js/sdk.js";
-    script.id = "featurebase-sdk";
-    script.async = true;
-    document.head.appendChild(script);
-    const style2 = document.createElement("style");
-    style2.innerHTML = `
-      #featurebase-widget {
-        --fb-primary: #171717 !important;
-        --fb-bg: #ffffff !important;
-        --fb-border: rgba(23, 23, 23, 0.1) !important;
-      }
-    `;
-    document.head.appendChild(style2);
-  });
-  createEffect(() => {
-    if (layoutStore.licenseState?.customer?.email) {
-      window.Featurebase("identify", {
-        email: layoutStore.licenseState.customer.email,
-        name: layoutStore.licenseState.customer.name || "Apposition User"
-      });
-    }
-  });
-  const openFeedback = () => {
-    if (!navigator.onLine) {
-      alert(
-        "You're offline. Reconnect to view the community roadmap and share your thoughts."
-      );
-      return;
-    }
-    window.Featurebase("show");
-  };
-  const openUpdates = () => {
-    if (!navigator.onLine) {
-      alert(
-        "You're offline. Reconnect to view the community roadmap and share your thoughts."
-      );
-      return;
-    }
-    window.Featurebase("showChangelog");
-    setHasUnread(false);
-  };
-  return { openFeedback, openUpdates, hasUnread };
-}
-var _tmpl$$K = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-cue-sage rounded-full border-2 border-white pointer-events-none">`), _tmpl$2$z = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-3 left-3 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/settings z-30"><button title=Settings class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92]"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg></button><div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/settings:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">Settings</div></div></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/feedback"><button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92]"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></svg></button><div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/feedback:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">Feedback</div></div></div><div class="relative group/updates"><button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92]"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path></svg></button><div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/updates:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">Release Notes`);
-function SupportCluster(props) {
-  const {
-    hasUnread
-  } = useFeaturebase();
-  const handleOpenFeedback = async () => {
-    if (!navigator.onLine) {
-      window.dispatchEvent(new CustomEvent("app:toast", {
-        detail: {
-          message: "You're offline. Reconnect to view the community roadmap and share your thoughts.",
-          type: "error"
-        }
-      }));
-      return;
-    }
-    await props.ws.handleCreateTab();
-    const activePane = props.ws.activePaneId();
-    if (activePane) {
-      window.api?.viewLoadURL(activePane, "https://apposition.app/feedback");
-      setLayoutStore("nodes", activePane, (node) => ({
-        ...node,
-        url: "https://apposition.app/feedback"
-      }));
-    }
-  };
-  const handleOpenUpdates = (e) => {
-    if (!navigator.onLine) {
-      alert("You're offline. Reconnect to view the community roadmap and share your thoughts.");
-      return;
-    }
-    const rect = e.currentTarget.getBoundingClientRect();
-    setLayoutStore("changelogAnchor", {
-      top: rect.top,
-      left: rect.left,
-      width: rect.width,
-      height: rect.height
-    });
-    setLayoutStore("showChangelog", !layoutStore.showChangelog);
-  };
-  return createComponent(Show, {
-    get when() {
-      return !props.isMaximized;
-    },
-    get children() {
-      var _el$ = _tmpl$2$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$5.nextSibling, _el$8 = _el$7.firstChild;
-      _el$8.firstChild;
-      _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
-      _el$3.$$click = (e) => {
-        const rect = e.currentTarget.getBoundingClientRect();
-        setLayoutStore("settingsAnchor", {
-          top: rect.top,
-          left: rect.left,
-          width: rect.width,
-          height: rect.height
-        });
-        setLayoutStore("showSettings", !layoutStore.showSettings);
-      };
-      _el$6.$$click = handleOpenFeedback;
-      _el$8.$$click = handleOpenUpdates;
-      insert(_el$8, createComponent(Show, {
-        get when() {
-          return hasUnread();
-        },
-        get children() {
-          return _tmpl$$K();
-        }
-      }), null);
-      return _el$;
-    }
-  });
-}
-delegateEvents(["click"]);
-var _tmpl$$J = /* @__PURE__ */ template(`<div><div>`);
-const STYLE_MAP = {
-  md: {
-    outer: "rounded-lg p-1",
-    inner: "rounded"
-  },
-  // 8px - 4px = 4px
-  lg: {
-    outer: "rounded-xl p-1",
-    inner: "rounded-lg"
-  },
-  // 12px - 4px = 8px
-  xl: {
-    outer: "rounded-2xl p-1.5",
-    inner: "rounded-[10px]"
-  },
-  // 16px - 6px = 10px
-  "2xl": {
-    outer: "rounded-[2rem] p-2",
-    inner: "rounded-[24px]"
-  },
-  // 32px - 8px = 24px
-  full: {
-    outer: "rounded-full p-1.5",
-    inner: "rounded-full"
-  },
-  "left-pill": {
-    outer: "rounded-l-full rounded-r-none p-1 pr-0",
-    inner: "rounded-l-full rounded-r-none border-r-0"
-  },
-  "right-pill": {
-    outer: "rounded-r-full rounded-l-none p-1 pl-0",
-    inner: "rounded-r-full rounded-l-none border-l-0"
-  }
-};
-function DoubleBezel(rawProps) {
-  const props = mergeProps({
-    size: "lg",
-    elevation: "flat",
-    interactive: false,
-    variant: "light"
-  }, rawProps);
-  const [local, rest] = splitProps(props, ["size", "elevation", "interactive", "variant", "innerClass", "outerClass", "innerStyle", "class", "children"]);
-  const sizeClasses = STYLE_MAP[local.size];
-  const elevationClasses = local.elevation === "elevated" ? "shadow-double-bezel-elevated" : local.elevation === "active" ? "shadow-double-bezel-active" : "shadow-double-bezel-flat";
-  const interactiveClasses = local.interactive ? "group hover:shadow-double-bezel-elevated transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)]" : "";
-  const isLightOnDark = local.variant === "light-on-dark";
-  const isDark = local.variant === "dark";
-  const outerBg = isLightOnDark ? local.elevation === "active" ? "bg-white/30" : "bg-white/20" : isDark ? local.elevation === "active" ? "bg-white/20" : "bg-white/10" : local.elevation === "active" ? "bg-neutral-200" : "bg-neutral-100";
-  const innerBg = isDark ? "bg-neutral-900" : "bg-white";
-  const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
-  const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
-  return (() => {
-    var _el$ = _tmpl$$J(), _el$2 = _el$.firstChild;
-    spread(_el$, mergeProps({
-      get ["class"]() {
-        return `${outerBg} flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
-      }
-    }, rest), false, true);
-    insert(_el$2, () => local.children);
-    createRenderEffect((_p$) => {
-      var _v$ = `w-full flex-1 border ${innerBorder} ${innerShadow} relative overflow-hidden z-0 transition-colors duration-300 ${innerBg} ${sizeClasses.inner} ${local.innerClass || ""}`, _v$2 = local.innerStyle;
-      _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
-      _p$.t = style(_el$2, _v$2, _p$.t);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0
-    });
-    return _el$;
-  })();
-}
-var _tmpl$$I = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$y = /* @__PURE__ */ template(`<input type=text class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
-function CommandBar(props) {
-  const [isFocused, setIsFocused] = createSignal(false);
-  let inputEl;
-  const handleFocus = () => {
-    setIsFocused(true);
-    props.onFocus?.();
-  };
-  const handleBlur = () => {
-    setIsFocused(false);
-    props.onBlur?.();
-  };
-  return createComponent(DoubleBezel, {
-    size: "lg",
-    get elevation() {
-      return isFocused() ? "active" : "flat";
-    },
-    get outerClass() {
-      return `h-12 w-full ${props.class || ""}`;
-    },
-    innerClass: "flex items-center px-3 cursor-text",
-    onClick: (e) => {
-      const target = e.target;
-      if (target.tagName.toLowerCase() === "input") return;
-      if (!target.closest(".profile-menu-container") && !target.closest("button")) {
-        if (inputEl) {
-          inputEl.focus();
-        }
-      }
-    },
-    get children() {
-      return [createComponent(Show, {
-        get when() {
-          return props.icon;
-        },
-        get fallback() {
-          return (() => {
-            var _el$4 = _tmpl$4$d(), _el$5 = _el$4.firstChild;
-            createRenderEffect((_p$) => {
-              var _v$4 = !!isFocused(), _v$5 = !isFocused();
-              _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
-              _v$5 !== _p$.t && _el$5.classList.toggle("text-neutral-400", _p$.t = _v$5);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0
-            });
-            return _el$4;
-          })();
-        },
-        get children() {
-          var _el$ = _tmpl$$I();
-          insert(_el$, () => props.icon);
-          return _el$;
-        }
-      }), (() => {
-        var _el$2 = _tmpl$2$y();
-        _el$2.addEventListener("blur", handleBlur);
-        _el$2.addEventListener("focus", handleFocus);
-        addEventListener(_el$2, "keydown", props.onKeyDown, true);
-        _el$2.$$input = (e) => props.onInput(e.currentTarget.value);
-        use((el) => {
-          inputEl = el;
-          if (typeof props.ref === "function") {
-            props.ref(el);
-          } else if (props.ref) {
-            props.ref = el;
-          }
-        }, _el$2);
-        createRenderEffect((_p$) => {
-          var _v$ = props.id, _v$2 = props.autofocus, _v$3 = props.placeholder || "Search Google or type a web address...";
-          _v$ !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$);
-          _v$2 !== _p$.t && (_el$2.autofocus = _p$.t = _v$2);
-          _v$3 !== _p$.a && setAttribute(_el$2, "placeholder", _p$.a = _v$3);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0,
-          a: void 0
-        });
-        createRenderEffect(() => _el$2.value = props.value);
-        return _el$2;
-      })(), createComponent(Show, {
-        get when() {
-          return props.rightElement;
-        },
-        get children() {
-          var _el$3 = _tmpl$3$r();
-          insert(_el$3, () => props.rightElement);
-          return _el$3;
-        }
-      })];
-    }
-  });
-}
-delegateEvents(["input", "keydown"]);
-delegateEvents(["click"]);
-var _tmpl$$H = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Type a URL or command..."class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:auto;-webkit-user-select:auto>`), _tmpl$2$x = /* @__PURE__ */ template(`<div class=p-3><div class="px-4 py-2 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Suggestions</div><div class="px-4 py-3 mt-1 text-sm text-neutral-600 hover:text-neutral-900 hover:bg-neutral-50 rounded-xl cursor-pointer flex justify-between group transition-colors"><span class="group-hover:translate-x-1 transition-transform duration-300 ease-out font-medium">Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 shadow-sm px-2 py-0.5 rounded-md">mem</span></div><div class="px-4 py-3 text-sm text-neutral-600 hover:text-neutral-900 hover:bg-neutral-50 rounded-xl cursor-pointer flex justify-between group transition-colors"><span class="group-hover:translate-x-1 transition-transform duration-300 ease-out font-medium">Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 shadow-sm px-2 py-0.5 rounded-md">zzz`), _tmpl$3$q = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-500">`);
-function CommandPalette(props) {
-  const [isOpen, setIsOpen] = createSignal(false);
-  const [query, setQuery] = createSignal("");
-  let inputRef;
-  onMount(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        setIsOpen(true);
-      } else if (e.key === "Escape") {
-        setIsOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
-  });
-  createEffect(() => {
-    if (isOpen()) {
-      setTimeout(() => inputRef?.focus(), 10);
-    } else {
-      setQuery("");
-    }
-  });
-  return createComponent(Show, {
-    get when() {
-      return isOpen();
-    },
-    get children() {
-      var _el$ = _tmpl$3$q();
-      _el$.$$click = () => setIsOpen(false);
-      insert(_el$, createComponent(DoubleBezel, {
-        size: "lg",
-        elevation: "elevated",
-        outerClass: "w-[640px] max-h-[60vh] animate-in slide-in-from-top-8 duration-700 ease-[cubic-bezier(0.32,0.72,0,1)]",
-        innerClass: "flex flex-col h-fit",
-        onClick: (e) => e.stopPropagation(),
-        get children() {
-          return [(() => {
-            var _el$2 = _tmpl$$H(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
-            _el$2.$$click = () => {
-              if (inputRef) {
-                inputRef.focus();
-                const len = inputRef.value.length;
-                inputRef.setSelectionRange(len, len);
-              }
-            };
-            _el$4.$$keydown = (e) => {
-              if (e.key === "Enter" && query()) {
-                const isUrl = query().includes(".") && !query().includes(" ");
-                if (isUrl) {
-                  props.onSpawnPane?.({
-                    id: `web_${Date.now()}`,
-                    type: "web",
-                    url: query().startsWith("http") ? query() : `https://${query()}`,
-                    profileId: "work"
-                  });
-                }
-                setIsOpen(false);
-              }
-            };
-            _el$4.$$input = (e) => setQuery(e.currentTarget.value);
-            var _ref$ = inputRef;
-            typeof _ref$ === "function" ? use(_ref$, _el$4) : inputRef = _el$4;
-            createRenderEffect(() => _el$4.value = query());
-            return _el$2;
-          })(), createComponent(Show, {
-            get when() {
-              return !query();
-            },
-            get children() {
-              var _el$5 = _tmpl$2$x(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.nextSibling;
-              _el$7.$$click = () => {
-                window.dispatchEvent(new CustomEvent("app:hibernate-pane", {
-                  detail: "background"
-                }));
-                setIsOpen(false);
-              };
-              _el$8.$$click = () => {
-                window.dispatchEvent(new CustomEvent("app:hibernate-pane", {
-                  detail: "all"
-                }));
-                setIsOpen(false);
-              };
-              return _el$5;
-            }
-          })];
-        }
-      }));
-      return _el$;
-    }
-  });
-}
-delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div><div></div><div>`);
-function Resizer(props) {
-  const onPointerDown = (e) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startY = e.clientY;
-    const startRatio = props.initialRatio;
-    const resizer = e.currentTarget;
-    const container = resizer.parentElement;
-    const rect = container.getBoundingClientRect();
-    const nodeA = container.children[0];
-    const nodeB = container.children[2];
-    let overlay = document.getElementById("resizer-drag-overlay");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.id = "resizer-drag-overlay";
-      overlay.style.position = "fixed";
-      overlay.style.inset = "0";
-      overlay.style.zIndex = "9999";
-      overlay.style.cursor = props.isHorizontal ? "col-resize" : "row-resize";
-      document.body.appendChild(overlay);
-    }
-    document.body.classList.add("is-resizing");
-    let rafId = null;
-    const onPointerMove = (ev) => {
-      let newRatio = startRatio;
-      if (props.isHorizontal) {
-        const delta = ev.clientX - startX;
-        newRatio = startRatio + delta / rect.width;
-      } else {
-        const delta = ev.clientY - startY;
-        newRatio = startRatio + delta / rect.height;
-      }
-      newRatio = Math.max(0.05, Math.min(0.95, newRatio));
-      if (rafId === null) {
-        rafId = requestAnimationFrame(() => {
-          nodeA.style.flex = `${newRatio} 1 0%`;
-          nodeB.style.flex = `${1 - newRatio} 1 0%`;
-          rafId = null;
-        });
-      }
-    };
-    const onPointerUp = () => {
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-      window.removeEventListener("pointercancel", onPointerUp);
-      window.removeEventListener("mouseleave", onPointerUp);
-      const overlayToRemove = document.getElementById("resizer-drag-overlay");
-      if (overlayToRemove) overlayToRemove.remove();
-      document.body.classList.remove("is-resizing");
-      let finalRatio = startRatio;
-      if (props.isHorizontal) {
-        const delta = window.__lastPointerX - startX;
-        finalRatio = startRatio + delta / rect.width;
-      } else {
-        const delta = window.__lastPointerY - startY;
-        finalRatio = startRatio + delta / rect.height;
-      }
-      finalRatio = Math.max(0.05, Math.min(0.95, finalRatio));
-      props.onRatioChange(finalRatio);
-    };
-    const trackPos = (ev) => {
-      window.__lastPointerX = ev.clientX;
-      window.__lastPointerY = ev.clientY;
-    };
-    window.addEventListener("pointermove", trackPos);
-    window.addEventListener("pointermove", onPointerMove);
-    const cleanupPos = () => window.removeEventListener("pointermove", trackPos);
-    window.addEventListener("pointerup", cleanupPos);
-    window.addEventListener("pointerup", onPointerUp);
-    window.addEventListener("pointercancel", cleanupPos);
-    window.addEventListener("pointercancel", onPointerUp);
-    window.addEventListener("mouseleave", cleanupPos);
-    window.addEventListener("mouseleave", onPointerUp);
-  };
-  return (() => {
-    var _el$ = _tmpl$$G(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-    _el$.$$pointerdown = onPointerDown;
-    createRenderEffect((_p$) => {
-      var _v$ = `relative flex items-center justify-center bg-transparent z-20 group pointer-events-auto shrink-0 ${props.isHorizontal ? "w-2.5 cursor-col-resize -mx-1.25" : "h-2.5 cursor-row-resize -my-1.25"}`, _v$2 = `bg-transparent group-hover:bg-neutral-400/60 group-active:bg-neutral-800 transition-colors duration-150 ${props.isHorizontal ? "w-[1px] h-full" : "h-[1px] w-full"}`, _v$3 = `absolute rounded-full bg-neutral-200 border border-neutral-400/50 shadow-sm opacity-0 group-hover:opacity-100 group-active:scale-95 transition-all duration-150 ${props.isHorizontal ? "w-1 h-6" : "h-1 w-6"}`;
-      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _v$2 !== _p$.t && className(_el$2, _p$.t = _v$2);
-      _v$3 !== _p$.a && className(_el$3, _p$.a = _v$3);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0
-    });
-    return _el$;
-  })();
-}
-delegateEvents(["pointerdown"]);
-function extractDomain(rawUrl) {
-  if (!rawUrl) return "";
-  try {
-    const parsed = new URL(
-      rawUrl.includes("://") ? rawUrl : `https://${rawUrl}`
-    );
-    return parsed.hostname.replace(/^www\./, "");
-  } catch {
-    return rawUrl.split("/")[0].replace(/^www\./, "");
-  }
-}
-function getFaviconUrl(rawUrlOrDomain, size = 64) {
-  const domain = extractDomain(rawUrlOrDomain);
-  if (!domain || domain === "localhost" || domain.startsWith("127.0.0.1")) {
-    return "";
-  }
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=${size}`;
-}
-var _tmpl$$F = /* @__PURE__ */ template(`<img alt loading=lazy class="w-full h-full object-contain">`, true, false, false), _tmpl$2$w = /* @__PURE__ */ template(`<div>`), _tmpl$3$p = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
-function Favicon(props) {
-  const [hasError, setHasError] = createSignal(false);
-  const size = () => props.size || 16;
-  const faviconUrl = () => getFaviconUrl(props.url, 64);
-  createEffect(() => {
-    props.url;
-    setHasError(false);
-  });
-  return (() => {
-    var _el$ = _tmpl$2$w();
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return memo(() => !!faviconUrl())() && !hasError();
-      },
-      get fallback() {
-        return (() => {
-          var _el$3 = _tmpl$3$p();
-          createRenderEffect((_p$) => {
-            var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
-            _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
-            _v$5 !== _p$.t && setAttribute(_el$3, "height", _p$.t = _v$5);
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$3;
-        })();
-      },
-      get children() {
-        var _el$2 = _tmpl$$F();
-        _el$2.addEventListener("error", () => setHasError(true));
-        createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
-        return _el$2;
-      }
-    }));
-    createRenderEffect((_p$) => {
-      var _v$ = `flex items-center justify-center shrink-0 overflow-hidden rounded-[4px] bg-neutral-100 ${props.class || ""}`, _v$2 = `${size()}px`, _v$3 = `${size()}px`;
-      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _v$2 !== _p$.t && setStyleProperty(_el$, "width", _p$.t = _v$2);
-      _v$3 !== _p$.a && setStyleProperty(_el$, "height", _p$.a = _v$3);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0
-    });
-    return _el$;
-  })();
-}
-var _tmpl$$E = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$v = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$o = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$11 = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$M = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$F = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -12609,7 +14045,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$11(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -12623,7 +14059,7 @@ function HistoryDropdown(props) {
           return props.items;
         },
         children: (item, idx) => (() => {
-          var _el$9 = _tmpl$3$o(), _el$0 = _el$9.firstChild;
+          var _el$9 = _tmpl$3$F(), _el$0 = _el$9.firstChild;
           _el$9.$$click = (e) => {
             e.stopPropagation();
             props.onSelect(item.url, item.index);
@@ -12647,7 +14083,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$v();
+              return _tmpl$2$M();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -12660,7 +14096,7 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$D = /* @__PURE__ */ template(`<kbd class="px-1 py-0.5 text-[9px] font-mono font-medium rounded bg-neutral-800 border border-neutral-700/80 text-neutral-300 leading-none">`), _tmpl$2$u = /* @__PURE__ */ template(`<div class="fixed z-[99999] pointer-events-none -translate-x-1/2 flex items-center gap-1.5 px-2 py-1 rounded-[7px] bg-neutral-900/95 backdrop-blur-sm text-neutral-100 text-[11px] font-medium shadow-[0_4px_16px_rgba(0,0,0,0.2)] border border-neutral-800 animate-in fade-in zoom-in-95 duration-150"><span>`), _tmpl$3$n = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center">`);
+var _tmpl$$10 = /* @__PURE__ */ template(`<kbd class="px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none">`), _tmpl$2$L = /* @__PURE__ */ template(`<div><span>`), _tmpl$3$E = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -12669,24 +14105,25 @@ function ActionTooltip(props) {
     left: 0
   });
   let hoverTimer;
+  const placement = () => props.placement || "bottom";
   const updatePosition = () => {
     if (!triggerRef) return;
     const rect = triggerRef.getBoundingClientRect();
-    const placement = props.placement || "bottom";
+    const p = placement();
     let top = 0;
     let left = 0;
-    if (placement === "bottom") {
-      top = rect.bottom + 6;
+    if (p === "bottom") {
+      top = rect.bottom + 8;
       left = rect.left + rect.width / 2;
-    } else if (placement === "top") {
-      top = rect.top - 6;
+    } else if (p === "top") {
+      top = rect.top - 8;
       left = rect.left + rect.width / 2;
-    } else if (placement === "left") {
+    } else if (p === "left") {
       top = rect.top + rect.height / 2;
-      left = rect.left - 6;
+      left = rect.left - 8;
     } else {
       top = rect.top + rect.height / 2;
-      left = rect.right + 6;
+      left = rect.right + 8;
     }
     setCoords({
       top,
@@ -12699,7 +14136,7 @@ function ActionTooltip(props) {
     hoverTimer = setTimeout(() => {
       updatePosition();
       setIsOpen(true);
-    }, 250);
+    }, 150);
   };
   const handlePointerLeave = () => {
     clearTimeout(hoverTimer);
@@ -12707,7 +14144,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$3$n();
+    var _el$ = _tmpl$3$E();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -12721,26 +14158,28 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$2$u(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$2$L(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
             insert(_el$2, createComponent(Show, {
               get when() {
                 return props.shortcut;
               },
               get children() {
-                var _el$4 = _tmpl$$D();
+                var _el$4 = _tmpl$$10();
                 insert(_el$4, () => props.shortcut);
                 return _el$4;
               }
             }), null);
             createRenderEffect((_p$) => {
-              var _v$ = `${coords().top}px`, _v$2 = `${coords().left}px`;
-              _v$ !== _p$.e && setStyleProperty(_el$2, "top", _p$.e = _v$);
-              _v$2 !== _p$.t && setStyleProperty(_el$2, "left", _p$.t = _v$2);
+              var _v$ = `fixed z-[99999] pointer-events-none flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-900/95 backdrop-blur-md text-neutral-100 text-[11px] font-medium shadow-[0_8px_24px_rgba(0,0,0,0.3)] border border-neutral-700/60 whitespace-nowrap select-none animate-in fade-in zoom-in-95 duration-150 ${placement() === "left" ? "-translate-x-full -translate-y-1/2" : placement() === "right" ? "-translate-y-1/2" : placement() === "top" ? "-translate-x-1/2 -translate-y-full" : "-translate-x-1/2"}`, _v$2 = `${coords().top}px`, _v$3 = `${coords().left}px`;
+              _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
+              _v$2 !== _p$.t && setStyleProperty(_el$2, "top", _p$.t = _v$2);
+              _v$3 !== _p$.a && setStyleProperty(_el$2, "left", _p$.a = _v$3);
               return _p$;
             }, {
               e: void 0,
-              t: void 0
+              t: void 0,
+              a: void 0
             });
             return _el$2;
           }
@@ -12751,75 +14190,43 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$C = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[10px] hover:bg-neutral-100/90 active:scale-[0.94] active:shadow-double-bezel-active transition-all text-neutral-600 disabled:opacity-30 disabled:pointer-events-none shrink-0"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$t = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[10px] hover:bg-neutral-100/90 active:scale-[0.94] active:shadow-double-bezel-active transition-all text-neutral-600 disabled:opacity-30 disabled:pointer-events-none shrink-0"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$m = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-linecap=round stroke-linejoin=round><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$4$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-linecap=round stroke-linejoin=round><rect width=20 height=8 x=2 y=2 rx=2 ry=2></rect><rect width=20 height=8 x=2 y=14 rx=2 ry=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$5$a = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`), _tmpl$6$6 = /* @__PURE__ */ template(`<button>`), _tmpl$7$4 = /* @__PURE__ */ template(`<div><div><input type=text placeholder="Search or URL">`);
-function Omnibox(props) {
-  let urlInputRef;
+var _tmpl$$$ = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$K = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$D = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$u = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
   const [showFwdHistory, setShowFwdHistory] = createSignal(false);
-  const [liveInput, setLiveInput] = createSignal(props.node.url || "");
+  const [isReloading, setIsReloading] = createSignal(false);
   const isMac = typeof navigator !== "undefined" && /Mac|iP(hone|od|ad)/i.test(navigator.userAgent);
-  createEffect(() => {
-    if (props.showHistoryMenu && !props.showHistoryMenu()) {
-      setShowBackHistory(false);
-      setShowFwdHistory(false);
-    }
-  });
-  createEffect(() => {
-    if (props.urlExpanded()) {
-      setLiveInput(props.node.url || "");
-      setTimeout(() => {
-        urlInputRef?.focus();
-        urlInputRef?.select();
-      }, 50);
-    }
-  });
-  onMount(() => {
-    const handleFocus = (e) => {
-      if (e.detail?.activePaneId === props.node.id) props.setUrlExpanded(true);
-    };
-    window.addEventListener("focus-address-bar", handleFocus);
-    onCleanup(() => {
-      window.removeEventListener("focus-address-bar", handleFocus);
-      clearTimeout(longPressTimer);
-    });
-  });
-  const canGoBack = () => Boolean(props.node.canGoBack || props.node.history && props.node.historyIndex !== void 0 && props.node.historyIndex > 0);
-  const canGoForward = () => Boolean(props.node.canGoForward || props.node.history && props.node.historyIndex !== void 0 && props.node.historyIndex < props.node.history.length - 1);
+  const canGoBack = () => Boolean(props.node?.canGoBack || props.node?.history && props.node.historyIndex !== void 0 && props.node.historyIndex > 0);
+  const canGoForward = () => Boolean(props.node?.canGoForward || props.node?.history && props.node.historyIndex !== void 0 && props.node.historyIndex < props.node.history.length - 1);
   const backItems = () => {
-    const hist = props.node.history || [];
-    const idx = props.node.historyIndex ?? -1;
+    const hist = props.node?.history || [];
+    const idx = props.node?.historyIndex ?? -1;
     return idx > 0 ? hist.slice(0, idx).map((url, i) => ({
       url,
       index: i
     })).reverse() : [];
   };
   const fwdItems = () => {
-    const hist = props.node.history || [];
-    const idx = props.node.historyIndex ?? -1;
+    const hist = props.node?.history || [];
+    const idx = props.node?.historyIndex ?? -1;
     return idx >= 0 && idx < hist.length - 1 ? hist.slice(idx + 1).map((url, i) => ({
       url,
       index: idx + 1 + i
     })) : [];
   };
-  const openHistory = (dir) => {
-    props.setShowSplitMenu?.(false);
-    props.setShowProfileMenu?.(false);
-    props.setShowHistoryMenu?.(true);
-    if (dir === "back") {
-      setShowFwdHistory(false);
-      setShowBackHistory(true);
-    } else {
-      setShowBackHistory(false);
-      setShowFwdHistory(true);
-    }
-  };
   const closeHistory = () => {
     setShowBackHistory(false);
     setShowFwdHistory(false);
-    props.setShowHistoryMenu?.(false);
+    props.onMenuOpenChange?.(false);
+  };
+  const openHistory = (dir) => {
+    props.onMenuOpenChange?.(true);
+    setShowBackHistory(dir === "back");
+    setShowFwdHistory(dir === "fwd");
   };
   const handleHistorySelect = (url, targetIndex) => {
+    if (!props.node) return;
     closeHistory();
     const el = document.getElementById("webview-" + props.node.id);
     window.dispatchEvent(new CustomEvent("pane.force-gate", {
@@ -12835,77 +14242,60 @@ function Omnibox(props) {
         canGoBack: targetIndex > 0,
         canGoForward: Boolean(props.node.history && targetIndex < props.node.history.length - 1)
       });
-    }
-    if (targetIndex !== void 0 && props.node.historyIndex !== void 0 && targetIndex !== props.node.historyIndex) {
-      const delta = targetIndex - props.node.historyIndex;
-      if (el && typeof el.canGoToOffset === "function" && el.canGoToOffset(delta)) {
-        try {
-          el.goToOffset(delta);
-          return;
-        } catch {
+      if (props.node.historyIndex !== void 0 && targetIndex !== props.node.historyIndex) {
+        const delta = targetIndex - props.node.historyIndex;
+        if (el && typeof el.canGoToOffset === "function" && el.canGoToOffset(delta)) {
+          try {
+            el.goToOffset(delta);
+            return;
+          } catch {
+          }
         }
       }
     }
     window.api?.viewLoadURL(props.node.id, url);
   };
   const handleNav = (dir) => {
+    if (!props.node) return;
     const el = document.getElementById("webview-" + props.node.id);
-    if (dir === "back") {
-      if (el && typeof el.canGoBack === "function" && el.canGoBack()) {
-        try {
-          el.goBack();
-          return;
-        } catch {
-        }
+    const items = dir === "back" ? backItems() : fwdItems();
+    if (dir === "back" && el?.canGoBack?.()) {
+      try {
+        el.goBack();
+        return;
+      } catch {
       }
-      if (backItems().length > 0) {
-        const target = backItems()[0];
-        handleHistorySelect(target.url, target.index);
-      } else if (el) {
-        try {
-          el.executeJavaScript("window.history.back()").catch(() => {
-          });
-        } catch {
-        }
-      }
-    } else {
-      if (el && typeof el.canGoForward === "function" && el.canGoForward()) {
-        try {
-          el.goForward();
-          return;
-        } catch {
-        }
-      }
-      if (fwdItems().length > 0) {
-        const target = fwdItems()[0];
-        handleHistorySelect(target.url, target.index);
-      } else if (el) {
-        try {
-          el.executeJavaScript("window.history.forward()").catch(() => {
-          });
-        } catch {
-        }
+    } else if (dir === "forward" && el?.canGoForward?.()) {
+      try {
+        el.goForward();
+        return;
+      } catch {
       }
     }
+    if (items.length > 0) handleHistorySelect(items[0].url, items[0].index);
   };
-  const handleUrlSubmit = (raw) => {
-    const val = resolveInputUrl(raw);
-    if (val && val !== props.node.url) {
-      window.dispatchEvent(new CustomEvent("pane.force-gate", {
-        detail: {
-          id: props.node.id,
-          url: val
-        }
-      }));
-      props.onUpdatePane?.(props.node.id, {
-        url: val
-      });
-      window.api?.viewLoadURL(props.node.id, val);
+  const handleReload = (e) => {
+    e.stopPropagation();
+    if (!props.node) return;
+    setIsReloading(true);
+    setTimeout(() => setIsReloading(false), 600);
+    const isHard = Boolean(e.shiftKey);
+    const el = document.getElementById("webview-" + props.node.id);
+    if (el?.reload) {
+      try {
+        if (isHard && el.reloadIgnoringCache) el.reloadIgnoringCache();
+        else el.reload();
+      } catch {
+      }
     }
+    window.api?.viewReload?.(props.node.id, isHard);
+    window.dispatchEvent(new CustomEvent("pane.reloaded", {
+      detail: props.node.id
+    }));
   };
-  const inputType = () => detectInputType(liveInput());
+  onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$7$4(), _el$4 = _el$.firstChild, _el$9 = _el$4.firstChild;
+    var _el$ = _tmpl$4$u();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -12913,7 +14303,7 @@ function Omnibox(props) {
         return !canGoBack();
       },
       get children() {
-        var _el$2 = _tmpl$$C();
+        var _el$2 = _tmpl$$$();
         _el$2.$$contextmenu = (e) => {
           e.preventDefault();
           if (backItems().length > 0) openHistory("back");
@@ -12932,7 +14322,7 @@ function Omnibox(props) {
         createRenderEffect(() => _el$2.disabled = !canGoBack());
         return _el$2;
       }
-    }), _el$4);
+    }), null);
     insert(_el$, createComponent(ActionTooltip, {
       label: "Forward",
       shortcut: isMac ? "⌘]" : "Ctrl+]",
@@ -12940,7 +14330,7 @@ function Omnibox(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$t();
+        var _el$3 = _tmpl$2$K();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -12959,7 +14349,28 @@ function Omnibox(props) {
         createRenderEffect(() => _el$3.disabled = !canGoForward());
         return _el$3;
       }
-    }), _el$4);
+    }), null);
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "Reload",
+      shortcut: isMac ? "⌘R" : "Ctrl+R",
+      get disabled() {
+        return !props.node;
+      },
+      get children() {
+        var _el$4 = _tmpl$3$D();
+        _el$4.$$click = handleReload;
+        createRenderEffect((_p$) => {
+          var _v$ = `flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0 ${isReloading() ? "animate-spin text-neutral-900" : ""}`, _v$2 = !props.node;
+          _v$ !== _p$.e && className(_el$4, _p$.e = _v$);
+          _v$2 !== _p$.t && (_el$4.disabled = _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$4;
+      }
+    }), null);
     insert(_el$, createComponent(HistoryDropdown, {
       get items() {
         return backItems();
@@ -12970,7 +14381,7 @@ function Omnibox(props) {
       onClose: closeHistory,
       onSelect: handleHistorySelect,
       position: "left"
-    }), _el$4);
+    }), null);
     insert(_el$, createComponent(HistoryDropdown, {
       get items() {
         return fwdItems();
@@ -12981,1005 +14392,254 @@ function Omnibox(props) {
       onClose: closeHistory,
       onSelect: handleHistorySelect,
       position: "right"
-    }), _el$4);
-    insert(_el$4, createComponent(ActionTooltip, {
-      label: "Edit URL",
-      shortcut: isMac ? "⌘L" : "Ctrl+L",
-      get disabled() {
-        return props.urlExpanded();
-      },
-      get children() {
-        var _el$5 = _tmpl$6$6();
-        _el$5.$$click = (e) => {
-          e.stopPropagation();
-          if (!props.urlExpanded()) props.setUrlExpanded(true);
-        };
-        insert(_el$5, createComponent(Show, {
-          get when() {
-            return inputType() === "search";
-          },
-          get children() {
-            var _el$6 = _tmpl$3$m();
-            createRenderEffect((_p$) => {
-              var _v$ = props.urlExpanded() ? "18" : "12", _v$2 = props.urlExpanded() ? "18" : "12", _v$3 = props.urlExpanded() ? "2" : "2.5";
-              _v$ !== _p$.e && setAttribute(_el$6, "width", _p$.e = _v$);
-              _v$2 !== _p$.t && setAttribute(_el$6, "height", _p$.t = _v$2);
-              _v$3 !== _p$.a && setAttribute(_el$6, "stroke-width", _p$.a = _v$3);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0,
-              a: void 0
-            });
-            return _el$6;
-          }
-        }), null);
-        insert(_el$5, createComponent(Show, {
-          get when() {
-            return inputType() === "localhost";
-          },
-          get children() {
-            var _el$7 = _tmpl$4$c();
-            createRenderEffect((_p$) => {
-              var _v$4 = props.urlExpanded() ? "18" : "12", _v$5 = props.urlExpanded() ? "18" : "12", _v$6 = props.urlExpanded() ? "2" : "2.5";
-              _v$4 !== _p$.e && setAttribute(_el$7, "width", _p$.e = _v$4);
-              _v$5 !== _p$.t && setAttribute(_el$7, "height", _p$.t = _v$5);
-              _v$6 !== _p$.a && setAttribute(_el$7, "stroke-width", _p$.a = _v$6);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0,
-              a: void 0
-            });
-            return _el$7;
-          }
-        }), null);
-        insert(_el$5, createComponent(Show, {
-          get when() {
-            return inputType() === "url";
-          },
-          get children() {
-            var _el$8 = _tmpl$5$a();
-            createRenderEffect((_p$) => {
-              var _v$7 = props.urlExpanded() ? "18" : "12", _v$8 = props.urlExpanded() ? "18" : "12", _v$9 = props.urlExpanded() ? "2" : "2.5";
-              _v$7 !== _p$.e && setAttribute(_el$8, "width", _p$.e = _v$7);
-              _v$8 !== _p$.t && setAttribute(_el$8, "height", _p$.t = _v$8);
-              _v$9 !== _p$.a && setAttribute(_el$8, "stroke-width", _p$.a = _v$9);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0,
-              a: void 0
-            });
-            return _el$8;
-          }
-        }), null);
-        createRenderEffect(() => className(_el$5, `absolute left-0 top-0 bottom-0 flex items-center justify-center text-neutral-400 z-10 transition-all duration-500 ${props.urlExpanded() ? "w-12 pointer-events-none" : "w-7 hover:text-neutral-900 cursor-pointer"}`));
-        return _el$5;
-      }
-    }), _el$9);
-    _el$9.$$keydown = (e) => {
-      if (e.key === "Enter") {
-        props.setUrlExpanded(false);
-        handleUrlSubmit(liveInput());
-        e.currentTarget.blur();
-      } else if (e.key === "Escape") {
-        setLiveInput(props.node.url || "");
-        props.setUrlExpanded(false);
-        e.currentTarget.blur();
-      }
-    };
-    _el$9.addEventListener("blur", () => {
-      props.setUrlExpanded(false);
-      handleUrlSubmit(liveInput());
-    });
-    _el$9.$$input = (e) => setLiveInput(e.currentTarget.value);
-    var _ref$ = urlInputRef;
-    typeof _ref$ === "function" ? use(_ref$, _el$9) : urlInputRef = _el$9;
-    createRenderEffect((_p$) => {
-      var _v$0 = `flex items-center gap-0.5 shrink-0 transition-all duration-500 relative ${props.urlExpanded() ? "w-full h-full" : ""}`, _v$1 = `relative flex items-center bg-black/5 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.urlExpanded() ? "flex-1 ml-1 mr-1 h-full rounded-[20px]" : "w-7 h-7 hover:bg-black/10 active:scale-95 shrink-0 ml-0.5"}`, _v$10 = `w-full bg-transparent font-medium text-neutral-700 outline-none transition-all duration-500 ${props.urlExpanded() ? "h-full pl-12 pr-4 text-xl opacity-100" : "h-7 pl-7 pr-2 text-[11px] opacity-0 pointer-events-none absolute"}`;
-      _v$0 !== _p$.e && className(_el$, _p$.e = _v$0);
-      _v$1 !== _p$.t && className(_el$4, _p$.t = _v$1);
-      _v$10 !== _p$.a && className(_el$9, _p$.a = _v$10);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0
-    });
-    createRenderEffect(() => _el$9.value = liveInput());
-    return _el$;
-  })();
-}
-delegateEvents(["click", "pointerdown", "pointerup", "contextmenu", "input", "keydown"]);
-var _tmpl$$B = /* @__PURE__ */ template(`<div class="absolute top-full -ml-[60px] mt-2 z-[100]"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$2$s = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors shrink-0"><button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"title="Split Pane"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18"></path></svg></button><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"><span class="text-[8px] opacity-70">▼`);
-const [lastSplitChoice, setLastSplitChoice] = createSignal("right");
-function SplitMenu(props) {
-  return (() => {
-    var _el$ = _tmpl$2$s(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-    _el$2.$$click = (e) => {
-      e.stopPropagation();
-      props.onSplit(props.paneId, lastSplitChoice());
-    };
-    _el$3.$$click = (e) => {
-      e.stopPropagation();
-      props.setShowSplitMenu(!props.showSplitMenu());
-      props.setShowProfileMenu(false);
-    };
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return props.showSplitMenu();
-      },
-      get children() {
-        var _el$4 = _tmpl$$B(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling;
-        _el$9.$$click = (e) => {
-          e.stopPropagation();
-          setLastSplitChoice("left");
-          props.onSplit(props.paneId, "left");
-          props.setShowSplitMenu(false);
-        };
-        _el$0.$$click = (e) => {
-          e.stopPropagation();
-          setLastSplitChoice("right");
-          props.onSplit(props.paneId, "right");
-          props.setShowSplitMenu(false);
-        };
-        _el$1.$$click = (e) => {
-          e.stopPropagation();
-          setLastSplitChoice("top");
-          props.onSplit(props.paneId, "top");
-          props.setShowSplitMenu(false);
-        };
-        _el$10.$$click = (e) => {
-          e.stopPropagation();
-          setLastSplitChoice("bottom");
-          props.onSplit(props.paneId, "bottom");
-          props.setShowSplitMenu(false);
-        };
-        return _el$4;
-      }
     }), null);
     return _el$;
   })();
 }
-delegateEvents(["click"]);
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-1"><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Profile Name</label><input type=text placeholder="e.g. Work, Personal"class="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-xs text-neutral-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"autofocus></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Theme Color</label><div class="flex flex-wrap gap-1.5"></div></div><div class="space-y-1 pt-1"><label class="flex items-center gap-2 cursor-pointer group"><div class="relative flex items-center"><input type=checkbox class="peer sr-only"><div class="w-8 h-4.5 bg-neutral-200 rounded-full peer peer-checked:bg-blue-500 transition-colors"></div><div class="absolute left-0.5 top-0.5 bg-white w-3.5 h-3.5 rounded-full transition-transform peer-checked:translate-x-3.5 shadow-sm"></div></div><span class="text-xs font-medium text-neutral-700 group-hover:text-neutral-900">Incognito Mode (RAM-only)</span></label></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Proxy Server (Optional)</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-xs text-neutral-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase tracking-wider">Custom User Agent (Optional)</label><input type=text placeholder="e.g. Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)..."class="w-full bg-white border border-neutral-200 rounded px-2.5 py-1.5 text-xs text-neutral-800 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"></div><div class="flex items-center justify-between mt-2 pt-2 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-700 px-2 py-1">Cancel</button><button class="text-[10px] font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 rounded transition-colors">Save Profile`), _tmpl$2$r = /* @__PURE__ */ template(`<button>`), _tmpl$3$l = /* @__PURE__ */ template(`<button class="text-[10px] font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded transition-colors">Delete`);
-const COLORS = [
-  "#6d7f94",
-  // Slate Grey
-  "#a1907d",
-  // Warm Sand
-  "#5e7c7a",
-  // Eucalyptus Teal
-  "#8a7685",
-  // Muted Plum
-  "#a38c8e",
-  // Muted Rose
-  "#9c8c7c",
-  // Muted Clay
-  "#4a4a49"
-  // Monochromatic Charcoal
-];
-function ProfileForm(props) {
-  const [name, setName] = createSignal(props.initialData?.name || "");
-  const [color, setColor] = createSignal(props.initialData?.color || COLORS[6]);
-  const [isEphemeral, setIsEphemeral] = createSignal(props.initialData?.is_ephemeral || false);
-  const [proxyServer, setProxyServer] = createSignal(props.initialData?.proxy_server || "");
-  const [userAgent, setUserAgent] = createSignal(props.initialData?.user_agent || "");
-  const handleSave = () => {
-    if (!name().trim()) return;
-    props.onSave({
-      id: props.initialData?.id,
-      name: name().trim(),
-      color: color(),
-      is_ephemeral: isEphemeral(),
-      proxy_server: proxyServer().trim() || "",
-      user_agent: userAgent().trim() || ""
-    });
-  };
-  return (() => {
-    var _el$ = _tmpl$$A(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$8.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$10.nextSibling, _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$13.nextSibling, _el$17 = _el$16.firstChild, _el$18 = _el$17.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
-    _el$4.$$input = (e) => setName(e.currentTarget.value);
-    insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$21 = _tmpl$2$r();
-      _el$21.$$click = () => setColor(c);
-      setStyleProperty(_el$21, "background-color", c);
-      createRenderEffect(() => className(_el$21, `w-5 h-5 rounded-full transition-transform hover:scale-110 ${color() === c ? "ring-2 ring-offset-1 ring-neutral-400 scale-110" : ""}`));
-      return _el$21;
-    })()));
-    _el$1.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
-    _el$12.$$input = (e) => setProxyServer(e.currentTarget.value);
-    _el$15.$$input = (e) => setUserAgent(e.currentTarget.value);
-    insert(_el$17, (() => {
-      var _c$ = memo(() => !!props.onDelete);
-      return () => _c$() && (() => {
-        var _el$22 = _tmpl$3$l();
-        addEventListener(_el$22, "click", props.onDelete, true);
-        return _el$22;
-      })();
-    })());
-    addEventListener(_el$19, "click", props.onCancel, true);
-    _el$20.$$click = handleSave;
-    createRenderEffect(() => _el$20.disabled = !name().trim());
-    createRenderEffect(() => _el$4.value = name());
-    createRenderEffect(() => _el$1.checked = isEphemeral());
-    createRenderEffect(() => _el$12.value = proxyServer());
-    createRenderEffect(() => _el$15.value = userAgent());
-    return _el$;
-  })();
-}
-delegateEvents(["input", "click"]);
-var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex flex-col"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/50"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-medium text-neutral-600 hover:text-neutral-900 bg-white hover:bg-neutral-50 border border-neutral-200/80 py-1.5 rounded-[8px] transition-colors shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$q = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="group/prow flex items-center justify-between"><button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate tracking-tight flex-1"></span></button><button class="p-2 ml-1 text-neutral-400 hover:text-neutral-800 transition-colors opacity-0 group-hover/prow:opacity-100 rounded-[8px] hover:bg-neutral-100 shrink-0"title="Edit Profile"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`);
-function ProfileMenuList(props) {
-  return (() => {
-    var _el$ = _tmpl$$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
-    insert(_el$3, createComponent(For, {
-      get each() {
-        return layoutStore.profiles;
-      },
-      children: (profile) => (() => {
-        var _el$6 = _tmpl$3$k(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$1 = _el$7.nextSibling;
-        _el$7.$$click = (e) => {
-          e.stopPropagation();
-          props.onSelect(profile.id);
-        };
-        insert(_el$8, () => profile.name.charAt(0).toUpperCase());
-        insert(_el$9, () => profile.name);
-        insert(_el$7, createComponent(Show, {
-          get when() {
-            return profile.is_ephemeral;
-          },
-          get children() {
-            return _tmpl$2$q();
-          }
-        }), null);
-        _el$1.$$click = (e) => {
-          e.stopPropagation();
-          props.onEdit(profile.id);
-        };
-        createRenderEffect((_p$) => {
-          var _v$ = `flex-1 flex items-center gap-2.5 px-2.5 py-2 rounded-[8px] transition-colors w-full text-left outline-none ${props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId ? "bg-neutral-100 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50 hover:text-neutral-900"}`, _v$2 = profile.color || "#3b82f6";
-          _v$ !== _p$.e && className(_el$7, _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$8, "background-color", _p$.t = _v$2);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0
-        });
-        return _el$6;
-      })()
-    }));
-    addEventListener(_el$5, "click", props.onCreateNew, true);
-    return _el$;
-  })();
-}
-delegateEvents(["click"]);
-function useProfileMenuController(nodeId, onUpdatePane) {
-  const [editingProfileId, setEditingProfileId] = createSignal(
-    null
-  );
-  const [isCreatingProfile, setIsCreatingProfile] = createSignal(false);
-  const handleSaveProfile = async (data) => {
-    if (!data.id) {
-      if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
-        setLayoutStore("paywallReason", "profile");
-        setLayoutStore("showPaywall", true);
-        return;
-      }
-      const id = `profile_${Date.now()}`;
-      await window.api?.createProfile(
-        id,
-        data.name,
-        data.color,
-        !!data.is_ephemeral,
-        data.proxy_server,
-        data.user_agent
-      );
-      onUpdatePane(nodeId, { profileId: id });
-    } else {
-      await window.api?.updateProfile(
-        data.id,
-        data.name,
-        data.color,
-        !!data.is_ephemeral,
-        data.proxy_server,
-        data.user_agent
-      );
-    }
-    const profiles = await window.api?.getProfiles();
-    if (profiles) setLayoutStore("profiles", profiles);
-    setEditingProfileId(null);
-    setIsCreatingProfile(false);
-  };
-  const handleDeleteProfile = async (id) => {
-    if (id === "main") return;
-    if (confirm(
-      "Are you sure? This will delete the profile and move all its panes to Main."
-    )) {
-      await window.api?.deleteProfile(id);
-      const profiles = await window.api?.getProfiles();
-      if (profiles) setLayoutStore("profiles", profiles);
-      setEditingProfileId(null);
-    }
-  };
-  return {
-    editingProfileId,
-    setEditingProfileId,
-    isCreatingProfile,
-    setIsCreatingProfile,
-    handleSaveProfile,
-    handleDeleteProfile
-  };
-}
-var _tmpl$$y = /* @__PURE__ */ template(`<div class="absolute top-full -ml-[90px] mt-2 z-[100]"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[240px] flex flex-col overflow-hidden">`), _tmpl$2$p = /* @__PURE__ */ template(`<div class="relative group/profilemenu flex items-center bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors shrink-0"><button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors"title="Change Profile"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4></circle></svg><span class="text-[8px] opacity-70 ml-1">▼`), _tmpl$3$j = /* @__PURE__ */ template(`<div class=p-3>`);
-function ProfileMenu$1(props) {
-  const ctrl = useProfileMenuController(props.node.id, props.onUpdatePane);
-  const handleCreateNew = (e) => {
-    e.stopPropagation();
-    if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setLayoutStore("paywallAnchor", {
-        top: rect.top,
-        left: rect.left,
-        width: rect.width,
-        height: rect.height
-      });
-      setLayoutStore("paywallReason", "profile");
-      setLayoutStore("showPaywall", true);
+delegateEvents(["click", "pointerdown", "pointerup", "contextmenu"]);
+function useSearchSuggestions(urlInput, profileApps) {
+  const [suggestions, setSuggestions] = createSignal([]);
+  const [activeSuggestionIdx, setActiveSuggestionIdx] = createSignal(-1);
+  const [showSuggestions, setShowSuggestions] = createSignal(false);
+  const [isSearching, setIsSearching] = createSignal(false);
+  let debounceTimer = null;
+  createEffect(() => {
+    const query = urlInput().trim();
+    if (!query) {
+      setSuggestions([]);
       return;
     }
-    ctrl.setEditingProfileId(null);
-    ctrl.setIsCreatingProfile(true);
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = window.setTimeout(async () => {
+      try {
+        setIsSearching(true);
+        if (window.api?.getSearchSuggestions) {
+          const res = await window.api.getSearchSuggestions(query);
+          setSuggestions(res || []);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 150);
+  });
+  const isDomainPattern = (str) => {
+    return str.includes(".") && !str.includes(" ") && !str.startsWith("http://localhost") && !str.startsWith("localhost:");
   };
-  return (() => {
-    var _el$ = _tmpl$2$p(), _el$2 = _el$.firstChild;
-    _el$2.$$click = (e) => {
-      e.stopPropagation();
-      props.setShowProfileMenu(!props.showProfileMenu());
-      props.setShowSplitMenu(false);
-    };
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return props.showProfileMenu();
-      },
-      get children() {
-        var _el$3 = _tmpl$$y(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
-        insert(_el$5, createComponent(Show, {
-          get when() {
-            return memo(() => !!!ctrl.editingProfileId())() && !ctrl.isCreatingProfile();
-          },
-          get fallback() {
-            return (() => {
-              var _el$6 = _tmpl$3$j();
-              insert(_el$6, createComponent(ProfileForm, {
-                get initialData() {
-                  const p = layoutStore.profiles.find((p2) => p2.id === ctrl.editingProfileId());
-                  if (!p) return void 0;
-                  return {
-                    ...p,
-                    is_ephemeral: !!p.is_ephemeral,
-                    proxy_server: p.proxy_server || "",
-                    user_agent: p.user_agent || ""
-                  };
-                },
-                get onSave() {
-                  return ctrl.handleSaveProfile;
-                },
-                onCancel: () => {
-                  ctrl.setEditingProfileId(null);
-                  ctrl.setIsCreatingProfile(false);
-                },
-                get onDelete() {
-                  return ctrl.editingProfileId() && ctrl.editingProfileId() !== "main" ? () => ctrl.handleDeleteProfile(ctrl.editingProfileId()) : void 0;
-                }
-              }));
-              return _el$6;
-            })();
-          },
-          get children() {
-            return createComponent(ProfileMenuList, {
-              get currentProfileId() {
-                return props.node.profileId;
-              },
-              onSelect: (profileId) => {
-                props.onUpdatePane(props.node.id, {
-                  profileId
-                });
-                props.setShowProfileMenu(false);
-              },
-              onEdit: (profileId) => {
-                ctrl.setEditingProfileId(profileId);
-                ctrl.setIsCreatingProfile(false);
-              },
-              onCreateNew: handleCreateNew
-            });
-          }
-        }));
-        return _el$3;
+  const fuzzyScore = (str, query) => {
+    str = str.toLowerCase();
+    query = query.toLowerCase();
+    if (str === query) return 100;
+    if (str.startsWith(query)) return 80;
+    const words = str.split(/[\s-.]+/);
+    const acronym = words.map((w) => w[0]).join("");
+    if (acronym.startsWith(query)) return 70;
+    if (str.includes(query)) return 50;
+    let qIdx = 0;
+    for (let i = 0; i < str.length; i++) {
+      if (str[i] === query[qIdx]) {
+        qIdx++;
+        if (qIdx === query.length) return 30 + query.length / str.length * 10;
       }
-    }), null);
-    return _el$;
-  })();
-}
-delegateEvents(["click"]);
-var _tmpl$$x = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto bg-black/10 backdrop-blur-[2px] transition-all duration-500 animate-in fade-in">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$3$i = /* @__PURE__ */ template(`<div class="w-[1px] h-4 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors px-1.5 py-1.5 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"title="Drag to move"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$9 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0"title="Close Pane"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div><div><div>`);
-function PaneIsland(props) {
-  const [showSplitMenu, setShowSplitMenu] = createSignal(false);
-  const [showProfileMenu, setShowProfileMenu] = createSignal(false);
-  const [showHistoryMenu, setShowHistoryMenu] = createSignal(false);
-  const [urlExpanded, setUrlExpanded] = createSignal(false);
-  const isAnyMenuOpen = () => showSplitMenu() || showProfileMenu() || showHistoryMenu() || urlExpanded();
-  return createComponent(Show, {
-    get when() {
-      return !props.isDraggingThis?.();
-    },
-    get children() {
-      return [createComponent(Show, {
-        get when() {
-          return urlExpanded();
-        },
-        get children() {
-          var _el$ = _tmpl$$x();
-          _el$.$$pointerdown = (e) => {
-            e.stopPropagation();
-            setUrlExpanded(false);
-          };
-          return _el$;
-        }
-      }), createComponent(Show, {
-        get when() {
-          return showSplitMenu() || showProfileMenu() || showHistoryMenu();
-        },
-        get children() {
-          var _el$2 = _tmpl$2$o();
-          _el$2.$$pointerdown = (e) => {
-            e.stopPropagation();
-            setShowSplitMenu(false);
-            setShowProfileMenu(false);
-            setShowHistoryMenu(false);
-          };
-          return _el$2;
-        }
-      }), (() => {
-        var _el$3 = _tmpl$6$5(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
-        insert(_el$5, createComponent(Omnibox, {
-          get node() {
-            return props.node;
-          },
-          urlExpanded,
-          setUrlExpanded,
-          showHistoryMenu,
-          setShowHistoryMenu,
-          setShowSplitMenu,
-          setShowProfileMenu,
-          get onUpdatePane() {
-            return props.onUpdatePane;
-          }
-        }), null);
-        insert(_el$5, createComponent(Show, {
-          get when() {
-            return !urlExpanded();
-          },
-          get children() {
-            return [_tmpl$3$i(), createComponent(SplitMenu, {
-              get paneId() {
-                return props.node.id;
-              },
-              get onSplit() {
-                return props.onSplit;
-              },
-              showSplitMenu,
-              setShowSplitMenu,
-              setShowProfileMenu
-            }), _tmpl$3$i(), (() => {
-              var _el$8 = _tmpl$4$b();
-              _el$8.$$pointerdown = (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                window.dispatchEvent(new CustomEvent("app:dragstart", {
-                  detail: {
-                    id: props.node.id,
-                    e
-                  }
-                }));
-              };
-              return _el$8;
-            })(), _tmpl$3$i(), createComponent(ProfileMenu$1, {
-              get node() {
-                return props.node;
-              },
-              get onUpdatePane() {
-                return props.onUpdatePane;
-              },
-              showProfileMenu,
-              setShowProfileMenu,
-              setShowSplitMenu
-            }), _tmpl$3$i(), (() => {
-              var _el$1 = _tmpl$5$9();
-              _el$1.$$click = (e) => {
-                e.stopPropagation();
-                props.onClose(props.node.id);
-              };
-              _el$1.$$pointerdown = (e) => e.stopPropagation();
-              return _el$1;
-            })()];
-          }
-        }), null);
-        createRenderEffect((_p$) => {
-          var _v$ = `absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region
-        ${urlExpanded() ? "top-[20vh]" : "top-0"}
-      `, _v$2 = `relative pointer-events-auto flex items-center justify-center transition-all duration-200 ease-out origin-top
-          ${isAnyMenuOpen() ? `overflow-visible ${urlExpanded() ? "w-[640px] max-w-[90vw] h-[52px] rounded-[26px] p-2 mt-4 shadow-[0_16px_40px_-12px_rgba(0,0,0,0.15)] border border-neutral-200/60" : "w-[320px] h-10 p-1 px-2.5 mt-2 rounded-xl shadow-md border border-neutral-200/60"} bg-white` : `overflow-hidden w-24 h-1.5 mt-0 bg-neutral-300/80 rounded-b-md shadow-none border border-transparent border-t-0 group-hover/island:h-10 group-hover/island:bg-white group-hover/island:border-neutral-200/60 group-hover/island:shadow-[0_4px_16px_-4px_rgba(0,0,0,0.08)] group-hover/island:rounded-b-xl group-hover/island:rounded-t-none group-hover/island:p-1 group-hover/island:px-2.5 group-hover/island:w-[320px]`}
-        `, _v$3 = `flex items-center gap-0.5 transition-all duration-200 ease-out justify-center w-full
-            ${isAnyMenuOpen() ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 group-hover/island:opacity-100 group-hover/island:translate-y-0"}`;
-          _v$ !== _p$.e && className(_el$3, _p$.e = _v$);
-          _v$2 !== _p$.t && className(_el$4, _p$.t = _v$2);
-          _v$3 !== _p$.a && className(_el$5, _p$.a = _v$3);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0,
-          a: void 0
-        });
-        return _el$3;
-      })()];
     }
-  });
-}
-delegateEvents(["pointerdown", "click"]);
-var _tmpl$$w = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`);
-function PaneNode(props) {
-  const isTarget = () => props.dragTarget?.id === props.node.id;
-  const isDraggingThis = () => props.activeDragId === props.node.id;
-  const profileColor = () => layoutStore.profiles.find((p) => p.id === (props.node.profileId || "main"))?.color || "#3b82f6";
-  onMount(() => {
-    window.dispatchEvent(new CustomEvent("pane-target-mounted", {
-      detail: props.node.id
-    }));
-  });
-  return (() => {
-    var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
-    _el$.$$click = () => props.onActivePaneChange(props.node.id);
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return memo(() => !!isTarget())() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "top");
-      },
-      get children() {
-        var _el$4 = _tmpl$$w();
-        insert(_el$4, () => props.dragTarget?.direction === "left" ? "Drop Left" : "Drop Top");
-        return _el$4;
-      }
-    }), _el$5);
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return memo(() => !!isTarget())() && props.dragTarget?.direction === "replace";
-      },
-      get children() {
-        return _tmpl$2$n();
-      }
-    }), null);
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return memo(() => !!isTarget())() && (props.dragTarget?.direction === "right" || props.dragTarget?.direction === "bottom");
-      },
-      get children() {
-        var _el$7 = _tmpl$$w();
-        insert(_el$7, () => props.dragTarget?.direction === "right" ? "Drop Right" : "Drop Bottom");
-        return _el$7;
-      }
-    }), null);
-    _el$0.$$click = (e) => {
-      e.stopPropagation();
-      props.onSplit(props.node.id, "bottom");
-    };
-    _el$10.$$click = (e) => {
-      e.stopPropagation();
-      props.onSplit(props.node.id, "left");
-    };
-    _el$12.$$click = (e) => {
-      e.stopPropagation();
-      props.onSplit(props.node.id, "right");
-    };
-    insert(_el$2, createComponent(PaneIsland, {
-      get node() {
-        return props.node;
-      },
-      get isOnlyPane() {
-        return props.isOnlyPane;
-      },
-      get onSplit() {
-        return props.onSplit;
-      },
-      get onClose() {
-        return props.onClose;
-      },
-      get onUpdatePane() {
-        return props.onUpdatePane;
-      },
-      isDraggingThis
-    }), null);
-    createRenderEffect((_p$) => {
-      var _v$ = `w-full h-full relative p-1.5 group/pane-container pointer-events-none ${props.activePaneId === props.node.id ? "z-20" : "z-10"}`, _v$2 = props.node.id, _v$3 = `w-full h-full relative overflow-visible flex flex-col pointer-events-none transition-all duration-300 ${!layoutStore.maximizedPaneId && props.activePaneId === props.node.id && !props.isOnlyPane && !window.IS_WEB_DEMO ? "ring-2 rounded-[12px]" : "ring-1 ring-transparent"} ${isDraggingThis() || layoutStore.maximizedPaneId ? "opacity-0" : ""}`, _v$4 = !layoutStore.maximizedPaneId && props.activePaneId === props.node.id && !props.isOnlyPane && !window.IS_WEB_DEMO ? {
-        "--tw-ring-color": `${profileColor()}66`
-      } : {}, _v$5 = `flex-1 w-full h-full flex transition-all duration-200 gap-1.5 relative ${isTarget() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "right") ? "flex-row" : "flex-col"}`, _v$6 = `pane-container-${props.node.id}`;
-      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _v$2 !== _p$.t && setAttribute(_el$, "data-pane-id", _p$.t = _v$2);
-      _v$3 !== _p$.a && className(_el$2, _p$.a = _v$3);
-      _p$.o = style(_el$2, _v$4, _p$.o);
-      _v$5 !== _p$.i && className(_el$3, _p$.i = _v$5);
-      _v$6 !== _p$.n && setAttribute(_el$5, "id", _p$.n = _v$6);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0,
-      o: void 0,
-      i: void 0,
-      n: void 0
-    });
-    return _el$;
-  })();
-}
-delegateEvents(["click"]);
-var _tmpl$$v = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-300">`), _tmpl$2$m = /* @__PURE__ */ template(`<div>`);
-function LayoutNode(props) {
-  const node = () => layoutStore.nodes[props.nodeId];
-  return createComponent(Show, {
-    get when() {
-      return node()?.type === "split";
-    },
-    get fallback() {
-      return createComponent(Show, {
-        get when() {
-          return node()?.type === "pane";
-        },
-        get children() {
-          return createComponent(PaneNode, {
-            get activePaneId() {
-              return props.activePaneId;
-            },
-            get onActivePaneChange() {
-              return props.onActivePaneChange;
-            },
-            get onSplit() {
-              return props.onSplit;
-            },
-            get onClose() {
-              return props.onClose;
-            },
-            get isOnlyPane() {
-              return props.isOnlyPane;
-            },
-            get dragTarget() {
-              return props.dragTarget;
-            },
-            get activeDragId() {
-              return props.activeDragId;
-            },
-            get onUpdatePane() {
-              return props.onUpdatePane;
-            },
-            get node() {
-              return node();
-            }
-          });
+    return 0;
+  };
+  const allSuggestions = () => {
+    const query = urlInput().trim();
+    if (!query) return [];
+    const list = [];
+    if (isDomainPattern(query)) {
+      list.push({
+        type: "app",
+        label: `Navigate directly to ${query}`,
+        value: query,
+        subtitle: "Open website",
+        appItem: {
+          id: "temp_nav",
+          name: query.split(".")[0],
+          domain: query,
+          url: query,
+          category: "Tools"
         }
       });
-    },
-    get children() {
-      var _el$ = _tmpl$2$m();
-      insert(_el$, createComponent(Show, {
-        get when() {
-          return props.activeDragId !== node().a;
-        },
-        get children() {
-          var _el$2 = _tmpl$$v();
-          insert(_el$2, createComponent(LayoutNode, {
-            get nodeId() {
-              return node().a;
-            },
-            get activePaneId() {
-              return props.activePaneId;
-            },
-            get onActivePaneChange() {
-              return props.onActivePaneChange;
-            },
-            get onSplit() {
-              return props.onSplit;
-            },
-            get onClose() {
-              return props.onClose;
-            },
-            get onRatioChange() {
-              return props.onRatioChange;
-            },
-            get isOnlyPane() {
-              return props.isOnlyPane;
-            },
-            get dragTarget() {
-              return props.dragTarget;
-            },
-            get activeDragId() {
-              return props.activeDragId;
-            },
-            get onUpdatePane() {
-              return props.onUpdatePane;
-            }
-          }));
-          createRenderEffect((_$p) => setStyleProperty(_el$2, "flex", props.activeDragId === node().b ? 1 : node().ratio));
-          return _el$2;
+      list.push({
+        type: "add_app",
+        label: `Add ${query} as custom workspace app`,
+        value: query,
+        appItem: {
+          id: "temp_add",
+          name: query.split(".")[0],
+          domain: query,
+          url: query,
+          category: "Tools"
         }
-      }), null);
-      insert(_el$, createComponent(Show, {
-        get when() {
-          return memo(() => props.activeDragId !== node().a)() && props.activeDragId !== node().b;
-        },
-        get children() {
-          return createComponent(Resizer, {
-            get isHorizontal() {
-              return node().direction === "horizontal";
-            },
-            onRatioChange: (newRatio) => props.onRatioChange(node().id, newRatio),
-            get initialRatio() {
-              return node().ratio;
-            }
-          });
-        }
-      }), null);
-      insert(_el$, createComponent(Show, {
-        get when() {
-          return props.activeDragId !== node().b;
-        },
-        get children() {
-          var _el$3 = _tmpl$$v();
-          insert(_el$3, createComponent(LayoutNode, {
-            get nodeId() {
-              return node().b;
-            },
-            get activePaneId() {
-              return props.activePaneId;
-            },
-            get onActivePaneChange() {
-              return props.onActivePaneChange;
-            },
-            get onSplit() {
-              return props.onSplit;
-            },
-            get onClose() {
-              return props.onClose;
-            },
-            get onRatioChange() {
-              return props.onRatioChange;
-            },
-            get isOnlyPane() {
-              return props.isOnlyPane;
-            },
-            get dragTarget() {
-              return props.dragTarget;
-            },
-            get activeDragId() {
-              return props.activeDragId;
-            },
-            get onUpdatePane() {
-              return props.onUpdatePane;
-            }
-          }));
-          createRenderEffect((_$p) => setStyleProperty(_el$3, "flex", props.activeDragId === node().a ? 1 : 1 - node().ratio));
-          return _el$3;
-        }
-      }), null);
-      createRenderEffect(() => className(_el$, `w-full h-full flex ${node()?.type === "split" && node().direction === "horizontal" ? "flex-row" : "flex-col"} overflow-visible pointer-events-none`));
-      return _el$;
-    }
-  });
-}
-var _tmpl$$u = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
-function AbsolutePane(props) {
-  let paneRef;
-  const [style$1, setStyle] = createSignal({
-    top: "0px",
-    left: "0px",
-    width: "0px",
-    height: "0px",
-    opacity: "0"
-  });
-  const [hasPosition, setHasPosition] = createSignal(false);
-  const [isFlashing, setIsFlashing] = createSignal(false);
-  onMount(() => {
-    let ro = null;
-    const updatePosition = () => {
-      if (props.isDragging) return;
-      const target2 = document.getElementById(props.targetId);
-      const container2 = document.getElementById("main-canvas");
-      if (!target2 || !container2) {
-        if (!hasPosition()) {
-          setStyle((s) => ({
-            ...s,
-            opacity: "0"
-          }));
-          if (props.paneId) {
-            window.api?.viewSetBounds?.(props.paneId, {
-              x: -1e4,
-              y: -1e4,
-              width: 0,
-              height: 0
-            });
-          }
-        }
-        return;
-      }
-      const rect = target2.getBoundingClientRect();
-      const containerRect = container2.getBoundingClientRect();
-      const isMaximized = layoutStore.maximizedPaneId === props.paneId;
-      if (layoutStore.maximizedPaneId && !isMaximized) {
-        setStyle((s) => ({
-          ...s,
-          opacity: "0"
-        }));
-        if (props.paneId) {
-          window.api?.viewSetBounds?.(props.paneId, {
-            x: -1e4,
-            y: -1e4,
-            width: 0,
-            height: 0
-          });
-        }
-        return;
-      }
-      if (rect.width === 0 && rect.height === 0) {
-        return;
-      }
-      const scaleX = container2.offsetWidth > 0 ? containerRect.width / container2.offsetWidth : 1;
-      const scaleY = container2.offsetHeight > 0 ? containerRect.height / container2.offsetHeight : 1;
-      const relX = isMaximized ? 12 : Math.round((rect.left - containerRect.left) / scaleX);
-      const relY = isMaximized ? 12 : Math.round((rect.top - containerRect.top) / scaleY);
-      const finalWidth = isMaximized ? Math.round(container2.offsetWidth - 24) : Math.round(rect.width / scaleX);
-      const finalHeight = isMaximized ? Math.round(container2.offsetHeight - 24) : Math.round(rect.height / scaleY);
-      setStyle({
-        top: `${relY}px`,
-        left: `${relX}px`,
-        width: `${finalWidth}px`,
-        height: `${finalHeight}px`,
-        opacity: "1"
       });
-      setHasPosition(true);
-    };
-    let rafId = null;
-    const scheduleUpdate = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        updatePosition();
+    }
+    const scoredApps = profileApps().map((app) => {
+      const nameScore = fuzzyScore(app.name, query);
+      const domainScore = fuzzyScore(app.domain, query);
+      return { app, score: Math.max(nameScore, domainScore) };
+    }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
+    for (const item of scoredApps.slice(0, 3)) {
+      list.push({
+        type: "app",
+        label: `Launch ${item.app.name}`,
+        value: item.app.url,
+        subtitle: `App Directory • ${item.app.domain}`,
+        appItem: item.app
       });
-    };
-    ro = new ResizeObserver(scheduleUpdate);
-    const target = document.getElementById(props.targetId);
-    if (target) {
-      ro.observe(target);
     }
-    const container = document.getElementById("main-canvas");
-    if (container) {
-      ro.observe(container);
+    const lowercaseQuery = query.toLowerCase();
+    if (lowercaseQuery.startsWith("drive ")) {
+      const dQuery = query.substring(6).trim();
+      list.push({
+        type: "shortcut",
+        label: `Search Google Drive for "${dQuery}"`,
+        value: `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(dQuery)}`,
+        subtitle: "Google Workspace • Drive"
+      });
     }
-    updatePosition();
-    window.addEventListener("resize", scheduleUpdate);
-    const onTargetMounted = (e) => {
-      if (`pane-container-${e.detail}` === props.targetId) {
-        const t = document.getElementById(props.targetId);
-        if (t && ro) {
-          ro.observe(t);
-        }
-        updatePosition();
-      }
-    };
-    const onLayoutSync = () => {
-      updatePosition();
-      if (props.isActive) {
-        setIsFlashing(true);
-        setTimeout(() => setIsFlashing(false), 400);
-      }
-    };
-    window.addEventListener("pane-target-mounted", onTargetMounted);
-    window.addEventListener("app:dragend", updatePosition);
-    window.addEventListener("app:layout-sync", onLayoutSync);
-    createEffect(() => {
-      layoutStore.maximizedPaneId;
-      requestAnimationFrame(updatePosition);
+    if (lowercaseQuery.startsWith("sheet ")) {
+      const sQuery = query.substring(6).trim();
+      list.push({
+        type: "shortcut",
+        label: `Search Google Sheets for "${sQuery}"`,
+        value: `https://docs.google.com/spreadsheets/u/0/?q=${encodeURIComponent(sQuery)}`,
+        subtitle: "Google Workspace • Sheets"
+      });
+    }
+    if (lowercaseQuery.startsWith("doc ")) {
+      const docQuery = query.substring(4).trim();
+      list.push({
+        type: "shortcut",
+        label: `Search Google Docs for "${docQuery}"`,
+        value: `https://docs.google.com/document/u/0/?q=${encodeURIComponent(docQuery)}`,
+        subtitle: "Google Workspace • Docs"
+      });
+    }
+    if (lowercaseQuery.startsWith("canva ")) {
+      const canvaQuery = query.substring(6).trim();
+      list.push({
+        type: "shortcut",
+        label: `Search Canva Templates for "${canvaQuery}"`,
+        value: `https://www.canva.com/templates/?query=${encodeURIComponent(canvaQuery)}`,
+        subtitle: "Creative Marketing Templates"
+      });
+    }
+    if ("drive".startsWith(lowercaseQuery)) {
+      list.push({
+        type: "shortcut",
+        label: "drive [search_term]",
+        value: "drive ",
+        subtitle: "Search Google Drive Files",
+        shortcutPrefix: "drive "
+      });
+    }
+    if ("sheet".startsWith(lowercaseQuery)) {
+      list.push({
+        type: "shortcut",
+        label: "sheet [search_term]",
+        value: "sheet ",
+        subtitle: "Search Google Sheets Spreadsheets",
+        shortcutPrefix: "sheet "
+      });
+    }
+    if ("doc".startsWith(lowercaseQuery)) {
+      list.push({
+        type: "shortcut",
+        label: "doc [search_term]",
+        value: "doc ",
+        subtitle: "Search Google Docs Documents",
+        shortcutPrefix: "doc "
+      });
+    }
+    if ("canva".startsWith(lowercaseQuery)) {
+      list.push({
+        type: "shortcut",
+        label: "canva [template_name]",
+        value: "canva ",
+        subtitle: "Search Canva Creative Templates",
+        shortcutPrefix: "canva "
+      });
+    }
+    for (const sug of suggestions().slice(0, 4)) {
+      list.push({
+        type: "google",
+        label: sug,
+        value: `https://www.google.com/search?q=${encodeURIComponent(sug)}`
+      });
+    }
+    list.push({
+      type: "google",
+      label: `Search Google for "${query}"`,
+      value: `https://www.google.com/search?q=${encodeURIComponent(query)}`
     });
-    onCleanup(() => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
-      window.removeEventListener("pane-target-mounted", onTargetMounted);
-      window.removeEventListener("app:dragend", updatePosition);
-      window.removeEventListener("app:layout-sync", onLayoutSync);
-      window.removeEventListener("resize", scheduleUpdate);
-      if (ro) ro.disconnect();
-    });
-  });
-  return (() => {
-    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
-    var _ref$ = paneRef;
-    typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
-    insert(_el$2, () => props.children);
-    createRenderEffect((_p$) => {
-      var _v$ = `absolute z-0 absolute-pane-container overflow-hidden p-0 bg-transparent rounded-[12px] ${props.isGlobalDragging ? "pointer-events-none" : "pointer-events-auto"} ${props.isDragging ? "transition-transform duration-75" : hasPosition() ? "transition-[top,left,width,height] duration-200 ease-[cubic-bezier(0.16,1,0.3,1)]" : "transition-none"}`, _v$2 = layoutStore.maximizedPaneId === props.paneId ? {
-        ...style$1(),
-        "z-index": 9990,
-        opacity: props.isReplaceTarget ? "0" : "1"
-      } : {
-        ...style$1(),
-        "transform-origin": "center",
-        "z-index": props.isDragging ? 9999 : 0,
-        "box-shadow": props.isDragging ? "0 25px 50px -12px rgba(0, 0, 0, 0.45)" : "",
-        opacity: props.isReplaceTarget ? "0.4" : props.isDragging ? "0.92" : "1",
-        filter: props.isDragging ? "blur(0.2px)" : "none"
-      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border ${props.isActive ? "border-neutral-300 dark:border-neutral-700 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_2px_12px_rgba(0,0,0,0.06)]" : "border-neutral-200/50 dark:border-neutral-800 shadow-[0_2px_8px_rgba(0,0,0,0.04)]"} overflow-hidden relative z-50 transition-all ${isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
-      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _p$.t = style(_el$, _v$2, _p$.t);
-      _v$3 !== _p$.a && setAttribute(_el$, "data-target-id", _p$.a = _v$3);
-      _v$4 !== _p$.o && className(_el$2, _p$.o = _v$4);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0,
-      o: void 0
-    });
-    return _el$;
-  })();
+    return list;
+  };
+  return {
+    allSuggestions,
+    activeSuggestionIdx,
+    setActiveSuggestionIdx,
+    showSuggestions,
+    setShowSuggestions,
+    isSearching,
+    isDomainPattern
+  };
 }
-var _tmpl$$t = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$l = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$g = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$a = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$4 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$3 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$3 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$2 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
+var _tmpl$$_ = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$J = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$C = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$t = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$5 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
 const SlackIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$ = _tmpl$$t();
+  var _el$ = _tmpl$$_();
   setAttribute(_el$, "class", className2);
   return _el$;
 })();
 const GmailIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$2 = _tmpl$2$l();
+  var _el$2 = _tmpl$2$J();
   setAttribute(_el$2, "class", className2);
   return _el$2;
 })();
 const NotionIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$3 = _tmpl$3$g();
+  var _el$3 = _tmpl$3$C();
   setAttribute(_el$3, "class", className2);
   return _el$3;
 })();
 const FigmaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$4 = _tmpl$4$a();
+  var _el$4 = _tmpl$4$t();
   setAttribute(_el$4, "class", className2);
   return _el$4;
 })();
 const CanvaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$5 = _tmpl$5$8();
+  var _el$5 = _tmpl$5$k();
   setAttribute(_el$5, "class", className2);
   return _el$5;
 })();
 const GitHubIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$6 = _tmpl$6$4();
+  var _el$6 = _tmpl$6$c();
   setAttribute(_el$6, "class", className2);
   return _el$6;
 })();
 const ChatGPTIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$7 = _tmpl$7$3();
+  var _el$7 = _tmpl$7$8();
   setAttribute(_el$7, "class", className2);
   return _el$7;
 })();
 const HubSpotIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$8 = _tmpl$8$3();
+  var _el$8 = _tmpl$8$5();
   setAttribute(_el$8, "class", className2);
   return _el$8;
 })();
 const StripeIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$9 = _tmpl$9$2();
+  var _el$9 = _tmpl$9$1();
   setAttribute(_el$9, "class", className2);
   return _el$9;
 })();
 const ShopifyIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$0 = _tmpl$0$1();
+  var _el$0 = _tmpl$0();
   setAttribute(_el$0, "class", className2);
   return _el$0;
 })();
 const GoogleAnalyticsIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$1 = _tmpl$1$1();
+  var _el$1 = _tmpl$1();
   setAttribute(_el$1, "class", className2);
   return _el$1;
 })();
@@ -14294,195 +14954,3885 @@ function useProfileApps(profileId) {
     handleDrop
   };
 }
-function useSearchSuggestions(urlInput, profileApps) {
-  const [suggestions, setSuggestions] = createSignal([]);
-  const [activeSuggestionIdx, setActiveSuggestionIdx] = createSignal(-1);
-  const [showSuggestions, setShowSuggestions] = createSignal(false);
-  const [isSearching, setIsSearching] = createSignal(false);
-  let debounceTimer = null;
-  createEffect(() => {
-    const query = urlInput().trim();
-    if (!query) {
-      setSuggestions([]);
-      return;
+var _tmpl$$Z = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/60 p-1.5 max-h-[220px] overflow-y-auto z-50">`), _tmpl$2$I = /* @__PURE__ */ template(`<span class="text-[8px] text-neutral-400 font-medium truncate">`), _tmpl$3$B = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-400 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0">Launch`), _tmpl$4$s = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$j = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded bg-neutral-100 shrink-0">`);
+function CommandBarDropdown(props) {
+  return createComponent(Show, {
+    get when() {
+      return memo(() => !!props.show)() && props.suggestions.length > 0;
+    },
+    get children() {
+      var _el$ = _tmpl$$Z();
+      var _ref$ = props.containerRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$) : props.containerRef = _el$;
+      insert(_el$, createComponent(For, {
+        get each() {
+          return props.suggestions;
+        },
+        children: (item, idx) => (() => {
+          var _el$2 = _tmpl$4$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
+          _el$2.$$click = () => props.onExecute(item);
+          insert(_el$3, createComponent(Show, {
+            get when() {
+              return item.appItem;
+            },
+            get fallback() {
+              return (() => {
+                var _el$8 = _tmpl$5$j();
+                insert(_el$8, createComponent(Switch, {
+                  get children() {
+                    return [createComponent(Match, {
+                      get when() {
+                        return item.type === "google";
+                      },
+                      get children() {
+                        return createComponent(search_default, {
+                          "class": "w-3 h-3 text-neutral-500"
+                        });
+                      }
+                    }), createComponent(Match, {
+                      get when() {
+                        return item.type === "add_app";
+                      },
+                      get children() {
+                        return createComponent(plus_default, {
+                          "class": "w-3 h-3 text-neutral-500"
+                        });
+                      }
+                    }), createComponent(Match, {
+                      when: true,
+                      get children() {
+                        return createComponent(globe_default, {
+                          "class": "w-3 h-3 text-neutral-500"
+                        });
+                      }
+                    })];
+                  }
+                }));
+                return _el$8;
+              })();
+            },
+            get children() {
+              return createComponent(AppIcon, {
+                get app() {
+                  return item.appItem;
+                },
+                "class": "w-5 h-5"
+              });
+            }
+          }), _el$4);
+          insert(_el$5, () => item.label);
+          insert(_el$4, createComponent(Show, {
+            get when() {
+              return item.subtitle;
+            },
+            get children() {
+              var _el$6 = _tmpl$2$I();
+              insert(_el$6, () => item.subtitle);
+              return _el$6;
+            }
+          }), null);
+          insert(_el$2, createComponent(Show, {
+            get when() {
+              return item.type === "app" || item.type === "shortcut";
+            },
+            get children() {
+              return _tmpl$3$B();
+            }
+          }), null);
+          createRenderEffect((_$p) => classList(_el$2, {
+            "bg-neutral-50 text-neutral-900 font-semibold": props.activeIdx === idx(),
+            "hover:bg-neutral-50/50 text-neutral-600": props.activeIdx !== idx()
+          }, _$p));
+          return _el$2;
+        })()
+      }));
+      return _el$;
     }
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = window.setTimeout(async () => {
-      try {
-        setIsSearching(true);
-        if (window.api?.getSearchSuggestions) {
-          const res = await window.api.getSearchSuggestions(query);
-          setSuggestions(res || []);
-        }
-      } catch (e) {
-        console.error(e);
-      } finally {
-        setIsSearching(false);
-      }
-    }, 150);
   });
-  const isDomainPattern = (str) => {
-    return str.includes(".") && !str.includes(" ") && !str.startsWith("http://localhost") && !str.startsWith("localhost:");
-  };
-  const fuzzyScore = (str, query) => {
-    str = str.toLowerCase();
-    query = query.toLowerCase();
-    if (str === query) return 100;
-    if (str.startsWith(query)) return 80;
-    const words = str.split(/[\s-.]+/);
-    const acronym = words.map((w) => w[0]).join("");
-    if (acronym.startsWith(query)) return 70;
-    if (str.includes(query)) return 50;
-    let qIdx = 0;
-    for (let i = 0; i < str.length; i++) {
-      if (str[i] === query[qIdx]) {
-        qIdx++;
-        if (qIdx === query.length) return 30 + query.length / str.length * 10;
+}
+delegateEvents(["click"]);
+const TRACKING_PARAMS = /* @__PURE__ */ new Set([
+  "utm_source",
+  "utm_medium",
+  "utm_campaign",
+  "utm_term",
+  "utm_content",
+  "utm_id",
+  "fbclid",
+  "gclid",
+  "gclsrc",
+  "dclid",
+  "msclkid",
+  "zanpid",
+  "ref",
+  "source",
+  "si",
+  "igshid",
+  "mc_cid",
+  "mc_eid",
+  "_hsenc",
+  "_hsmi",
+  "vero_id",
+  "wickedid",
+  "yclid",
+  "_openstat"
+]);
+function cleanUrlString(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const url = new URL(rawUrl.startsWith("http") ? rawUrl : `https://${rawUrl}`);
+    const searchParams = new URLSearchParams(url.search);
+    let modified = false;
+    for (const key of Array.from(searchParams.keys())) {
+      if (TRACKING_PARAMS.has(key.toLowerCase()) || key.toLowerCase().startsWith("utm_")) {
+        searchParams.delete(key);
+        modified = true;
       }
     }
-    return 0;
+    if (modified) {
+      url.search = searchParams.toString();
+    }
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+var _tmpl$$Y = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
+function ActivePaneProgress(props) {
+  const [loading, setLoading] = createSignal(false);
+  const [progress, setProgress] = createSignal(0);
+  let trickleTimer;
+  let watchdogTimer;
+  let fadeTimer;
+  const startProgress = () => {
+    if (fadeTimer) clearTimeout(fadeTimer);
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    if (trickleTimer) clearInterval(trickleTimer);
+    setLoading(true);
+    setProgress(25);
+    trickleTimer = setInterval(() => {
+      setProgress((p) => {
+        if (p < 65) return p + 14;
+        if (p < 82) return p + 6;
+        if (p < 92) return p + 2;
+        return p;
+      });
+    }, 120);
+    watchdogTimer = setTimeout(() => {
+      finishProgress();
+    }, 2500);
   };
-  const allSuggestions = () => {
-    const query = urlInput().trim();
-    if (!query) return [];
-    const list = [];
-    if (isDomainPattern(query)) {
-      list.push({
-        type: "app",
-        label: `Navigate directly to ${query}`,
-        value: query,
-        subtitle: "Open website",
-        appItem: {
-          id: "temp_nav",
-          name: query.split(".")[0],
-          domain: query,
-          url: query,
-          category: "Tools"
-        }
-      });
-      list.push({
-        type: "add_app",
-        label: `Add ${query} as custom workspace app`,
-        value: query,
-        appItem: {
-          id: "temp_add",
-          name: query.split(".")[0],
-          domain: query,
-          url: query,
-          category: "Tools"
-        }
-      });
-    }
-    const scoredApps = profileApps().map((app) => {
-      const nameScore = fuzzyScore(app.name, query);
-      const domainScore = fuzzyScore(app.domain, query);
-      return { app, score: Math.max(nameScore, domainScore) };
-    }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
-    for (const item of scoredApps.slice(0, 3)) {
-      list.push({
-        type: "app",
-        label: `Launch ${item.app.name}`,
-        value: item.app.url,
-        subtitle: `App Directory • ${item.app.domain}`,
-        appItem: item.app
-      });
-    }
-    const lowercaseQuery = query.toLowerCase();
-    if (lowercaseQuery.startsWith("drive ")) {
-      const dQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Drive for "${dQuery}"`,
-        value: `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(dQuery)}`,
-        subtitle: "Google Workspace • Drive"
-      });
-    }
-    if (lowercaseQuery.startsWith("sheet ")) {
-      const sQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Sheets for "${sQuery}"`,
-        value: `https://docs.google.com/spreadsheets/u/0/?q=${encodeURIComponent(sQuery)}`,
-        subtitle: "Google Workspace • Sheets"
-      });
-    }
-    if (lowercaseQuery.startsWith("doc ")) {
-      const docQuery = query.substring(4).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Docs for "${docQuery}"`,
-        value: `https://docs.google.com/document/u/0/?q=${encodeURIComponent(docQuery)}`,
-        subtitle: "Google Workspace • Docs"
-      });
-    }
-    if (lowercaseQuery.startsWith("canva ")) {
-      const canvaQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Canva Templates for "${canvaQuery}"`,
-        value: `https://www.canva.com/templates/?query=${encodeURIComponent(canvaQuery)}`,
-        subtitle: "Creative Marketing Templates"
-      });
-    }
-    if ("drive".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "drive [search_term]",
-        value: "drive ",
-        subtitle: "Search Google Drive Files",
-        shortcutPrefix: "drive "
-      });
-    }
-    if ("sheet".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "sheet [search_term]",
-        value: "sheet ",
-        subtitle: "Search Google Sheets Spreadsheets",
-        shortcutPrefix: "sheet "
-      });
-    }
-    if ("doc".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "doc [search_term]",
-        value: "doc ",
-        subtitle: "Search Google Docs Documents",
-        shortcutPrefix: "doc "
-      });
-    }
-    if ("canva".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "canva [template_name]",
-        value: "canva ",
-        subtitle: "Search Canva Creative Templates",
-        shortcutPrefix: "canva "
-      });
-    }
-    for (const sug of suggestions().slice(0, 4)) {
-      list.push({
-        type: "google",
-        label: sug,
-        value: `https://www.google.com/search?q=${encodeURIComponent(sug)}`
-      });
-    }
-    list.push({
-      type: "google",
-      label: `Search Google for "${query}"`,
-      value: `https://www.google.com/search?q=${encodeURIComponent(query)}`
+  const finishProgress = () => {
+    if (trickleTimer) clearInterval(trickleTimer);
+    if (watchdogTimer) clearTimeout(watchdogTimer);
+    setProgress(100);
+    fadeTimer = setTimeout(() => {
+      setLoading(false);
+      setProgress(0);
+    }, 220);
+  };
+  onMount(() => {
+    const handleStart = (e) => {
+      const targetId = typeof e.detail === "string" ? e.detail : e.detail?.id || e.detail?.paneId;
+      if (!props.paneId || !targetId || targetId === props.paneId) {
+        startProgress();
+      }
+    };
+    const handleStop = (e) => {
+      const targetId = typeof e.detail === "string" ? e.detail : e.detail?.id || e.detail?.paneId;
+      if (!props.paneId || !targetId || targetId === props.paneId) {
+        finishProgress();
+      }
+    };
+    window.addEventListener("pane.force-gate", handleStart);
+    window.addEventListener("pane.load-start", handleStart);
+    window.addEventListener("pane.reloaded", handleStart);
+    window.addEventListener("pane.loaded", handleStop);
+    window.addEventListener("pane.navigated", handleStop);
+    const unsubNav = window.api?.onNavigated?.((_e, data) => {
+      if (props.paneId && data.paneId === props.paneId) {
+        finishProgress();
+      }
     });
-    return list;
+    const unsubLoaded = window.api?.onViewLoaded?.((data) => {
+      const id = typeof data === "string" ? data : data?.paneId;
+      if (props.paneId && id === props.paneId) {
+        finishProgress();
+      }
+    });
+    onCleanup(() => {
+      if (trickleTimer) clearInterval(trickleTimer);
+      if (watchdogTimer) clearTimeout(watchdogTimer);
+      if (fadeTimer) clearTimeout(fadeTimer);
+      window.removeEventListener("pane.force-gate", handleStart);
+      window.removeEventListener("pane.load-start", handleStart);
+      window.removeEventListener("pane.reloaded", handleStart);
+      window.removeEventListener("pane.loaded", handleStop);
+      window.removeEventListener("pane.navigated", handleStop);
+      unsubNav?.();
+      unsubLoaded?.();
+    });
+  });
+  return createComponent(Show, {
+    get when() {
+      return loading();
+    },
+    get children() {
+      var _el$ = _tmpl$$Y(), _el$2 = _el$.firstChild;
+      createRenderEffect((_$p) => setStyleProperty(_el$2, "width", `${progress()}%`));
+      return _el$;
+    }
+  });
+}
+var _tmpl$$X = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$H = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$A = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+function ActivePaneAudio(props) {
+  const [isPlaying, setIsPlaying] = createSignal(false);
+  const [isMuted, setIsMuted] = createSignal(false);
+  onMount(() => {
+    const unsub = window.api?.onMediaStatus?.((_e, data) => {
+      if (props.paneId && data.paneId === props.paneId) {
+        setIsPlaying(data.isPlaying);
+      }
+    });
+    onCleanup(() => unsub?.());
+  });
+  const toggleMute = (e) => {
+    e.stopPropagation();
+    if (!props.paneId) return;
+    window.api?.viewToggleMute?.(props.paneId);
+    setIsMuted(!isMuted());
   };
-  return {
+  return createComponent(Show, {
+    get when() {
+      return isPlaying();
+    },
+    get children() {
+      var _el$ = _tmpl$2$H();
+      _el$.$$click = toggleMute;
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return !isMuted();
+        },
+        get fallback() {
+          return _tmpl$3$A();
+        },
+        get children() {
+          return _tmpl$$X();
+        }
+      }));
+      createRenderEffect((_p$) => {
+        var _v$ = isMuted() ? "Unmute Tab" : "Mute Tab (Playing Audio)", _v$2 = isMuted() ? "Unmute Tab" : "Mute Tab";
+        _v$ !== _p$.e && setAttribute(_el$, "title", _p$.e = _v$);
+        _v$2 !== _p$.t && setAttribute(_el$, "aria-label", _p$.t = _v$2);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0
+      });
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$W = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$G = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$5$i = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-green-600><polyline points="20 6 9 17 4 12">`), _tmpl$6$b = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none"></div><input type=text placeholder="Search or enter address (Alt+D)...">`), _tmpl$8$4 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+function ActivePaneOmnibox(props) {
+  let inputRef;
+  let suggestionsContainerRef;
+  const [isFocused, setIsFocused] = createSignal(false);
+  const [liveInput, setLiveInput] = createSignal("");
+  const [copied, setCopied] = createSignal(false);
+  const activeProfileId = () => props.node?.profileId || "main";
+  const {
+    profileApps
+  } = useProfileApps(activeProfileId);
+  const {
     allSuggestions,
     activeSuggestionIdx,
     setActiveSuggestionIdx,
     showSuggestions,
-    setShowSuggestions,
-    isSearching,
-    isDomainPattern
+    setShowSuggestions
+  } = useSearchSuggestions(liveInput, profileApps);
+  createEffect(() => {
+    const url = props.node?.url || "";
+    if (!isFocused()) setLiveInput(url);
+  });
+  onMount(() => {
+    const handleGlobalFocus = (e) => {
+      if (!e.detail?.activePaneId || e.detail.activePaneId === props.node?.id) {
+        setIsFocused(true);
+        props.onFocusChange?.(true);
+        setTimeout(() => {
+          inputRef?.focus();
+          inputRef?.select();
+        }, 30);
+      }
+    };
+    const handleOutsideClick = (e) => {
+      const target = e.target;
+      if (suggestionsContainerRef && !suggestionsContainerRef.contains(target) && inputRef && !inputRef.contains(target)) {
+        setShowSuggestions(false);
+      }
+    };
+    window.addEventListener("focus-address-bar", handleGlobalFocus);
+    window.addEventListener("mousedown", handleOutsideClick);
+    onCleanup(() => {
+      window.removeEventListener("focus-address-bar", handleGlobalFocus);
+      window.removeEventListener("mousedown", handleOutsideClick);
+    });
+  });
+  const inputType = () => detectInputType(liveInput());
+  const handleLaunchUrl = (url) => {
+    const resolved = resolveInputUrl(url);
+    if (!resolved) return;
+    const activeId = props.node?.id;
+    if (activeId) {
+      window.dispatchEvent(new CustomEvent("pane.force-gate", {
+        detail: {
+          id: activeId,
+          url: resolved
+        }
+      }));
+      props.onUpdatePane?.(activeId, {
+        url: resolved,
+        paneType: "web"
+      });
+      window.api?.viewLoadURL(activeId, resolved);
+    }
+    setIsFocused(false);
+    setShowSuggestions(false);
+    props.onFocusChange?.(false);
   };
+  const handleCopyCleanUrl = (e) => {
+    e.stopPropagation();
+    const url = props.node?.url;
+    if (!url) return;
+    const clean = cleanUrlString(url);
+    navigator.clipboard.writeText(clean);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === "ArrowDown") {
+      if (allSuggestions().length > 0) {
+        e.preventDefault();
+        setShowSuggestions(true);
+        setActiveSuggestionIdx((prev) => Math.min(prev + 1, allSuggestions().length - 1));
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveSuggestionIdx((prev) => Math.max(prev - 1, -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const idx = activeSuggestionIdx();
+      const list = allSuggestions();
+      if (idx >= 0 && idx < list.length) {
+        if (list[idx].shortcutPrefix) {
+          setLiveInput(list[idx].shortcutPrefix);
+          setActiveSuggestionIdx(-1);
+          inputRef?.focus();
+          return;
+        }
+        handleLaunchUrl(list[idx].value);
+      } else if (liveInput().trim()) {
+        handleLaunchUrl(liveInput().trim());
+      }
+      inputRef?.blur();
+    } else if (e.key === "Escape") {
+      setLiveInput(props.node?.url || "");
+      setShowSuggestions(false);
+      setIsFocused(false);
+      props.onFocusChange?.(false);
+      inputRef?.blur();
+    }
+  };
+  const displayLabel = () => {
+    const url = props.node?.url;
+    if (!url) return "Search Google or enter address...";
+    return formatUrlForDisplay(url);
+  };
+  return (() => {
+    var _el$ = _tmpl$7$7(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.nextSibling;
+    _el$2.$$click = () => {
+      if (!isFocused()) {
+        setIsFocused(true);
+        setShowSuggestions(true);
+        props.onFocusChange?.(true);
+        setTimeout(() => {
+          inputRef?.focus();
+          inputRef?.select();
+        }, 20);
+      }
+    };
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return inputType() === "search";
+      },
+      get children() {
+        return _tmpl$$W();
+      }
+    }), null);
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return inputType() === "localhost";
+      },
+      get children() {
+        return _tmpl$2$G();
+      }
+    }), null);
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return inputType() === "url";
+      },
+      get children() {
+        return _tmpl$3$z();
+      }
+    }), null);
+    _el$7.$$keydown = handleKeyDown;
+    _el$7.addEventListener("focus", () => {
+      setIsFocused(true);
+      setShowSuggestions(true);
+      props.onFocusChange?.(true);
+    });
+    _el$7.$$input = (e) => {
+      setLiveInput(e.currentTarget.value);
+      setShowSuggestions(true);
+    };
+    var _ref$ = inputRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$7) : inputRef = _el$7;
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return !isFocused();
+      },
+      get children() {
+        return [(() => {
+          var _el$8 = _tmpl$4$r(), _el$9 = _el$8.firstChild;
+          insert(_el$9, displayLabel);
+          return _el$8;
+        })(), createComponent(ActivePaneAudio, {
+          get paneId() {
+            return props.node?.id;
+          }
+        }), createComponent(Show, {
+          get when() {
+            return props.node?.url;
+          },
+          get children() {
+            var _el$0 = _tmpl$6$b();
+            _el$0.$$click = handleCopyCleanUrl;
+            insert(_el$0, createComponent(Show, {
+              get when() {
+                return copied();
+              },
+              get fallback() {
+                return _tmpl$8$4();
+              },
+              get children() {
+                return _tmpl$5$i();
+              }
+            }));
+            createRenderEffect(() => setAttribute(_el$0, "title", copied() ? "Clean Link Copied!" : "Copy Clean URL (Strips tracking parameters)"));
+            return _el$0;
+          }
+        })];
+      }
+    }), null);
+    insert(_el$2, createComponent(ActivePaneProgress, {
+      get paneId() {
+        return props.node?.id;
+      }
+    }), null);
+    insert(_el$, createComponent(CommandBarDropdown, {
+      get show() {
+        return memo(() => !!isFocused())() && showSuggestions();
+      },
+      get suggestions() {
+        return allSuggestions();
+      },
+      get activeIdx() {
+        return activeSuggestionIdx();
+      },
+      containerRef: (el) => suggestionsContainerRef = el,
+      onExecute: (item) => {
+        if (item.shortcutPrefix) {
+          setLiveInput(item.shortcutPrefix);
+          setActiveSuggestionIdx(-1);
+          inputRef?.focus();
+          return;
+        }
+        handleLaunchUrl(item.value);
+      }
+    }), null);
+    createRenderEffect((_p$) => {
+      var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-all duration-200 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-2 ring-neutral-900/10 border-neutral-300 shadow-sm" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
+      _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
+      _v$2 !== _p$.t && className(_el$7, _p$.t = _v$2);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0
+    });
+    createRenderEffect(() => _el$7.value = liveInput());
+    return _el$;
+  })();
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$V = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+function SplitMenu(props) {
+  let triggerRef;
+  const [coords, setCoords] = createSignal({
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0
+  });
+  const isLeft = () => props.directionPlacement === "left";
+  const lastDir = () => layoutStore.lastSplitDirection || "right";
+  const handleToggle = (e) => {
+    e.stopPropagation();
+    if (triggerRef) {
+      const rect = triggerRef.getBoundingClientRect();
+      setCoords({
+        top: rect.bottom + 8,
+        left: rect.left + rect.width / 2 - 80,
+        right: window.innerWidth - rect.left + 12,
+        bottom: Math.max(12, window.innerHeight - rect.bottom)
+      });
+    }
+    props.setShowSplitMenu(!props.showSplitMenu());
+    props.setShowProfileMenu?.(false);
+  };
+  const handleSplitClick = (dir, e) => {
+    e.stopPropagation();
+    setLayoutStore("lastSplitDirection", dir);
+    setLayoutStore("splitPreview", null);
+    props.onSplit(props.paneId, dir);
+    props.setShowSplitMenu(false);
+  };
+  return (() => {
+    var _el$ = _tmpl$4$q(), _el$3 = _el$.firstChild;
+    var _ref$ = triggerRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
+    insert(_el$, createComponent(ActionTooltip, {
+      get label() {
+        return `Split Pane (${lastDir()})`;
+      },
+      get shortcut() {
+        return getShortcutDisplay("split_right") || "Alt+D";
+      },
+      placement: "bottom",
+      get children() {
+        var _el$2 = _tmpl$$V();
+        _el$2.$$click = (e) => {
+          e.stopPropagation();
+          setLayoutStore("splitPreview", null);
+          props.onSplit(props.paneId, lastDir());
+        };
+        return _el$2;
+      }
+    }), _el$3);
+    _el$3.$$click = handleToggle;
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.showSplitMenu();
+      },
+      get children() {
+        return createComponent(Portal, {
+          get children() {
+            return [(() => {
+              var _el$4 = _tmpl$2$F();
+              _el$4.$$click = (e) => {
+                e.stopPropagation();
+                props.setShowSplitMenu(false);
+              };
+              return _el$4;
+            })(), (() => {
+              var _el$5 = _tmpl$3$y(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling;
+              _el$5.$$pointerdown = (e) => e.stopPropagation();
+              _el$0.$$click = (e) => handleSplitClick("left", e);
+              _el$1.$$click = (e) => handleSplitClick("right", e);
+              _el$10.$$click = (e) => handleSplitClick("top", e);
+              _el$11.$$click = (e) => handleSplitClick("bottom", e);
+              createRenderEffect((_$p) => style(_el$5, isLeft() ? {
+                right: `${coords().right}px`,
+                bottom: `${coords().bottom}px`
+              } : {
+                top: `${coords().top}px`,
+                left: `${Math.max(12, coords().left)}px`
+              }, _$p));
+              return _el$5;
+            })()];
+          }
+        });
+      }
+    }), null);
+    return _el$;
+  })();
+}
+delegateEvents(["click", "pointerdown"]);
+var _tmpl$$U = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$x = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$h = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
+const SUPPORTED_PROVIDERS = [{
+  id: "google",
+  name: "Google",
+  domain: "google.com",
+  loginUrl: "https://accounts.google.com"
+}, {
+  id: "github",
+  name: "GitHub",
+  domain: "github.com",
+  loginUrl: "https://github.com/login"
+}, {
+  id: "microsoft",
+  name: "Microsoft 365",
+  domain: "microsoft.com",
+  loginUrl: "https://login.microsoftonline.com"
+}, {
+  id: "apple",
+  name: "Apple",
+  domain: "apple.com",
+  loginUrl: "https://appleid.apple.com"
+}, {
+  id: "x",
+  name: "X (Twitter)",
+  domain: "x.com",
+  loginUrl: "https://twitter.com/login"
+}, {
+  id: "discord",
+  name: "Discord",
+  domain: "discord.com",
+  loginUrl: "https://discord.com/login"
+}, {
+  id: "gitlab",
+  name: "GitLab",
+  domain: "gitlab.com",
+  loginUrl: "https://gitlab.com/users/sign_in"
+}, {
+  id: "slack",
+  name: "Slack",
+  domain: "slack.com",
+  loginUrl: "https://slack.com/signin"
+}];
+function ConnectedAccountsList(props) {
+  const [showAll, setShowAll] = createSignal(false);
+  const getIdentities = () => {
+    if (!props.identitiesJson) return {};
+    try {
+      return JSON.parse(props.identitiesJson);
+    } catch {
+      return {};
+    }
+  };
+  const handleConnect = (loginUrl) => {
+    const id = props.profileId || "main";
+    const api = window.api;
+    if (api?.openGoogleAuth) {
+      api.openGoogleAuth({
+        url: loginUrl,
+        profileId: id
+      });
+    } else if (api?.auth?.openGoogleAuth) {
+      api.auth.openGoogleAuth({
+        url: loginUrl,
+        profileId: id
+      });
+    }
+  };
+  const handleDisconnect = async (providerId) => {
+    const id = props.profileId || "main";
+    const api = window.api;
+    if (providerId === "google") {
+      if (api?.disconnectGoogle) await api.disconnectGoogle(id);
+      else if (api?.auth?.disconnectGoogle) await api.auth.disconnectGoogle(id);
+    }
+  };
+  const displayedProviders = () => showAll() ? SUPPORTED_PROVIDERS : SUPPORTED_PROVIDERS.slice(0, 4);
+  return (() => {
+    var _el$ = _tmpl$2$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    insert(_el$3, createComponent(For, {
+      get each() {
+        return displayedProviders();
+      },
+      children: (provider) => {
+        const identity = () => getIdentities()[provider.id];
+        return (() => {
+          var _el$5 = _tmpl$4$p(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+          _el$8.addEventListener("error", (e) => {
+            e.currentTarget.style.display = "none";
+          });
+          insert(_el$0, () => provider.name);
+          insert(_el$1, () => identity()?.email || "Not connected");
+          insert(_el$5, createComponent(Show, {
+            get when() {
+              return identity();
+            },
+            get fallback() {
+              return (() => {
+                var _el$11 = _tmpl$5$h();
+                _el$11.$$click = () => handleConnect(provider.loginUrl);
+                return _el$11;
+              })();
+            },
+            get children() {
+              var _el$10 = _tmpl$3$x();
+              _el$10.$$click = () => handleDisconnect(provider.id);
+              return _el$10;
+            }
+          }), null);
+          createRenderEffect((_p$) => {
+            var _v$ = `https://www.google.com/s2/favicons?domain=${provider.domain}&sz=64`, _v$2 = provider.name;
+            _v$ !== _p$.e && setAttribute(_el$8, "src", _p$.e = _v$);
+            _v$2 !== _p$.t && setAttribute(_el$8, "alt", _p$.t = _v$2);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$5;
+        })();
+      }
+    }));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return SUPPORTED_PROVIDERS.length > 4;
+      },
+      get children() {
+        var _el$4 = _tmpl$$U();
+        _el$4.$$click = () => setShowAll(!showAll());
+        insert(_el$4, (() => {
+          var _c$ = memo(() => !!showAll());
+          return () => _c$() ? "Show Fewer" : `+ ${SUPPORTED_PROVIDERS.length - 4} More Accounts`;
+        })());
+        return _el$4;
+      }
+    }), null);
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$T = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$w = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$o = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+const COLORS = [
+  "#6d7f94",
+  // Slate Grey
+  "#a1907d",
+  // Warm Sand
+  "#5e7c7a",
+  // Eucalyptus Teal
+  "#8a7685",
+  // Muted Plum
+  "#a38c8e",
+  // Muted Rose
+  "#9c8c7c",
+  // Muted Clay
+  "#4a4a49"
+  // Monochromatic Charcoal
+];
+function ProfileForm(props) {
+  const [name, setName] = createSignal(props.initialData?.name || "");
+  const [color, setColor] = createSignal(props.initialData?.color || COLORS[6]);
+  const [isEphemeral, setIsEphemeral] = createSignal(props.initialData?.is_ephemeral || false);
+  const [proxyServer, setProxyServer] = createSignal(props.initialData?.proxy_server || "");
+  const [userAgent, setUserAgent] = createSignal(props.initialData?.user_agent || "");
+  const [showAdvanced, setShowAdvanced] = createSignal(Boolean(props.initialData?.proxy_server || props.initialData?.user_agent || props.initialData?.is_ephemeral));
+  const handleSave = () => {
+    if (!name().trim()) return;
+    props.onSave({
+      id: props.initialData?.id,
+      name: name().trim(),
+      color: color(),
+      is_ephemeral: isEphemeral(),
+      proxy_server: proxyServer().trim() || "",
+      user_agent: userAgent().trim() || ""
+    });
+  };
+  return (() => {
+    var _el$ = _tmpl$2$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    _el$4.$$input = (e) => setName(e.currentTarget.value);
+    insert(_el$, createComponent(ConnectedAccountsList, {
+      get profileId() {
+        return props.initialData?.id;
+      },
+      get identitiesJson() {
+        return props.initialData?.identities_json;
+      }
+    }), _el$5);
+    insert(_el$7, () => COLORS.map((c) => (() => {
+      var _el$23 = _tmpl$3$w();
+      _el$23.$$click = () => setColor(c);
+      setStyleProperty(_el$23, "background-color", c);
+      createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer ${color() === c ? "ring-2 ring-offset-1 ring-neutral-900 scale-105" : ""}`));
+      return _el$23;
+    })()));
+    _el$9.$$click = () => setShowAdvanced(!showAdvanced());
+    insert(_el$0, () => showAdvanced() ? "▾" : "▸");
+    insert(_el$8, createComponent(Show, {
+      get when() {
+        return showAdvanced();
+      },
+      get children() {
+        var _el$1 = _tmpl$$T(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+        _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
+        _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
+        _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
+        createRenderEffect(() => _el$11.checked = isEphemeral());
+        createRenderEffect(() => _el$14.value = proxyServer());
+        createRenderEffect(() => _el$17.value = userAgent());
+        return _el$1;
+      }
+    }), null);
+    insert(_el$19, (() => {
+      var _c$ = memo(() => !!props.onDelete);
+      return () => _c$() && (() => {
+        var _el$24 = _tmpl$4$o();
+        addEventListener(_el$24, "click", props.onDelete, true);
+        return _el$24;
+      })();
+    })());
+    addEventListener(_el$21, "click", props.onCancel, true);
+    _el$22.$$click = handleSave;
+    createRenderEffect(() => _el$22.disabled = !name().trim());
+    createRenderEffect(() => _el$4.value = name());
+    return _el$;
+  })();
+}
+delegateEvents(["input", "click"]);
+var _tmpl$$S = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$C = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$n = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$g = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
+function ProfileMenuList(props) {
+  let listRef;
+  const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
+  const [highlightedIndex, setHighlightedIndex] = createSignal(initialIndex());
+  onMount(() => {
+    listRef?.focus();
+  });
+  const handleKeyDown = (e) => {
+    const total = layoutStore.profiles.length;
+    if (total === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightedIndex((i) => (i + 1) % total);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightedIndex((i) => (i - 1 + total) % total);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = layoutStore.profiles[highlightedIndex()];
+      if (target) {
+        props.onSelect(target.id);
+      }
+    }
+  };
+  return (() => {
+    var _el$ = _tmpl$$S(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
+    _el$.$$keydown = handleKeyDown;
+    var _ref$ = listRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
+    insert(_el$3, createComponent(For, {
+      get each() {
+        return layoutStore.profiles;
+      },
+      children: (profile, idx) => (() => {
+        var _el$6 = _tmpl$5$g(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
+        _el$6.$$click = (e) => {
+          e.stopPropagation();
+          props.onSelect(profile.id);
+        };
+        _el$6.addEventListener("mouseenter", () => setHighlightedIndex(idx()));
+        insert(_el$8, () => profile.name.charAt(0).toUpperCase());
+        insert(_el$0, () => profile.name);
+        insert(_el$9, () => {
+          try {
+            if (profile.identities_json) {
+              const idents = JSON.parse(profile.identities_json);
+              const first = Object.values(idents).find((val) => val?.email || val?.handle);
+              if (first) {
+                return (() => {
+                  var _el$14 = _tmpl$6$a();
+                  insert(_el$14, () => first.email || first.handle);
+                  return _el$14;
+                })();
+              }
+            }
+          } catch {
+          }
+          return null;
+        }, null);
+        insert(_el$7, createComponent(Show, {
+          get when() {
+            return profile.is_ephemeral;
+          },
+          get children() {
+            return _tmpl$2$C();
+          }
+        }), null);
+        insert(_el$6, createComponent(Show, {
+          get when() {
+            return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
+          },
+          get children() {
+            return _tmpl$3$v();
+          }
+        }), _el$11);
+        insert(_el$11, createComponent(Show, {
+          get when() {
+            return props.onSplitWithProfile;
+          },
+          get children() {
+            var _el$12 = _tmpl$4$n();
+            _el$12.$$click = (e) => {
+              e.stopPropagation();
+              props.onSplitWithProfile?.(profile.id);
+            };
+            return _el$12;
+          }
+        }), _el$13);
+        _el$13.$$click = (e) => {
+          e.stopPropagation();
+          props.onEdit(profile.id);
+        };
+        createRenderEffect((_p$) => {
+          var _v$ = `group/prow relative flex items-center justify-between px-2.5 py-1.5 rounded-[8px] transition-all w-full cursor-pointer select-none outline-none ${highlightedIndex() === idx() ? "bg-neutral-100 text-neutral-900 font-medium shadow-sm" : props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId ? "bg-neutral-50/80 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50/80 hover:text-neutral-900"}`, _v$2 = profile.color || "#3b82f6";
+          _v$ !== _p$.e && className(_el$6, _p$.e = _v$);
+          _v$2 !== _p$.t && setStyleProperty(_el$8, "background-color", _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$6;
+      })()
+    }));
+    addEventListener(_el$5, "click", props.onCreateNew, true);
+    return _el$;
+  })();
+}
+delegateEvents(["keydown", "click"]);
+function useProfileMenuController(nodeId, onUpdatePane) {
+  const [editingProfileId, setEditingProfileId] = createSignal(
+    null
+  );
+  const [isCreatingProfile, setIsCreatingProfile] = createSignal(false);
+  const handleSaveProfile = async (data) => {
+    if (!data.id) {
+      if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
+        setLayoutStore("paywallReason", "profile");
+        setLayoutStore("showPaywall", true);
+        return;
+      }
+      const id = `profile_${Date.now()}`;
+      await window.api?.createProfile(
+        id,
+        data.name,
+        data.color,
+        !!data.is_ephemeral,
+        data.proxy_server,
+        data.user_agent
+      );
+      onUpdatePane(nodeId, { profileId: id });
+    } else {
+      await window.api?.updateProfile(
+        data.id,
+        data.name,
+        data.color,
+        !!data.is_ephemeral,
+        data.proxy_server,
+        data.user_agent
+      );
+    }
+    const profiles = await window.api?.getProfiles();
+    if (profiles) setLayoutStore("profiles", profiles);
+    setEditingProfileId(null);
+    setIsCreatingProfile(false);
+  };
+  const handleDeleteProfile = async (id) => {
+    if (id === "main") return;
+    if (confirm(
+      "Are you sure? This will delete the profile and move all its panes to Main."
+    )) {
+      await window.api?.deleteProfile(id);
+      const profiles = await window.api?.getProfiles();
+      if (profiles) setLayoutStore("profiles", profiles);
+      setEditingProfileId(null);
+    }
+  };
+  return {
+    editingProfileId,
+    setEditingProfileId,
+    isCreatingProfile,
+    setIsCreatingProfile,
+    handleSaveProfile,
+    handleDeleteProfile
+  };
+}
+var _tmpl$$R = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$B = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$m = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$f = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div>`), _tmpl$7$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+function ProfileMenu$1(props) {
+  let btnRef;
+  const [anchorPos, setAnchorPos] = createSignal(null);
+  const targetId = () => props.node?.id || props.paneId || "";
+  const targetProfileId = () => props.node?.profileId || props.currentProfileId || "main";
+  const currentProfile = () => layoutStore.profiles.find((p) => p.id === targetProfileId()) || {
+    name: "Main",
+    color: "#78716c"
+  };
+  const ctrl = useProfileMenuController(targetId(), props.onUpdatePane);
+  const isCluster = () => props.buttonStyle === "cluster";
+  const isFormMode = () => !!ctrl.editingProfileId() || ctrl.isCreatingProfile();
+  const toggleMenu = () => {
+    if (btnRef) {
+      const rect = btnRef.getBoundingClientRect();
+      const popoverWidth = isFormMode() ? 280 : 220;
+      setAnchorPos({
+        top: rect.bottom + 10,
+        left: Math.min(window.innerWidth - popoverWidth - 16, Math.max(16, rect.right - popoverWidth)),
+        right: window.innerWidth - rect.left + 12,
+        bottom: Math.max(12, window.innerHeight - rect.bottom)
+      });
+    }
+    props.setShowProfileMenu(!props.showProfileMenu());
+    props.setShowSplitMenu?.(false);
+  };
+  onMount(() => {
+    if (!props.isShortcutTarget) return;
+    const handleToggle = (e) => {
+      const activeId = e.detail?.paneId;
+      if (!activeId || activeId === targetId()) {
+        toggleMenu();
+      }
+    };
+    window.addEventListener("app:toggle-active-profile-menu", handleToggle);
+    onCleanup(() => {
+      window.removeEventListener("app:toggle-active-profile-menu", handleToggle);
+    });
+  });
+  const handleCreateNew = (e) => {
+    e.stopPropagation();
+    if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      setLayoutStore("paywallAnchor", {
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height
+      });
+      setLayoutStore("paywallReason", "profile");
+      setLayoutStore("showPaywall", true);
+      return;
+    }
+    ctrl.setEditingProfileId(null);
+    ctrl.setIsCreatingProfile(true);
+  };
+  const renderContent = () => (() => {
+    var _el$ = _tmpl$$R(), _el$2 = _el$.firstChild;
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return !isFormMode();
+      },
+      get fallback() {
+        return (() => {
+          var _el$3 = _tmpl$2$B();
+          insert(_el$3, createComponent(ProfileForm, {
+            get initialData() {
+              const p = layoutStore.profiles.find((p2) => p2.id === ctrl.editingProfileId());
+              if (!p) return void 0;
+              return {
+                ...p,
+                is_ephemeral: !!p.is_ephemeral,
+                proxy_server: p.proxy_server || "",
+                user_agent: p.user_agent || "",
+                identities_json: p.identities_json
+              };
+            },
+            get onSave() {
+              return ctrl.handleSaveProfile;
+            },
+            onCancel: () => {
+              ctrl.setEditingProfileId(null);
+              ctrl.setIsCreatingProfile(false);
+            },
+            get onDelete() {
+              return ctrl.editingProfileId() && ctrl.editingProfileId() !== "main" ? () => ctrl.handleDeleteProfile(ctrl.editingProfileId()) : void 0;
+            }
+          }));
+          return _el$3;
+        })();
+      },
+      get children() {
+        return createComponent(ProfileMenuList, {
+          get currentProfileId() {
+            return targetProfileId();
+          },
+          onSelect: (profileId) => {
+            props.onUpdatePane(targetId(), {
+              profileId
+            });
+            props.setShowProfileMenu(false);
+          },
+          get onSplitWithProfile() {
+            return props.onSplit ? (profileId) => {
+              const url = props.node?.url;
+              props.onSplit(targetId(), "right", url, profileId);
+              props.setShowProfileMenu(false);
+            } : void 0;
+          },
+          onEdit: (profileId) => {
+            ctrl.setEditingProfileId(profileId);
+            ctrl.setIsCreatingProfile(false);
+          },
+          onCreateNew: handleCreateNew
+        });
+      }
+    }));
+    createRenderEffect(() => className(_el$2, `bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${isFormMode() ? "w-[280px]" : "w-[220px]"}`));
+    return _el$;
+  })();
+  return (() => {
+    var _el$4 = _tmpl$6$9();
+    insert(_el$4, createComponent(Show, {
+      get when() {
+        return isCluster();
+      },
+      get fallback() {
+        return createComponent(ActionTooltip, {
+          get label() {
+            return `Profile: ${currentProfile().name}`;
+          },
+          get shortcut() {
+            return getShortcutDisplay("switch_profile") || "Alt+P";
+          },
+          placement: "bottom",
+          get children() {
+            var _el$12 = _tmpl$7$6(), _el$13 = _el$12.firstChild;
+            _el$12.$$click = (e) => {
+              e.stopPropagation();
+              toggleMenu();
+            };
+            var _ref$ = btnRef;
+            typeof _ref$ === "function" ? use(_ref$, _el$12) : btnRef = _el$12;
+            insert(_el$13, () => currentProfile().name.charAt(0).toUpperCase());
+            createRenderEffect((_$p) => setStyleProperty(_el$13, "background-color", currentProfile().color || "#78716c"));
+            return _el$12;
+          }
+        });
+      },
+      get children() {
+        return [(() => {
+          var _el$5 = _tmpl$3$u(), _el$6 = _el$5.firstChild;
+          _el$5.$$click = (e) => {
+            e.stopPropagation();
+            const rect = e.currentTarget.getBoundingClientRect();
+            setAnchorPos({
+              right: window.innerWidth - rect.left + 12,
+              bottom: Math.max(12, window.innerHeight - rect.bottom),
+              top: rect.bottom + 8,
+              left: Math.max(12, rect.left)
+            });
+            props.setShowProfileMenu(!props.showProfileMenu());
+            props.setShowSplitMenu?.(false);
+          };
+          insert(_el$6, () => currentProfile().name.charAt(0).toUpperCase());
+          createRenderEffect((_p$) => {
+            var _v$ = `Profile: ${currentProfile().name}`, _v$2 = currentProfile().color || "#78716c";
+            _v$ !== _p$.e && setAttribute(_el$5, "title", _p$.e = _v$);
+            _v$2 !== _p$.t && setStyleProperty(_el$6, "background-color", _p$.t = _v$2);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$5;
+        })(), (() => {
+          var _el$7 = _tmpl$4$m(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
+          _el$1.nextSibling;
+          insert(_el$8, () => currentProfile().name, _el$1);
+          return _el$7;
+        })()];
+      }
+    }), null);
+    insert(_el$4, createComponent(Show, {
+      get when() {
+        return props.showProfileMenu();
+      },
+      get children() {
+        return createComponent(Portal, {
+          get children() {
+            return [(() => {
+              var _el$10 = _tmpl$5$f();
+              _el$10.$$pointerdown = (e) => {
+                e.stopPropagation();
+                props.setShowProfileMenu(false);
+              };
+              return _el$10;
+            })(), (() => {
+              var _el$11 = _tmpl$6$9();
+              insert(_el$11, renderContent);
+              createRenderEffect((_p$) => {
+                var _v$3 = `pointer-events-auto fixed z-[9999] animate-in fade-in duration-200 ${isCluster() ? "slide-in-from-right-2" : "slide-in-from-top-2"}`, _v$4 = isCluster() ? {
+                  bottom: `${anchorPos()?.bottom ?? 60}px`,
+                  right: `${anchorPos()?.right ?? 64}px`
+                } : {
+                  top: `${anchorPos()?.top ?? 50}px`,
+                  left: `${anchorPos()?.left ?? 100}px`
+                };
+                _v$3 !== _p$.e && className(_el$11, _p$.e = _v$3);
+                _p$.t = style(_el$11, _v$4, _p$.t);
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0
+              });
+              return _el$11;
+            })()];
+          }
+        });
+      }
+    }), null);
+    createRenderEffect(() => className(_el$4, `relative group/profilemenu flex items-center shrink-0 ${isCluster() ? "z-30" : "bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"}`));
+    return _el$4;
+  })();
+}
+delegateEvents(["click", "pointerdown"]);
+var _tmpl$$Q = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
+function ActivePaneActions(props) {
+  const [showSplitMenu, setShowSplitMenu] = createSignal(false);
+  const [showProfileMenu, setShowProfileMenu] = createSignal(false);
+  createEffect(() => {
+    const isAny = showSplitMenu() || showProfileMenu();
+    props.onMenuOpenChange?.(isAny);
+  });
+  return (() => {
+    var _el$ = _tmpl$$Q();
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.node;
+      },
+      get children() {
+        return [createComponent(SplitMenu, {
+          get paneId() {
+            return props.node.id;
+          },
+          get onSplit() {
+            return props.onSplit;
+          },
+          showSplitMenu,
+          setShowSplitMenu,
+          setShowProfileMenu
+        }), createComponent(ProfileMenu$1, {
+          get node() {
+            return props.node;
+          },
+          get onUpdatePane() {
+            return props.onUpdatePane;
+          },
+          get onSplit() {
+            return props.onSplit;
+          },
+          showProfileMenu,
+          setShowProfileMenu,
+          setShowSplitMenu,
+          isShortcutTarget: true
+        })];
+      }
+    }));
+    return _el$;
+  })();
+}
+var _tmpl$$P = /* @__PURE__ */ template(`<div id=active-pane-bar class="fixed top-2 left-1/2 -translate-x-1/2 z-[60] h-[40px] pointer-events-auto flex items-center gap-1.5 px-2 bg-white border border-neutral-200/60 rounded-2xl shadow-md select-none opacity-0 -translate-y-4"role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
+function ActivePaneBar(props) {
+  const activeNode = () => {
+    const id = props.ws.activePaneId();
+    if (!id) return null;
+    const node = layoutStore.nodes[id];
+    return node && node.type === "pane" ? node : null;
+  };
+  return createComponent(Show, {
+    get when() {
+      return !props.isMaximized;
+    },
+    get children() {
+      var _el$ = _tmpl$$P();
+      _el$.addEventListener("mouseenter", () => props.onZoneEnter("top"));
+      var _ref$ = props.activeBarRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$) : props.activeBarRef = _el$;
+      insert(_el$, createComponent(ActivePaneNav, {
+        get node() {
+          return activeNode();
+        },
+        get onUpdatePane() {
+          return props.ws.handleUpdatePane;
+        }
+      }), null);
+      insert(_el$, createComponent(ActivePaneOmnibox, {
+        get node() {
+          return activeNode();
+        },
+        get onUpdatePane() {
+          return props.ws.handleUpdatePane;
+        },
+        get onCreateTab() {
+          return props.ws.handleCreateTab;
+        }
+      }), null);
+      insert(_el$, createComponent(ActivePaneActions, {
+        get node() {
+          return activeNode();
+        },
+        get onSplit() {
+          return props.ws.handleSplit;
+        },
+        get onUpdatePane() {
+          return props.ws.handleUpdatePane;
+        }
+      }), null);
+      return _el$;
+    }
+  });
+}
+var _tmpl$$O = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
+function WorkspaceTooltip(props) {
+  const profile = () => layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id);
+  return createComponent(Portal, {
+    get children() {
+      var _el$ = _tmpl$$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+      insert(_el$3, createComponent(WorkspaceIcon, {
+        get icon() {
+          return props.ws.icon;
+        },
+        get name() {
+          return props.ws.name;
+        },
+        size: 13
+      }), _el$4);
+      insert(_el$4, () => props.ws.name);
+      insert(_el$7, (() => {
+        var _c$ = memo(() => !!(props.ws.default_profile_id === "main" || !props.ws.default_profile_id));
+        return () => _c$() ? "Main Session" : profile()?.name;
+      })());
+      createRenderEffect((_p$) => {
+        var _v$ = `fixed z-[99999] pointer-events-none transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] ${props.isHovered ? "opacity-100 translate-x-0" : "opacity-0 -translate-x-2"}`, _v$2 = `${(props.hoveredRect?.top || 0) + (props.hoveredRect?.height || 0) / 2}px`, _v$3 = `${(props.hoveredRect?.right || 0) + 12}px`, _v$4 = profile()?.color || "#64748b";
+        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$, "top", _p$.t = _v$2);
+        _v$3 !== _p$.a && setStyleProperty(_el$, "left", _p$.a = _v$3);
+        _v$4 !== _p$.o && setStyleProperty(_el$6, "background-color", _p$.o = _v$4);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0,
+        a: void 0,
+        o: void 0
+      });
+      return _el$;
+    }
+  });
+}
+var _tmpl$$N = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
+function WorkspaceItem(props) {
+  const [isHovered, setIsHovered] = createSignal(false);
+  const [hoveredRect, setHoveredRect] = createSignal(null);
+  const handleClick = (e) => {
+    if (props.isActive) {
+      if (props.configOpenId === props.ws.id) {
+        props.onCloseConfig();
+      } else {
+        const rect = e.currentTarget.getBoundingClientRect();
+        props.onOpenConfig(props.ws.id, rect);
+      }
+    } else {
+      const oldIdx = props.workspaces.findIndex((w) => w.id === props.activeWorkspace);
+      const newIdx = props.workspaces.findIndex((w) => w.id === props.ws.id);
+      props.onWorkspaceSelect(props.ws.id, newIdx > oldIdx ? "forward" : "backward");
+      props.onCloseConfig();
+    }
+  };
+  return (() => {
+    var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    _el$.addEventListener("mouseleave", () => setIsHovered(false));
+    _el$.addEventListener("mouseenter", (e) => {
+      setIsHovered(true);
+      setHoveredRect(e.currentTarget.getBoundingClientRect());
+    });
+    _el$3.$$contextmenu = (e) => {
+      e.preventDefault();
+      const rect = e.currentTarget.getBoundingClientRect();
+      props.onOpenConfig(props.ws.id, rect);
+    };
+    _el$3.$$click = handleClick;
+    insert(_el$4, createComponent(WorkspaceIcon, {
+      get icon() {
+        return props.ws.icon;
+      },
+      get name() {
+        return props.ws.name;
+      },
+      size: 14,
+      strokeWidth: 1.75
+    }));
+    insert(_el$, createComponent(WorkspaceTooltip, {
+      get ws() {
+        return props.ws;
+      },
+      get isHovered() {
+        return isHovered();
+      },
+      get hoveredRect() {
+        return hoveredRect();
+      }
+    }), null);
+    createRenderEffect((_p$) => {
+      var _v$ = `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.isActive ? "bg-neutral-900/10 shadow-[0_4px_12px_-6px_rgba(0,0,0,0.25)]" : "bg-transparent"}`, _v$2 = {
+        "bg-neutral-900 text-white shadow-[inset_0_1px_1px_rgba(255,255,255,0.18),0_1px_2px_rgba(0,0,0,0.1)]": props.isActive,
+        "bg-white/70 text-neutral-500 hover:bg-white hover:text-neutral-900 hover:shadow-[0_0_0_1px_rgba(0,0,0,0.04),0_2px_8px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,1)]": !props.isActive
+      }, _v$3 = `Workspace: ${props.ws.name}`, _v$4 = props.isActive;
+      _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
+      _p$.t = classList(_el$3, _v$2, _p$.t);
+      _v$3 !== _p$.a && setAttribute(_el$3, "aria-label", _p$.a = _v$3);
+      _v$4 !== _p$.o && setAttribute(_el$3, "aria-pressed", _p$.o = _v$4);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click", "contextmenu"]);
+var _tmpl$$M = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$t = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$l = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$8 = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$3 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+const RECENT_KEY = "apposition:recent_workspace_icons";
+function IconPickerPopover(props) {
+  let popoverRef;
+  const [search, setSearch] = createSignal("");
+  const [selectedCategory, setSelectedCategory] = createSignal("All");
+  const [lastManualIcon, setLastManualIcon] = createSignal(props.currentIcon && props.currentIcon !== "auto" ? props.currentIcon : null);
+  const [recentIcons, setRecentIcons] = createSignal([]);
+  const [focusedIdx, setFocusedIdx] = createSignal(-1);
+  const isAuto = () => !props.currentIcon || props.currentIcon === "auto";
+  createEffect(() => {
+    const cur = props.currentIcon;
+    if (cur && cur !== "auto") setLastManualIcon(cur);
+  });
+  onMount(() => {
+    try {
+      const saved = localStorage.getItem(RECENT_KEY);
+      if (saved) setRecentIcons(JSON.parse(saved).slice(0, 6));
+    } catch {
+    }
+    if (popoverRef) gsapWithCSS.from(popoverRef, {
+      scale: 0.94,
+      opacity: 0,
+      y: -6,
+      duration: 0.25,
+      ease: "power2.out"
+    });
+  });
+  const handlePickIcon = (id) => {
+    setLastManualIcon(id);
+    try {
+      const updated = [id, ...recentIcons().filter((x) => x !== id)].slice(0, 6);
+      setRecentIcons(updated);
+      localStorage.setItem(RECENT_KEY, JSON.stringify(updated));
+    } catch {
+    }
+    props.onSelectIcon(id);
+    props.onClose();
+  };
+  const handleToggleAuto = (e) => {
+    e.stopPropagation();
+    if (isAuto()) {
+      props.onSelectIcon(lastManualIcon() || "folder");
+    } else {
+      if (props.currentIcon && props.currentIcon !== "auto") setLastManualIcon(props.currentIcon);
+      props.onSelectIcon(null);
+    }
+  };
+  const filteredIcons = createMemo(() => {
+    const q = search().trim().toLowerCase();
+    const cat = selectedCategory();
+    return ICON_LIST.filter((item) => {
+      if (cat !== "All" && item.category !== cat) return false;
+      if (!q) return true;
+      return item.name.toLowerCase().includes(q) || item.id.toLowerCase().includes(q) || item.keywords.some((k) => k.toLowerCase().includes(q));
+    });
+  });
+  const handleKeyDown = (e) => {
+    const icons = filteredIcons();
+    if (e.key === "Escape") {
+      if (search()) setSearch("");
+      else props.onClose();
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      setFocusedIdx((i) => i < 0 ? 0 : Math.min(icons.length - 1, i + 1));
+    } else if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      setFocusedIdx((i) => i < 0 ? 0 : Math.max(0, i - 1));
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setFocusedIdx((i) => i < 0 ? 0 : Math.min(icons.length - 1, i + 6));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setFocusedIdx((i) => i < 0 ? 0 : Math.max(0, i - 6));
+    } else if (e.key === "Enter" && icons.length > 0) {
+      e.preventDefault();
+      const target = focusedIdx() >= 0 && icons[focusedIdx()] ? icons[focusedIdx()].id : icons[0].id;
+      handlePickIcon(target);
+    }
+  };
+  return createComponent(Portal, {
+    get children() {
+      return [(() => {
+        var _el$ = _tmpl$$M();
+        _el$.$$click = (e) => {
+          e.stopPropagation();
+          props.onClose();
+        };
+        return _el$;
+      })(), (() => {
+        var _el$2 = _tmpl$4$l(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        _el$2.$$click = (e) => e.stopPropagation();
+        var _ref$ = popoverRef;
+        typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
+        insert(_el$5, createComponent(search_default, {
+          size: 13,
+          "class": "absolute left-2.5 text-neutral-400 pointer-events-none"
+        }), _el$6);
+        _el$6.$$keydown = handleKeyDown;
+        _el$6.$$input = (e) => {
+          setSearch(e.currentTarget.value);
+          setFocusedIdx(-1);
+        };
+        insert(_el$5, createComponent(Show, {
+          get when() {
+            return search();
+          },
+          get children() {
+            var _el$7 = _tmpl$2$A();
+            _el$7.$$click = () => setSearch("");
+            insert(_el$7, createComponent(x_default, {
+              size: 12
+            }));
+            return _el$7;
+          }
+        }), null);
+        _el$8.$$click = handleToggleAuto;
+        insert(_el$8, createComponent(sparkles_default, {
+          size: 12
+        }), _el$9);
+        insert(_el$3, createComponent(Show, {
+          get when() {
+            return memo(() => recentIcons().length > 0)() && !search();
+          },
+          get children() {
+            var _el$0 = _tmpl$3$t();
+            insert(_el$0, createComponent(clock_default, {
+              size: 11,
+              "class": "text-neutral-400 ml-1 mr-0.5 shrink-0"
+            }), null);
+            insert(_el$0, createComponent(For, {
+              get each() {
+                return recentIcons();
+              },
+              children: (id) => {
+                const item = ICON_MAP[id];
+                if (!item) return null;
+                const Comp = item.component;
+                return (() => {
+                  var _el$11 = _tmpl$5$e();
+                  _el$11.$$click = () => handlePickIcon(id);
+                  insert(_el$11, createComponent(Comp, {
+                    size: 12,
+                    strokeWidth: 1.75
+                  }));
+                  createRenderEffect(() => setAttribute(_el$11, "title", `Recent: ${item.name}`));
+                  return _el$11;
+                })();
+              }
+            }), null);
+            return _el$0;
+          }
+        }), _el$1);
+        insert(_el$1, createComponent(For, {
+          each: ICON_CATEGORIES,
+          children: (cat) => (() => {
+            var _el$12 = _tmpl$6$8();
+            _el$12.$$click = () => {
+              setSelectedCategory(cat);
+              setFocusedIdx(-1);
+            };
+            insert(_el$12, cat);
+            createRenderEffect((_$p) => classList(_el$12, {
+              "bg-neutral-900 text-white shadow-xs": selectedCategory() === cat,
+              "bg-neutral-100 text-neutral-500 hover:text-neutral-900 hover:bg-neutral-200/60": selectedCategory() !== cat
+            }, _$p));
+            return _el$12;
+          })()
+        }));
+        insert(_el$10, createComponent(For, {
+          get each() {
+            return filteredIcons();
+          },
+          get fallback() {
+            return (() => {
+              var _el$13 = _tmpl$7$5(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+              _el$16.nextSibling;
+              insert(_el$13, search, _el$16);
+              return _el$13;
+            })();
+          },
+          children: (item, idx) => {
+            const isSelected = () => props.currentIcon === item.id;
+            const isFocused = () => focusedIdx() === idx();
+            const Comp = item.component;
+            return (() => {
+              var _el$17 = _tmpl$8$3();
+              _el$17.$$click = () => handlePickIcon(item.id);
+              insert(_el$17, createComponent(Comp, {
+                size: 15,
+                get strokeWidth() {
+                  return isSelected() ? 2 : 1.75;
+                }
+              }));
+              createRenderEffect((_p$) => {
+                var _v$5 = `${item.name} (${item.keywords.join(", ")})`, _v$6 = {
+                  "bg-neutral-900 text-white shadow-sm ring-1 ring-neutral-900": isSelected(),
+                  "ring-2 ring-neutral-900/30 bg-neutral-100/90 text-neutral-900": isFocused() && !isSelected(),
+                  "bg-neutral-50/60 hover:bg-neutral-200/60 text-neutral-600 hover:text-neutral-900 border border-neutral-200/40": !isSelected() && !isFocused()
+                };
+                _v$5 !== _p$.e && setAttribute(_el$17, "title", _p$.e = _v$5);
+                _p$.t = classList(_el$17, _v$6, _p$.t);
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0
+              });
+              return _el$17;
+            })();
+          }
+        }));
+        createRenderEffect((_p$) => {
+          var _v$ = `${props.pos?.top ?? 100}px`, _v$2 = `${props.pos?.left ?? 100}px`, _v$3 = isAuto() ? "Auto active (Click to restore manual)" : "Switch to Auto", _v$4 = {
+            "bg-neutral-900 text-white border-neutral-900 shadow-xs": isAuto(),
+            "bg-neutral-100 hover:bg-neutral-200/80 text-neutral-600 hover:text-neutral-900 border-neutral-200/60": !isAuto()
+          };
+          _v$ !== _p$.e && setStyleProperty(_el$2, "top", _p$.e = _v$);
+          _v$2 !== _p$.t && setStyleProperty(_el$2, "left", _p$.t = _v$2);
+          _v$3 !== _p$.a && setAttribute(_el$8, "title", _p$.a = _v$3);
+          _p$.o = classList(_el$8, _v$4, _p$.o);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0,
+          a: void 0,
+          o: void 0
+        });
+        createRenderEffect(() => _el$6.value = search());
+        return _el$2;
+      })()];
+    }
+  });
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$L = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$z = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$d = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+gsapWithCSS.registerPlugin(Flip);
+function WorkspacePopover(props) {
+  let popoverRef;
+  let flipThumbRef;
+  const [showIconPicker, setShowIconPicker] = createSignal(false);
+  const [pickerPos, setPickerPos] = createSignal(null);
+  const profilesList = () => [{
+    id: "main",
+    color: "#6d7f94",
+    name: "Main"
+  }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
+  onMount(() => {
+    if (popoverRef) {
+      gsapWithCSS.from(popoverRef, {
+        x: -10,
+        opacity: 0,
+        scale: 0.96,
+        duration: 0.4,
+        ease: "expo.out"
+      });
+    }
+  });
+  return createComponent(Portal, {
+    get children() {
+      return [(() => {
+        var _el$ = _tmpl$$L();
+        _el$.$$click = (e) => {
+          e.stopPropagation();
+          props.onClose();
+        };
+        return _el$;
+      })(), (() => {
+        var _el$2 = _tmpl$5$d(), _el$3 = _el$2.firstChild;
+        var _ref$ = popoverRef;
+        typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
+        insert(_el$3, createComponent(Show, {
+          get when() {
+            return !props.cascadePrompt;
+          },
+          get fallback() {
+            return (() => {
+              var _el$13 = _tmpl$6$7(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
+              insert(_el$18, () => props.cascadePrompt?.profileName);
+              _el$20.$$click = (e) => {
+                e.stopPropagation();
+                props.onCascadeResponse(true);
+              };
+              _el$21.$$click = (e) => {
+                e.stopPropagation();
+                props.onCascadeResponse(false);
+              };
+              return _el$13;
+            })();
+          },
+          get children() {
+            return [(() => {
+              var _el$4 = _tmpl$2$z(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+              _el$7.$$click = (e) => {
+                e.stopPropagation();
+                const rect = e.currentTarget.getBoundingClientRect();
+                setPickerPos({
+                  top: rect.bottom + 8,
+                  left: rect.left
+                });
+                setShowIconPicker(!showIconPicker());
+              };
+              insert(_el$7, createComponent(WorkspaceIcon, {
+                get icon() {
+                  return props.ws.icon;
+                },
+                get name() {
+                  return props.ws.name;
+                },
+                size: 15,
+                strokeWidth: 1.8
+              }));
+              _el$8.$$keydown = (e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+              };
+              _el$8.addEventListener("blur", (e) => {
+                const val = e.target.value.trim();
+                if (val && val !== props.ws.name) props.onRename(val);
+              });
+              createRenderEffect(() => _el$8.value = props.ws.name);
+              return _el$4;
+            })(), (() => {
+              var _el$9 = _tmpl$3$s(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+              var _ref$2 = flipThumbRef;
+              typeof _ref$2 === "function" ? use(_ref$2, _el$10) : flipThumbRef = _el$10;
+              insert(_el$1, createComponent(For, {
+                get each() {
+                  return profilesList();
+                },
+                children: (profile) => {
+                  let btnRef;
+                  const isSelected = () => (props.ws.default_profile_id || "main") === profile.id;
+                  onMount(() => {
+                    if (isSelected() && btnRef && flipThumbRef) {
+                      btnRef.appendChild(flipThumbRef);
+                      gsapWithCSS.set(flipThumbRef, {
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0
+                      });
+                    }
+                  });
+                  return (() => {
+                    var _el$22 = _tmpl$7$4(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
+                    _el$22.$$click = (e) => {
+                      e.stopPropagation();
+                      if (isSelected()) return;
+                      if (flipThumbRef && btnRef) {
+                        const state = Flip.getState(flipThumbRef);
+                        btnRef.appendChild(flipThumbRef);
+                        Flip.from(state, {
+                          duration: 0.4,
+                          ease: "power3.out",
+                          absolute: true
+                        });
+                      }
+                      props.onSelectProfile(profile.id, profile.name);
+                    };
+                    var _ref$3 = btnRef;
+                    typeof _ref$3 === "function" ? use(_ref$3, _el$22) : btnRef = _el$22;
+                    insert(_el$23, () => profile.name.charAt(0).toUpperCase());
+                    insert(_el$24, () => profile.name);
+                    createRenderEffect((_p$) => {
+                      var _v$3 = `relative flex-1 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-[10px] z-10 text-[11px] font-semibold transition-colors ${isSelected() ? "text-neutral-900" : "text-neutral-500 hover:text-neutral-700"}`, _v$4 = profile.color;
+                      _v$3 !== _p$.e && className(_el$22, _p$.e = _v$3);
+                      _v$4 !== _p$.t && setStyleProperty(_el$23, "background-color", _p$.t = _v$4);
+                      return _p$;
+                    }, {
+                      e: void 0,
+                      t: void 0
+                    });
+                    return _el$22;
+                  })();
+                }
+              }), null);
+              return _el$9;
+            })(), (() => {
+              var _el$11 = _tmpl$4$k(), _el$12 = _el$11.firstChild;
+              _el$12.$$click = (e) => {
+                e.stopPropagation();
+                if (e.currentTarget.textContent?.includes("Confirm")) {
+                  props.onDelete();
+                } else {
+                  e.currentTarget.textContent = "Confirm Delete";
+                }
+              };
+              return _el$11;
+            })()];
+          }
+        }));
+        createRenderEffect((_p$) => {
+          var _v$ = `${props.configPos?.top || 0}px`, _v$2 = `${props.configPos?.left || 0}px`;
+          _v$ !== _p$.e && setStyleProperty(_el$2, "top", _p$.e = _v$);
+          _v$2 !== _p$.t && setStyleProperty(_el$2, "left", _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$2;
+      })(), createComponent(Show, {
+        get when() {
+          return showIconPicker();
+        },
+        get children() {
+          return createComponent(IconPickerPopover, {
+            get currentIcon() {
+              return props.ws.icon;
+            },
+            get pos() {
+              return pickerPos();
+            },
+            onSelectIcon: (iconId) => props.onUpdateIcon?.(iconId),
+            onClose: () => setShowIconPicker(false)
+          });
+        }
+      })];
+    }
+  });
+}
+delegateEvents(["click", "keydown"]);
+var _tmpl$$K = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+function WorkspaceCreateFlyout(props) {
+  const [name, setName] = createSignal("");
+  const [selectedIcon, setSelectedIcon] = createSignal(null);
+  const [showIconPicker, setShowIconPicker] = createSignal(false);
+  const [pickerPos, setPickerPos] = createSignal(null);
+  const handleSubmit = () => {
+    const val = name().trim();
+    if (val) {
+      props.onCreateWorkspace(val, selectedIcon());
+      setName("");
+      setSelectedIcon(null);
+    }
+  };
+  const handleClose = () => {
+    props.setIsCreatingWorkspace(false);
+    setName("");
+    setSelectedIcon(null);
+    setShowIconPicker(false);
+  };
+  return createComponent(Show, {
+    get when() {
+      return memo(() => !!props.isCreatingWorkspace)() && props.createPos;
+    },
+    get children() {
+      return createComponent(Portal, {
+        get children() {
+          return [(() => {
+            var _el$ = _tmpl$$K();
+            _el$.$$click = (e) => {
+              e.stopPropagation();
+              handleClose();
+            };
+            return _el$;
+          })(), (() => {
+            var _el$2 = _tmpl$2$y(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+            _el$2.$$click = (e) => e.stopPropagation();
+            _el$4.$$click = (e) => {
+              e.stopPropagation();
+              const rect = e.currentTarget.getBoundingClientRect();
+              setPickerPos({
+                top: rect.bottom + 8,
+                left: rect.left
+              });
+              setShowIconPicker(!showIconPicker());
+            };
+            insert(_el$4, createComponent(WorkspaceIcon, {
+              get icon() {
+                return selectedIcon();
+              },
+              get name() {
+                return name() || "Workspace";
+              },
+              size: 14,
+              strokeWidth: 1.8
+            }));
+            _el$5.$$keydown = (e) => {
+              if (e.key === "Enter") {
+                handleSubmit();
+              } else if (e.key === "Escape") {
+                handleClose();
+              }
+            };
+            _el$5.$$input = (e) => setName(e.currentTarget.value);
+            _el$6.$$click = handleClose;
+            createRenderEffect((_p$) => {
+              var _v$ = `${props.createPos?.top}px`, _v$2 = `${props.createPos?.left}px`;
+              _v$ !== _p$.e && setStyleProperty(_el$2, "top", _p$.e = _v$);
+              _v$2 !== _p$.t && setStyleProperty(_el$2, "left", _p$.t = _v$2);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            createRenderEffect(() => _el$5.value = name());
+            return _el$2;
+          })(), createComponent(Show, {
+            get when() {
+              return showIconPicker();
+            },
+            get children() {
+              return createComponent(IconPickerPopover, {
+                get currentIcon() {
+                  return selectedIcon();
+                },
+                get pos() {
+                  return pickerPos();
+                },
+                onSelectIcon: (id) => setSelectedIcon(id),
+                onClose: () => setShowIconPicker(false)
+              });
+            }
+          })];
+        }
+      });
+    }
+  });
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$J = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$x = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$j = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+function WorkspaceDock(props) {
+  const [isCreatingHover, setIsCreatingHover] = createSignal(false);
+  const [configOpenId, setConfigOpenId] = createSignal(null);
+  const [configPos, setConfigPos] = createSignal(null);
+  const [createPos, setCreatePos] = createSignal(null);
+  const [cascadePrompt, setCascadePrompt] = createSignal(null);
+  const activeConfigWs = () => props.workspaces.find((w) => w.id === configOpenId());
+  onMount(() => {
+  });
+  return (() => {
+    var _el$ = _tmpl$3$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
+    insert(_el$4, createComponent(For, {
+      get each() {
+        return props.workspaces;
+      },
+      children: (ws) => createComponent(WorkspaceItem, {
+        ws,
+        get isActive() {
+          return props.activeWorkspace === ws.id;
+        },
+        get workspaces() {
+          return props.workspaces;
+        },
+        get activeWorkspace() {
+          return props.activeWorkspace;
+        },
+        get configOpenId() {
+          return configOpenId();
+        },
+        onOpenConfig: (id, rect) => {
+          setConfigPos({
+            top: rect.top,
+            left: rect.right + 12
+          });
+          setConfigOpenId(id);
+        },
+        onCloseConfig: () => setConfigOpenId(null),
+        get onWorkspaceSelect() {
+          return props.onWorkspaceSelect;
+        }
+      })
+    }));
+    _el$6.addEventListener("mouseleave", () => setIsCreatingHover(false));
+    _el$6.addEventListener("mouseenter", () => setIsCreatingHover(true));
+    insert(_el$7, createComponent(Show, {
+      get when() {
+        return props.isCreatingWorkspace;
+      },
+      get fallback() {
+        return (() => {
+          var _el$0 = _tmpl$4$j();
+          _el$0.$$click = (e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setCreatePos({
+              top: rect.top + rect.height / 2,
+              left: rect.right + 12
+            });
+            props.setIsCreatingWorkspace(true, rect);
+          };
+          return _el$0;
+        })();
+      },
+      get children() {
+        return _tmpl$$J();
+      }
+    }));
+    insert(_el$6, createComponent(Show, {
+      get when() {
+        return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
+      },
+      get children() {
+        return _tmpl$2$x();
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return activeConfigWs();
+      },
+      children: (ws) => createComponent(WorkspacePopover, {
+        get ws() {
+          return ws();
+        },
+        get configPos() {
+          return configPos();
+        },
+        onClose: () => setConfigOpenId(null),
+        onRename: (name) => {
+          window.api?.updateWorkspace(ws().id, name, ws().icon);
+          props.onWorkspaceRename?.(ws().id, name);
+        },
+        onUpdateIcon: (icon) => {
+          window.api?.updateWorkspace(ws().id, ws().name, icon);
+          props.onWorkspaceUpdateIcon?.(ws().id, icon);
+        },
+        onSelectProfile: (profileId, profileName) => {
+          setCascadePrompt({
+            profileId: profileId === "main" ? null : profileId,
+            profileName
+          });
+        },
+        onDelete: async () => {
+          await window.api?.deleteWorkspace(ws().id);
+          setConfigOpenId(null);
+          props.onWorkspaceDelete?.(ws().id);
+          if (props.activeWorkspace === ws().id) {
+            const index = props.workspaces.findIndex((w) => w.id === ws().id);
+            const nextWs = props.workspaces[index - 1] || props.workspaces[index + 1];
+            if (nextWs) props.onWorkspaceSelect(nextWs.id, "backward");
+          }
+        },
+        get cascadePrompt() {
+          return cascadePrompt();
+        },
+        onCascadeResponse: async (updatePanes) => {
+          const p = cascadePrompt();
+          if (p) {
+            await window.api?.setWorkspaceDefaultProfile?.(ws().id, p.profileId);
+            props.onWorkspaceUpdateProfile?.(ws().id, p.profileId);
+            if (updatePanes) {
+              await window.api?.updatePaneProfilesForWorkspace(ws().id, p.profileId);
+              props.onWorkspaceSelect(ws().id, "forward");
+            }
+          }
+          setCascadePrompt(null);
+          setConfigOpenId(null);
+        }
+      })
+    }), null);
+    insert(_el$, createComponent(WorkspaceCreateFlyout, {
+      get isCreatingWorkspace() {
+        return props.isCreatingWorkspace;
+      },
+      get createPos() {
+        return createPos();
+      },
+      get onCreateWorkspace() {
+        return props.onCreateWorkspace;
+      },
+      get setIsCreatingWorkspace() {
+        return props.setIsCreatingWorkspace;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$7, `p-[2px] rounded-[12px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] ${isCreatingHover() || props.isCreatingWorkspace ? "bg-neutral-900/10" : "bg-transparent"}`));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$I = /* @__PURE__ */ template(`<div id=workspace-dock class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
+function AppDock(props) {
+  return createComponent(Show, {
+    get when() {
+      return !props.isMaximized;
+    },
+    get children() {
+      var _el$ = _tmpl$$I(), _el$2 = _el$.firstChild;
+      _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
+      var _ref$ = props.dockRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
+      insert(_el$2, createComponent(WorkspaceDock, {
+        get workspaces() {
+          return props.ws.workspaces();
+        },
+        get activeWorkspace() {
+          return props.ws.activeWorkspace();
+        },
+        get isCreatingWorkspace() {
+          return props.ws.isCreatingWorkspace();
+        },
+        setIsCreatingWorkspace: (isCreating, rect) => {
+          if (isCreating && !layoutStore.isPremium && props.ws.workspaces().length >= 1) {
+            if (rect) setLayoutStore("paywallAnchor", {
+              top: rect.top,
+              left: rect.left,
+              width: rect.width,
+              height: rect.height
+            });
+            setLayoutStore("paywallReason", "workspace");
+            setLayoutStore("showPaywall", true);
+            return;
+          }
+          props.ws.setIsCreatingWorkspace(isCreating);
+        },
+        get onWorkspaceSelect() {
+          return props.ws.switchWorkspace;
+        },
+        onCreateWorkspace: (name, icon) => {
+          const id = `ws_${Date.now()}`;
+          window.api?.createWorkspace(id, name, icon).then(() => {
+            props.ws.setWorkspaces([...props.ws.workspaces(), {
+              id,
+              name,
+              icon,
+              default_profile_id: "main"
+            }]);
+            props.ws.setActiveWorkspace(id);
+            props.ws.saveLayout(true);
+            window.api?.getTabs(id).then((t) => {
+              props.ws.setTabs(t || []);
+              if (t && t.length > 0) {
+                props.ws.setActiveTabId(t[0].id);
+                props.ws.loadNodesForTab(t[0].id, t);
+              }
+            });
+            props.ws.setIsCreatingWorkspace(false);
+          }).catch((e) => {
+            console.error("Failed to create workspace:", e);
+            props.ws.setIsCreatingWorkspace(false);
+          });
+        },
+        onWorkspaceRename: (id, name) => props.ws.setWorkspaces(props.ws.workspaces().map((w) => w.id === id ? {
+          ...w,
+          name
+        } : w)),
+        onWorkspaceUpdateIcon: (id, icon) => props.ws.setWorkspaces(props.ws.workspaces().map((w) => w.id === id ? {
+          ...w,
+          icon
+        } : w)),
+        onWorkspaceUpdateProfile: (id, profileId) => props.ws.setWorkspaces(props.ws.workspaces().map((w) => w.id === id ? {
+          ...w,
+          default_profile_id: profileId
+        } : w)),
+        onWorkspaceDelete: (id) => props.ws.setWorkspaces(props.ws.workspaces().filter((w) => w.id !== id)),
+        onOpenSettings: (e) => {
+          const target = e.currentTarget;
+          const rect = target.getBoundingClientRect();
+          setLayoutStore("settingsAnchor", {
+            top: rect.top,
+            left: rect.left,
+            width: rect.width,
+            height: rect.height
+          });
+          setLayoutStore("showSettings", !layoutStore.showSettings);
+        }
+      }));
+      return _el$;
+    }
+  });
+}
+var _tmpl$$H = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$i = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+function AppWindowControls(props) {
+  return createComponent(Show, {
+    get when() {
+      return !props.isMaximized;
+    },
+    get children() {
+      var _el$ = _tmpl$4$i();
+      _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
+      insert(_el$, createComponent(ActionTooltip, {
+        label: "Minimize",
+        get children() {
+          var _el$2 = _tmpl$$H();
+          _el$2.$$click = () => window.api?.minimizeWindow();
+          return _el$2;
+        }
+      }), null);
+      insert(_el$, createComponent(ActionTooltip, {
+        label: "Maximize",
+        get children() {
+          var _el$3 = _tmpl$2$w();
+          _el$3.$$click = () => window.api?.maximizeWindow();
+          return _el$3;
+        }
+      }), null);
+      insert(_el$, createComponent(ActionTooltip, {
+        label: "Close",
+        get children() {
+          var _el$4 = _tmpl$3$q();
+          _el$4.$$click = () => window.api?.closeWindow();
+          return _el$4;
+        }
+      }), null);
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$G = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$p = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$c = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+function AppEdgeZones(props) {
+  return createComponent(Show, {
+    get when() {
+      return memo(() => !!!props.isMaximized)() && (props.uiMode === "collapse" || props.uiMode === "overlap");
+    },
+    get children() {
+      return [(() => {
+        var _el$ = _tmpl$$G();
+        _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
+        return _el$;
+      })(), (() => {
+        var _el$2 = _tmpl$2$v();
+        _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
+        return _el$2;
+      })(), (() => {
+        var _el$3 = _tmpl$3$p();
+        _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
+        return _el$3;
+      })(), (() => {
+        var _el$4 = _tmpl$4$h();
+        _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
+        return _el$4;
+      })(), (() => {
+        var _el$5 = _tmpl$5$c();
+        _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
+        return _el$5;
+      })(), (() => {
+        var _el$6 = _tmpl$6$6();
+        _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
+        return _el$6;
+      })(), (() => {
+        var _el$7 = _tmpl$7$3();
+        _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
+        return _el$7;
+      })(), (() => {
+        var _el$8 = _tmpl$8$2();
+        _el$8.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
+        return _el$8;
+      })()];
+    }
+  });
+}
+function useFeaturebase() {
+  const [hasUnread, setHasUnread] = createSignal(false);
+  onMount(() => {
+    if (document.getElementById("featurebase-sdk")) return;
+    if (typeof window.Featurebase !== "function") {
+      window.Featurebase = function() {
+        (window.Featurebase.q = window.Featurebase.q || []).push(arguments);
+      };
+    }
+    window.Featurebase(
+      "initialize",
+      {
+        organization: "apposition",
+        // Replace with real Org ID later
+        theme: "light"
+      },
+      (err, data) => {
+        if (data?.action === "unread_count_updated" && data.count) {
+          setHasUnread(data.count > 0);
+        }
+      }
+    );
+    const script = document.createElement("script");
+    script.src = "https://do.featurebase.app/js/sdk.js";
+    script.id = "featurebase-sdk";
+    script.async = true;
+    document.head.appendChild(script);
+    const style2 = document.createElement("style");
+    style2.innerHTML = `
+      #featurebase-widget {
+        --fb-primary: #171717 !important;
+        --fb-bg: #ffffff !important;
+        --fb-border: rgba(23, 23, 23, 0.1) !important;
+      }
+    `;
+    document.head.appendChild(style2);
+  });
+  createEffect(() => {
+    if (layoutStore.licenseState?.customer?.email) {
+      window.Featurebase("identify", {
+        email: layoutStore.licenseState.customer.email,
+        name: layoutStore.licenseState.customer.name || "Apposition User"
+      });
+    }
+  });
+  const openFeedback = () => {
+    if (!navigator.onLine) {
+      alert(
+        "You're offline. Reconnect to view the community roadmap and share your thoughts."
+      );
+      return;
+    }
+    window.Featurebase("show");
+  };
+  const openUpdates = () => {
+    if (!navigator.onLine) {
+      alert(
+        "You're offline. Reconnect to view the community roadmap and share your thoughts."
+      );
+      return;
+    }
+    window.Featurebase("showChangelog");
+    setHasUnread(false);
+  };
+  return { openFeedback, openUpdates, hasUnread };
+}
+var _tmpl$$F = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$u = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$o = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$g = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$b = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+function SupportCluster(props) {
+  const {
+    hasUnread
+  } = useFeaturebase();
+  const activeProfile = () => {
+    try {
+      const activePaneId = props.ws?.activePaneId?.();
+      const node = activePaneId ? layoutStore.nodes[activePaneId] : null;
+      const paneProfileId = node?.profileId;
+      const activeTab = props.ws?.tabs?.().find((t) => t.id === props.ws?.activeTabId?.());
+      const tabProfileId = activeTab?.default_profile_id;
+      const targetId = paneProfileId || tabProfileId || "main";
+      return layoutStore.profiles.find((p) => p.id === targetId) || layoutStore.profiles.find((p) => p.id === "main") || {
+        name: "Main",
+        color: "#4a4a49"
+      };
+    } catch {
+      return {
+        name: "Main",
+        color: "#4a4a49"
+      };
+    }
+  };
+  const handleOpenProfiles = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setLayoutStore("settingsAnchor", {
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height
+    });
+    setLayoutStore("settingsActiveTab", "profiles");
+    setLayoutStore("showSettings", !layoutStore.showSettings);
+  };
+  const handleOpenSettings = (e) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    setLayoutStore("settingsAnchor", {
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height
+    });
+    setLayoutStore("settingsActiveTab", "account");
+    setLayoutStore("showSettings", !layoutStore.showSettings);
+  };
+  const handleOpenFeedback = async () => {
+    if (!navigator.onLine) {
+      window.dispatchEvent(new CustomEvent("app:toast", {
+        detail: {
+          message: "You're offline. Reconnect to view the community roadmap and share your thoughts.",
+          type: "error"
+        }
+      }));
+      return;
+    }
+    if (typeof props.ws.handleOpenUrlInPaneOrTab === "function") {
+      props.ws.handleOpenUrlInPaneOrTab("https://apposition.featurebase.app");
+    }
+  };
+  const handleOpenUpdates = (e) => {
+    if (!navigator.onLine) {
+      alert("You're offline. Reconnect to view the community roadmap and share your thoughts.");
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    setLayoutStore("changelogAnchor", {
+      top: rect.top,
+      left: rect.left,
+      width: rect.width,
+      height: rect.height
+    });
+    setLayoutStore("showChangelog", !layoutStore.showChangelog);
+  };
+  return createComponent(Show, {
+    get when() {
+      return !props.isMaximized;
+    },
+    get children() {
+      var _el$ = _tmpl$6$5(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
+      _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
+      insert(_el$2, createComponent(ActionTooltip, {
+        get label() {
+          return `Profile: ${activeProfile().name}`;
+        },
+        get shortcut() {
+          return getShortcutDisplay("switch_profile") || "Alt+P";
+        },
+        placement: "right",
+        get children() {
+          var _el$3 = _tmpl$$F(), _el$4 = _el$3.firstChild;
+          _el$3.$$click = handleOpenProfiles;
+          insert(_el$4, () => (activeProfile().name || "M").charAt(0).toUpperCase());
+          createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", activeProfile().color || "#4a4a49"));
+          return _el$3;
+        }
+      }));
+      insert(_el$6, createComponent(ActionTooltip, {
+        label: "Settings",
+        get shortcut() {
+          return getShortcutDisplay("settings") || "Ctrl+,";
+        },
+        placement: "right",
+        get children() {
+          var _el$7 = _tmpl$2$u();
+          _el$7.$$click = handleOpenSettings;
+          return _el$7;
+        }
+      }));
+      insert(_el$8, createComponent(ActionTooltip, {
+        label: "Release Notes",
+        placement: "right",
+        get children() {
+          var _el$9 = _tmpl$4$g();
+          _el$9.firstChild;
+          _el$9.$$click = handleOpenUpdates;
+          insert(_el$9, createComponent(Show, {
+            get when() {
+              return hasUnread();
+            },
+            get children() {
+              return _tmpl$3$o();
+            }
+          }), null);
+          return _el$9;
+        }
+      }));
+      insert(_el$10, createComponent(ActionTooltip, {
+        label: "Feedback & Roadmap",
+        placement: "right",
+        get children() {
+          var _el$11 = _tmpl$5$b();
+          _el$11.$$click = handleOpenFeedback;
+          return _el$11;
+        }
+      }));
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$E = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$n = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$f = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$a = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+function ActionClusterSplitBar(props) {
+  return (() => {
+    var _el$ = _tmpl$5$a();
+    _el$.addEventListener("mouseleave", () => props.onSplitLeave?.());
+    _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
+    var _ref$ = props.splitBarRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : props.splitBarRef = _el$;
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "Split Left",
+      get shortcut() {
+        return getShortcutDisplay("split_left");
+      },
+      placement: "top",
+      get children() {
+        var _el$2 = _tmpl$$E();
+        _el$2.addEventListener("mouseleave", () => props.onSplitLeave?.());
+        _el$2.addEventListener("mouseenter", () => props.onSplitHover?.("left"));
+        _el$2.$$click = (e) => props.onSplit("left", e);
+        return _el$2;
+      }
+    }), null);
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "Split Right",
+      get shortcut() {
+        return getShortcutDisplay("split_right");
+      },
+      placement: "top",
+      get children() {
+        var _el$3 = _tmpl$2$t();
+        _el$3.addEventListener("mouseleave", () => props.onSplitLeave?.());
+        _el$3.addEventListener("mouseenter", () => props.onSplitHover?.("right"));
+        _el$3.$$click = (e) => props.onSplit("right", e);
+        return _el$3;
+      }
+    }), null);
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "Split Top",
+      get shortcut() {
+        return getShortcutDisplay("split_up");
+      },
+      placement: "top",
+      get children() {
+        var _el$4 = _tmpl$3$n();
+        _el$4.addEventListener("mouseleave", () => props.onSplitLeave?.());
+        _el$4.addEventListener("mouseenter", () => props.onSplitHover?.("top"));
+        _el$4.$$click = (e) => props.onSplit("top", e);
+        return _el$4;
+      }
+    }), null);
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "Split Bottom",
+      get shortcut() {
+        return getShortcutDisplay("split_down");
+      },
+      placement: "top",
+      get children() {
+        var _el$5 = _tmpl$4$f();
+        _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
+        _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
+        _el$5.$$click = (e) => props.onSplit("bottom", e);
+        return _el$5;
+      }
+    }), null);
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$D = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$s = /* @__PURE__ */ template(`<button>`), _tmpl$3$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$e = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$9 = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+function ActionClusterVerticalDock(props) {
+  const isMaximized = () => !!layoutStore.maximizedPaneId;
+  return (() => {
+    var _el$ = _tmpl$4$e(), _el$5 = _el$.firstChild;
+    _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
+    var _ref$ = props.dockRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
+    insert(_el$, createComponent(ActionTooltip, {
+      get label() {
+        return isMaximized() ? "Restore Pane" : "Maximize Pane";
+      },
+      get shortcut() {
+        return getShortcutDisplay("maximize_pane");
+      },
+      placement: "left",
+      get children() {
+        var _el$2 = _tmpl$2$s();
+        addEventListener(_el$2, "click", props.onToggleMaximize, true);
+        insert(_el$2, createComponent(Show, {
+          get when() {
+            return isMaximized();
+          },
+          get fallback() {
+            return _tmpl$5$9();
+          },
+          get children() {
+            return _tmpl$$D();
+          }
+        }));
+        createRenderEffect(() => className(_el$2, `w-[28px] h-[28px] rounded-lg flex items-center justify-center transition-all active:scale-95 active:shadow-double-bezel-active ${isMaximized() ? "bg-neutral-100 text-neutral-900 shadow-inner ring-1 ring-neutral-300/40" : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"}`));
+        return _el$2;
+      }
+    }), _el$5);
+    insert(_el$, createComponent(ActionTooltip, {
+      label: "New Tab",
+      get shortcut() {
+        return getShortcutDisplay("new_tab");
+      },
+      placement: "left",
+      get children() {
+        var _el$4 = _tmpl$3$m();
+        addEventListener(_el$4, "click", props.onCreateTab, true);
+        return _el$4;
+      }
+    }), _el$5);
+    insert(_el$5, createComponent(ProfileMenu$1, {
+      get paneId() {
+        return props.activePaneId;
+      },
+      get currentProfileId() {
+        return props.activeProfileId;
+      },
+      get onUpdatePane() {
+        return props.onUpdatePane;
+      },
+      get showProfileMenu() {
+        return props.showProfileMenu;
+      },
+      get setShowProfileMenu() {
+        return props.setShowProfileMenu;
+      },
+      directionPlacement: "left",
+      buttonStyle: "cluster"
+    }));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$C = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$r = /* @__PURE__ */ template(`<button class="group/btn relative w-[24px] h-[24px] rounded-md hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95 active:shadow-double-bezel-active"style=-webkit-app-region:no-drag><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12>`), _tmpl$3$l = /* @__PURE__ */ template(`<div id=action-cluster class="absolute bottom-2 right-2 z-[60] w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-md flex items-center justify-center hover:bg-neutral-50 transition-colors pointer-events-auto select-none"style=-webkit-app-region:no-drag>`);
+function ActionCluster(props) {
+  const [showProfileMenu, setShowProfileMenu] = createSignal(false);
+  const [isSpinning, setIsSpinning] = createSignal(false);
+  const activePaneId = () => props.ws.activePaneId() || props.ws.findFirstPane?.(layoutStore.rootId) || layoutStore.rootId;
+  const activeNode = () => {
+    const node = layoutStore.nodes[activePaneId()];
+    return node && node.type === "pane" ? node : null;
+  };
+  const handleToggleMaximize = (e) => {
+    e.stopPropagation();
+    const activeId = activePaneId();
+    if (layoutStore.maximizedPaneId) {
+      setLayoutStore("maximizedPaneId", null);
+    } else if (activeId) {
+      setLayoutStore("maximizedPaneId", activeId);
+    }
+  };
+  const handleCreateTab = (e) => {
+    e.stopPropagation();
+    props.onZoneEnter("bottomRight");
+    props.ws.handleCreateTab();
+  };
+  const handleSplit = (direction, e) => {
+    e.stopPropagation();
+    props.onZoneEnter("bottomRight");
+    setLayoutStore("lastSplitDirection", direction);
+    setLayoutStore("splitPreview", null);
+    props.ws.handleSplit(activePaneId(), direction);
+  };
+  const handleSplitHover = (direction) => {
+    setLayoutStore("splitPreview", {
+      paneId: activePaneId(),
+      direction
+    });
+  };
+  const handleSplitLeave = () => {
+    setLayoutStore("splitPreview", null);
+  };
+  const handleHubClick = (e) => {
+    e.stopPropagation();
+    window.dispatchEvent(new CustomEvent("app:zone-leave"));
+  };
+  const handleHubDblClick = (e) => {
+    e.stopPropagation();
+    setIsSpinning(true);
+    setTimeout(() => setIsSpinning(false), 700);
+  };
+  return createComponent(Show, {
+    get when() {
+      return !props.isMaximized;
+    },
+    get children() {
+      return [createComponent(Show, {
+        get when() {
+          return showProfileMenu();
+        },
+        get children() {
+          var _el$ = _tmpl$$C();
+          _el$.$$pointerdown = (e) => {
+            e.stopPropagation();
+            setShowProfileMenu(false);
+          };
+          return _el$;
+        }
+      }), createComponent(ActionClusterSplitBar, {
+        get splitBarRef() {
+          return props.splitBarRef;
+        },
+        get onZoneEnter() {
+          return props.onZoneEnter;
+        },
+        onSplitHover: handleSplitHover,
+        onSplitLeave: handleSplitLeave,
+        onSplit: handleSplit
+      }), createComponent(ActionClusterVerticalDock, {
+        get dockRef() {
+          return props.dockRef;
+        },
+        get onZoneEnter() {
+          return props.onZoneEnter;
+        },
+        get activePaneId() {
+          return activePaneId();
+        },
+        get activeProfileId() {
+          return activeNode()?.profileId || "main";
+        },
+        showProfileMenu,
+        setShowProfileMenu,
+        onToggleMaximize: handleToggleMaximize,
+        onCreateTab: handleCreateTab,
+        get onUpdatePane() {
+          return props.ws.handleUpdatePane;
+        }
+      }), (() => {
+        var _el$2 = _tmpl$3$l();
+        _el$2.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
+        var _ref$ = props.hubRef;
+        typeof _ref$ === "function" ? use(_ref$, _el$2) : props.hubRef = _el$2;
+        insert(_el$2, createComponent(ActionTooltip, {
+          label: "Quick Actions",
+          placement: "top",
+          get children() {
+            var _el$3 = _tmpl$2$r(), _el$4 = _el$3.firstChild;
+            _el$3.addEventListener("auxclick", (e) => {
+              if (e.button === 1) {
+                e.stopPropagation();
+                props.ws.handleCreateTab();
+              }
+            });
+            _el$3.$$dblclick = handleHubDblClick;
+            _el$3.$$click = handleHubClick;
+            createRenderEffect(() => setAttribute(_el$4, "class", `transition-transform ${isSpinning() ? "rotate-[360deg] duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)]" : "group-hover/btn:rotate-45 duration-500 ease-[cubic-bezier(0.32,0.72,0,1)]"}`));
+            return _el$3;
+          }
+        }));
+        return _el$2;
+      })()];
+    }
+  });
+}
+delegateEvents(["pointerdown", "click", "dblclick"]);
+var _tmpl$$B = /* @__PURE__ */ template(`<div><div>`);
+const STYLE_MAP = {
+  md: {
+    outer: "rounded-lg p-1",
+    inner: "rounded"
+  },
+  // 8px - 4px = 4px
+  lg: {
+    outer: "rounded-xl p-1",
+    inner: "rounded-lg"
+  },
+  // 12px - 4px = 8px
+  xl: {
+    outer: "rounded-2xl p-1.5",
+    inner: "rounded-[10px]"
+  },
+  // 16px - 6px = 10px
+  "2xl": {
+    outer: "rounded-[2rem] p-2",
+    inner: "rounded-[24px]"
+  },
+  // 32px - 8px = 24px
+  full: {
+    outer: "rounded-full p-1.5",
+    inner: "rounded-full"
+  },
+  "left-pill": {
+    outer: "rounded-l-full rounded-r-none p-1 pr-0",
+    inner: "rounded-l-full rounded-r-none border-r-0"
+  },
+  "right-pill": {
+    outer: "rounded-r-full rounded-l-none p-1 pl-0",
+    inner: "rounded-r-full rounded-l-none border-l-0"
+  }
+};
+function DoubleBezel(rawProps) {
+  const props = mergeProps({
+    size: "lg",
+    elevation: "flat",
+    interactive: false,
+    variant: "light"
+  }, rawProps);
+  const [local, rest] = splitProps(props, ["size", "elevation", "interactive", "variant", "innerClass", "outerClass", "innerStyle", "class", "children"]);
+  const sizeClasses = STYLE_MAP[local.size];
+  const elevationClasses = local.elevation === "elevated" ? "shadow-double-bezel-elevated" : local.elevation === "active" ? "shadow-double-bezel-active" : "shadow-double-bezel-flat";
+  const interactiveClasses = local.interactive ? "group hover:shadow-double-bezel-elevated transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)]" : "";
+  const isLightOnDark = local.variant === "light-on-dark";
+  const isDark = local.variant === "dark";
+  const outerBg = isLightOnDark ? local.elevation === "active" ? "bg-white/30" : "bg-white/20" : isDark ? local.elevation === "active" ? "bg-white/20" : "bg-white/10" : local.elevation === "active" ? "bg-neutral-200" : "bg-neutral-100";
+  const innerBg = isDark ? "bg-neutral-900" : "bg-white";
+  const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
+  const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
+  return (() => {
+    var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild;
+    spread(_el$, mergeProps({
+      get ["class"]() {
+        return `${outerBg} flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
+      }
+    }, rest), false, true);
+    insert(_el$2, () => local.children);
+    createRenderEffect((_p$) => {
+      var _v$ = `w-full flex-1 border ${innerBorder} ${innerShadow} relative overflow-hidden z-0 transition-colors duration-300 ${innerBg} ${sizeClasses.inner} ${local.innerClass || ""}`, _v$2 = local.innerStyle;
+      _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
+      _p$.t = style(_el$2, _v$2, _p$.t);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0
+    });
+    return _el$;
+  })();
+}
+var _tmpl$$A = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$q = /* @__PURE__ */ template(`<input type=text class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+function CommandBar(props) {
+  const [isFocused, setIsFocused] = createSignal(false);
+  let inputEl;
+  const handleFocus = () => {
+    setIsFocused(true);
+    props.onFocus?.();
+  };
+  const handleBlur = () => {
+    setIsFocused(false);
+    props.onBlur?.();
+  };
+  return createComponent(DoubleBezel, {
+    size: "lg",
+    get elevation() {
+      return isFocused() ? "active" : "flat";
+    },
+    get outerClass() {
+      return `h-12 w-full ${props.class || ""}`;
+    },
+    innerClass: "flex items-center px-3 cursor-text",
+    onClick: (e) => {
+      const target = e.target;
+      if (target.tagName.toLowerCase() === "input") return;
+      if (!target.closest(".profile-menu-container") && !target.closest("button")) {
+        if (inputEl) {
+          inputEl.focus();
+        }
+      }
+    },
+    get children() {
+      return [createComponent(Show, {
+        get when() {
+          return props.icon;
+        },
+        get fallback() {
+          return (() => {
+            var _el$4 = _tmpl$4$d(), _el$5 = _el$4.firstChild;
+            createRenderEffect((_p$) => {
+              var _v$4 = !!isFocused(), _v$5 = !isFocused();
+              _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
+              _v$5 !== _p$.t && _el$5.classList.toggle("text-neutral-400", _p$.t = _v$5);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$4;
+          })();
+        },
+        get children() {
+          var _el$ = _tmpl$$A();
+          insert(_el$, () => props.icon);
+          return _el$;
+        }
+      }), (() => {
+        var _el$2 = _tmpl$2$q();
+        _el$2.addEventListener("blur", handleBlur);
+        _el$2.addEventListener("focus", handleFocus);
+        addEventListener(_el$2, "keydown", props.onKeyDown, true);
+        _el$2.$$input = (e) => props.onInput(e.currentTarget.value);
+        use((el) => {
+          inputEl = el;
+          if (typeof props.ref === "function") {
+            props.ref(el);
+          } else if (props.ref) {
+            props.ref = el;
+          }
+        }, _el$2);
+        createRenderEffect((_p$) => {
+          var _v$ = props.id, _v$2 = props.autofocus, _v$3 = props.placeholder || "Search Google or type a web address...";
+          _v$ !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$);
+          _v$2 !== _p$.t && (_el$2.autofocus = _p$.t = _v$2);
+          _v$3 !== _p$.a && setAttribute(_el$2, "placeholder", _p$.a = _v$3);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0,
+          a: void 0
+        });
+        createRenderEffect(() => _el$2.value = props.value);
+        return _el$2;
+      })(), createComponent(Show, {
+        get when() {
+          return props.rightElement;
+        },
+        get children() {
+          var _el$3 = _tmpl$3$k();
+          insert(_el$3, () => props.rightElement);
+          return _el$3;
+        }
+      })];
+    }
+  });
+}
+delegateEvents(["input", "keydown"]);
+delegateEvents(["click"]);
+var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$p = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$j = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$8 = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+function CommandPalette(props) {
+  const [isOpen, setIsOpen] = createSignal(false);
+  const [query, setQuery] = createSignal("");
+  const [activeIdx, setActiveIdx] = createSignal(0);
+  let inputRef;
+  onMount(() => {
+    const handleKeyDown2 = (e) => {
+      if (e.key === "k" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        setIsOpen(true);
+      } else if (e.key === "Escape") {
+        setIsOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown2);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown2));
+  });
+  createEffect(() => {
+    if (isOpen()) {
+      setActiveIdx(0);
+      setTimeout(() => inputRef?.focus(), 10);
+    } else {
+      setQuery("");
+    }
+  });
+  const matchingWorkspaces = createMemo(() => {
+    const list = props.ws?.workspaces?.() || [];
+    const q = query().trim().toLowerCase();
+    if (!q) return list.slice(0, 4);
+    return list.filter((w) => w.name.toLowerCase().includes(q));
+  });
+  const handleSelectWorkspace = (id) => {
+    props.ws?.switchWorkspace?.(id, "forward");
+    setIsOpen(false);
+  };
+  const handleKeyDown = (e) => {
+    const wsList = matchingWorkspaces();
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.min(wsList.length - 1, i + 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActiveIdx((i) => Math.max(0, i - 1));
+    } else if (e.key === "Enter") {
+      if (wsList.length > 0 && activeIdx() >= 0 && activeIdx() < wsList.length) {
+        handleSelectWorkspace(wsList[activeIdx()].id);
+      } else if (query().includes(".")) {
+        props.onSpawnPane?.({
+          id: `web_${Date.now()}`,
+          type: "web",
+          url: query().startsWith("http") ? query() : `https://${query()}`,
+          profileId: props.ws?.workspaces?.().find((w) => w.id === props.ws?.activeWorkspace?.())?.default_profile_id || "main"
+        });
+        setIsOpen(false);
+      }
+    }
+  };
+  return createComponent(Show, {
+    get when() {
+      return isOpen();
+    },
+    get children() {
+      var _el$ = _tmpl$4$c();
+      _el$.$$click = () => setIsOpen(false);
+      insert(_el$, createComponent(DoubleBezel, {
+        size: "lg",
+        elevation: "elevated",
+        outerClass: "w-[640px] max-h-[60vh] animate-in slide-in-from-top-8 duration-500 ease-[cubic-bezier(0.32,0.72,0,1)]",
+        innerClass: "flex flex-col h-fit",
+        onClick: (e) => e.stopPropagation(),
+        get children() {
+          return [(() => {
+            var _el$2 = _tmpl$$z(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            _el$2.$$click = () => inputRef?.focus();
+            _el$4.$$keydown = handleKeyDown;
+            _el$4.$$input = (e) => {
+              setQuery(e.currentTarget.value);
+              setActiveIdx(0);
+            };
+            var _ref$ = inputRef;
+            typeof _ref$ === "function" ? use(_ref$, _el$4) : inputRef = _el$4;
+            createRenderEffect(() => _el$4.value = query());
+            return _el$2;
+          })(), (() => {
+            var _el$5 = _tmpl$3$j(), _el$8 = _el$5.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
+            insert(_el$5, createComponent(Show, {
+              get when() {
+                return matchingWorkspaces().length > 0;
+              },
+              get children() {
+                var _el$6 = _tmpl$2$p();
+                _el$6.firstChild;
+                insert(_el$6, createComponent(For, {
+                  get each() {
+                    return matchingWorkspaces();
+                  },
+                  children: (ws, idx) => {
+                    const isFocused = () => activeIdx() === idx();
+                    return (() => {
+                      var _el$10 = _tmpl$5$8(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
+                      _el$10.addEventListener("mouseenter", () => setActiveIdx(idx()));
+                      _el$10.$$click = () => handleSelectWorkspace(ws.id);
+                      insert(_el$12, createComponent(WorkspaceIcon, {
+                        get icon() {
+                          return ws.icon;
+                        },
+                        get name() {
+                          return ws.name;
+                        },
+                        size: 13,
+                        strokeWidth: 1.75
+                      }));
+                      insert(_el$13, () => ws.name);
+                      createRenderEffect((_p$) => {
+                        var _v$ = {
+                          "bg-neutral-900 text-white shadow-xs": isFocused(),
+                          "text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80": !isFocused()
+                        }, _v$2 = {
+                          "bg-neutral-800 text-white border border-neutral-700": isFocused(),
+                          "bg-neutral-100 text-neutral-700 border border-neutral-200/60": !isFocused()
+                        };
+                        _p$.e = classList(_el$10, _v$, _p$.e);
+                        _p$.t = classList(_el$12, _v$2, _p$.t);
+                        return _p$;
+                      }, {
+                        e: void 0,
+                        t: void 0
+                      });
+                      return _el$10;
+                    })();
+                  }
+                }), null);
+                return _el$6;
+              }
+            }), _el$8);
+            _el$0.$$click = () => {
+              window.dispatchEvent(new CustomEvent("app:hibernate-pane", {
+                detail: "background"
+              }));
+              setIsOpen(false);
+            };
+            _el$1.$$click = () => {
+              window.dispatchEvent(new CustomEvent("app:hibernate-pane", {
+                detail: "all"
+              }));
+              setIsOpen(false);
+            };
+            return _el$5;
+          })()];
+        }
+      }));
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$y = /* @__PURE__ */ template(`<div><div></div><div>`);
+function Resizer(props) {
+  const onPointerDown = (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startRatio = props.initialRatio;
+    const resizer = e.currentTarget;
+    const container = resizer.parentElement;
+    const rect = container.getBoundingClientRect();
+    const nodeA = container.children[0];
+    const nodeB = container.children[2];
+    let overlay = document.getElementById("resizer-drag-overlay");
+    if (!overlay) {
+      overlay = document.createElement("div");
+      overlay.id = "resizer-drag-overlay";
+      overlay.style.position = "fixed";
+      overlay.style.inset = "0";
+      overlay.style.zIndex = "9999";
+      overlay.style.cursor = props.isHorizontal ? "col-resize" : "row-resize";
+      document.body.appendChild(overlay);
+    }
+    document.body.classList.add("is-resizing");
+    let rafId = null;
+    const onPointerMove = (ev) => {
+      let newRatio = startRatio;
+      if (props.isHorizontal) {
+        const delta = ev.clientX - startX;
+        newRatio = startRatio + delta / rect.width;
+      } else {
+        const delta = ev.clientY - startY;
+        newRatio = startRatio + delta / rect.height;
+      }
+      newRatio = Math.max(0.05, Math.min(0.95, newRatio));
+      if (rafId === null) {
+        rafId = requestAnimationFrame(() => {
+          nodeA.style.flex = `${newRatio} 1 0%`;
+          nodeB.style.flex = `${1 - newRatio} 1 0%`;
+          rafId = null;
+        });
+      }
+    };
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("pointercancel", onPointerUp);
+      window.removeEventListener("mouseleave", onPointerUp);
+      const overlayToRemove = document.getElementById("resizer-drag-overlay");
+      if (overlayToRemove) overlayToRemove.remove();
+      document.body.classList.remove("is-resizing");
+      let finalRatio = startRatio;
+      if (props.isHorizontal) {
+        const delta = window.__lastPointerX - startX;
+        finalRatio = startRatio + delta / rect.width;
+      } else {
+        const delta = window.__lastPointerY - startY;
+        finalRatio = startRatio + delta / rect.height;
+      }
+      finalRatio = Math.max(0.05, Math.min(0.95, finalRatio));
+      props.onRatioChange(finalRatio);
+    };
+    const trackPos = (ev) => {
+      window.__lastPointerX = ev.clientX;
+      window.__lastPointerY = ev.clientY;
+    };
+    window.addEventListener("pointermove", trackPos);
+    window.addEventListener("pointermove", onPointerMove);
+    const cleanupPos = () => window.removeEventListener("pointermove", trackPos);
+    window.addEventListener("pointerup", cleanupPos);
+    window.addEventListener("pointerup", onPointerUp);
+    window.addEventListener("pointercancel", cleanupPos);
+    window.addEventListener("pointercancel", onPointerUp);
+    window.addEventListener("mouseleave", cleanupPos);
+    window.addEventListener("mouseleave", onPointerUp);
+  };
+  return (() => {
+    var _el$ = _tmpl$$y(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    _el$.$$pointerdown = onPointerDown;
+    createRenderEffect((_p$) => {
+      var _v$ = `relative flex items-center justify-center bg-transparent z-20 group pointer-events-auto shrink-0 ${props.isHorizontal ? "w-3 cursor-col-resize -mx-1.5" : "h-3 cursor-row-resize -my-1.5"}`, _v$2 = `bg-transparent group-hover:bg-neutral-400/60 group-active:bg-neutral-800 transition-colors duration-150 ${props.isHorizontal ? "w-[1px] h-full" : "h-[1px] w-full"}`, _v$3 = `absolute rounded-full bg-neutral-200 border border-neutral-400/50 shadow-sm opacity-0 group-hover:opacity-100 group-active:scale-95 transition-all duration-150 ${props.isHorizontal ? "w-1 h-6" : "h-1 w-6"}`;
+      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+      _v$2 !== _p$.t && className(_el$2, _p$.t = _v$2);
+      _v$3 !== _p$.a && className(_el$3, _p$.a = _v$3);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["pointerdown"]);
+const SPLIT_PREVIEW_GHOST_ID = "__split_preview_ghost__";
+function getComputedPreviewTree() {
+  const preview = layoutStore.splitPreview;
+  if (!preview || !layoutStore.rootId) {
+    return { rootId: layoutStore.rootId, nodes: layoutStore.nodes };
+  }
+  let targetId = preview.paneId;
+  if (!targetId || !layoutStore.nodes[targetId] || layoutStore.nodes[targetId]?.type !== "pane") {
+    targetId = Object.keys(layoutStore.nodes).find(
+      (k) => layoutStore.nodes[k]?.type === "pane"
+    ) || layoutStore.rootId;
+  }
+  const targetNode = layoutStore.nodes[targetId];
+  if (!targetNode || targetNode.type !== "pane") {
+    return { rootId: layoutStore.rootId, nodes: layoutStore.nodes };
+  }
+  const dirLabel = preview.direction === "left" ? "Split Left" : preview.direction === "top" ? "Split Top" : preview.direction === "bottom" ? "Split Bottom" : "Split Right";
+  const currentTree = {
+    rootId: layoutStore.rootId,
+    nodes: layoutStore.nodes,
+    generation: 0
+  };
+  try {
+    const [nextTree] = reduceLayout(currentTree, {
+      type: "SPLIT_PANE",
+      targetId,
+      newPane: {
+        type: "pane",
+        id: SPLIT_PREVIEW_GHOST_ID,
+        paneType: "web",
+        url: "",
+        title: dirLabel,
+        profileId: "main"
+      },
+      direction: preview.direction,
+      ratio: 0.5
+    });
+    return {
+      rootId: nextTree.rootId || layoutStore.rootId,
+      nodes: nextTree.nodes
+    };
+  } catch (err) {
+    console.error("[previewLayoutTree] Failed to compute split preview tree", err);
+    return { rootId: layoutStore.rootId, nodes: layoutStore.nodes };
+  }
+}
+const SPATIAL_TOKENS = {
+  /** Margin from physical window edge to all buttons & resting canvas (px) */
+  baseMargin: 8,
+  /** Standard floating pill / hub dimension (px) */
+  buttonSize: 40,
+  /** Air gap between buttons, and between buttons and panes (px) */
+  buttonGap: 8,
+  /** Pane outer double bezel cushion (px) */
+  outerBezel: 8,
+  /** Total inter-pane split divider gap (px) */
+  splitGap: 8,
+  /** Half split gap allocated per pane (px) */
+  get halfSplitGap() {
+    return this.splitGap / 2;
+  },
+  /** Expanded offset for topbar, dock, and action cluster (px) */
+  get expandedOffset() {
+    return this.baseMargin + this.buttonSize + this.buttonGap;
+  },
+  /** Exact symmetrical inset padding for canvas (px) */
+  get insetPad() {
+    return this.baseMargin + this.buttonSize + this.buttonGap;
+  }
+};
+const DEFAULT_SPATIAL_CONFIG = {
+  outerBezel: SPATIAL_TOKENS.outerBezel,
+  splitGap: SPATIAL_TOKENS.splitGap
+};
+function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximizedPaneId) {
+  const result = {};
+  if (!tree.rootId || !tree.nodes[tree.rootId]) {
+    return result;
+  }
+  const halfGap = config3.splitGap / 2;
+  if (maximizedPaneId && tree.nodes[maximizedPaneId]) {
+    result[maximizedPaneId] = {
+      pt: config3.outerBezel,
+      pr: config3.outerBezel,
+      pb: config3.outerBezel,
+      pl: config3.outerBezel
+    };
+    return result;
+  }
+  function traverse(nodeId, bounds) {
+    const node = tree.nodes[nodeId];
+    if (!node) return;
+    if (node.type === "pane") {
+      const touchesLeft = bounds.x0 <= 1e-4;
+      const touchesRight = bounds.x1 >= 0.9999;
+      const touchesTop = bounds.y0 <= 1e-4;
+      const touchesBottom = bounds.y1 >= 0.9999;
+      result[node.id] = {
+        pl: touchesLeft ? config3.outerBezel : halfGap,
+        pr: touchesRight ? config3.outerBezel : halfGap,
+        pt: touchesTop ? config3.outerBezel : halfGap,
+        pb: touchesBottom ? config3.outerBezel : halfGap
+      };
+      return;
+    }
+    if (node.type === "split") {
+      const ratio = Math.max(0.05, Math.min(0.95, node.ratio || 0.5));
+      if (node.direction === "horizontal") {
+        const splitX = bounds.x0 + (bounds.x1 - bounds.x0) * ratio;
+        traverse(node.a, { ...bounds, x1: splitX });
+        traverse(node.b, { ...bounds, x0: splitX });
+      } else {
+        const splitY = bounds.y0 + (bounds.y1 - bounds.y0) * ratio;
+        traverse(node.a, { ...bounds, y1: splitY });
+        traverse(node.b, { ...bounds, y0: splitY });
+      }
+    }
+  }
+  traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
+  return result;
+}
+var _tmpl$$x = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$o = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$i = /* @__PURE__ */ template(`<button>`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$4 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$2 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+function PaneIsland(props) {
+  const [showSplitMenu, setShowSplitMenu] = createSignal(false);
+  const [showProfileMenu, setShowProfileMenu] = createSignal(false);
+  const isMaximized = () => layoutStore.maximizedPaneId === props.node?.id;
+  const isAnyMenuOpen = () => showSplitMenu() || showProfileMenu();
+  return createComponent(Show, {
+    get when() {
+      return memo(() => !!props.node)() && !props.isDraggingThis?.();
+    },
+    get children() {
+      return [createComponent(Show, {
+        get when() {
+          return showSplitMenu() || showProfileMenu();
+        },
+        get children() {
+          var _el$ = _tmpl$$x();
+          _el$.$$pointerdown = (e) => {
+            e.stopPropagation();
+            setShowSplitMenu(false);
+            setShowProfileMenu(false);
+          };
+          return _el$;
+        }
+      }), (() => {
+        var _el$2 = _tmpl$6$4(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
+        insert(_el$4, createComponent(ProfileMenu$1, {
+          get node() {
+            return props.node;
+          },
+          get onUpdatePane() {
+            return props.onUpdatePane;
+          },
+          showProfileMenu,
+          setShowProfileMenu,
+          setShowSplitMenu
+        }), _el$5);
+        insert(_el$4, createComponent(SplitMenu, {
+          get paneId() {
+            return props.node.id;
+          },
+          get onSplit() {
+            return props.onSplit;
+          },
+          showSplitMenu,
+          setShowSplitMenu,
+          setShowProfileMenu
+        }), _el$6);
+        insert(_el$4, createComponent(ActionTooltip, {
+          get label() {
+            return isMaximized() ? "Restore View" : "Focus Mode";
+          },
+          get shortcut() {
+            return getShortcutDisplay("maximize_pane") || "Alt+F";
+          },
+          placement: "bottom",
+          get children() {
+            var _el$7 = _tmpl$3$i();
+            _el$7.$$click = (e) => {
+              e.stopPropagation();
+              setLayoutStore("maximizedPaneId", isMaximized() ? null : props.node.id);
+            };
+            _el$7.$$pointerdown = (e) => e.stopPropagation();
+            insert(_el$7, createComponent(Show, {
+              get when() {
+                return isMaximized();
+              },
+              get fallback() {
+                return _tmpl$7$2();
+              },
+              get children() {
+                return _tmpl$2$o();
+              }
+            }));
+            createRenderEffect(() => className(_el$7, `w-7 h-7 rounded-[10px] flex items-center justify-center transition-all active:scale-95 shrink-0 ${isMaximized() ? "bg-neutral-900 text-white shadow-sm" : "text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100"}`));
+            return _el$7;
+          }
+        }), _el$9);
+        insert(_el$4, createComponent(ActionTooltip, {
+          label: "Drag to Move",
+          placement: "bottom",
+          get children() {
+            var _el$0 = _tmpl$4$b();
+            _el$0.$$pointerdown = (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              window.dispatchEvent(new CustomEvent("app:dragstart", {
+                detail: {
+                  id: props.node.id,
+                  e
+                }
+              }));
+            };
+            return _el$0;
+          }
+        }), _el$1);
+        insert(_el$4, createComponent(ActionTooltip, {
+          label: "Close Pane",
+          shortcut: "Ctrl+W",
+          placement: "bottom",
+          get children() {
+            var _el$10 = _tmpl$5$7();
+            _el$10.$$click = (e) => {
+              e.stopPropagation();
+              props.onClose(props.node.id);
+            };
+            _el$10.$$pointerdown = (e) => e.stopPropagation();
+            return _el$10;
+          }
+        }), null);
+        createRenderEffect((_p$) => {
+          var _v$ = `relative pointer-events-auto flex items-center justify-center transition-all duration-200 ease-out origin-top
+          ${isAnyMenuOpen() ? "overflow-visible w-auto h-9 p-1 px-1.5 mt-1.5 rounded-xl shadow-md border border-neutral-200/60 bg-white" : "overflow-hidden w-20 h-1.5 mt-0 bg-neutral-300/80 rounded-b-md shadow-none border border-transparent border-t-0 group-hover/island:h-9 group-hover/island:bg-white group-hover/island:border-neutral-200/60 group-hover/island:shadow-[0_4px_16px_-4px_rgba(0,0,0,0.08)] group-hover/island:rounded-b-xl group-hover/island:rounded-t-none group-hover/island:p-1 group-hover/island:px-1.5 group-hover/island:w-auto"}
+        `, _v$2 = `flex items-center gap-0.5 transition-all duration-200 ease-out justify-center w-auto
+            ${isAnyMenuOpen() ? "opacity-100 translate-y-0" : "opacity-0 -translate-y-2 group-hover/island:opacity-100 group-hover/island:translate-y-0"}`;
+          _v$ !== _p$.e && className(_el$3, _p$.e = _v$);
+          _v$2 !== _p$.t && className(_el$4, _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$2;
+      })()];
+    }
+  });
+}
+delegateEvents(["pointerdown", "click"]);
+var _tmpl$$w = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+function PaneNode(props) {
+  const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
+  const isTarget = () => props.dragTarget?.id === props.node.id;
+  const isDraggingThis = () => props.activeDragId === props.node.id;
+  const profileColor = () => layoutStore.profiles.find((p) => p.id === (props.node.profileId || "main"))?.color || "#3b82f6";
+  const padding = createMemo(() => {
+    const padMap = computeSpatialPadding({
+      rootId: layoutStore.rootId,
+      nodes: props.nodes || layoutStore.nodes,
+      generation: layoutStore.generation ?? 0
+    }, {
+      outerBezel: SPATIAL_TOKENS.outerBezel,
+      splitGap: SPATIAL_TOKENS.splitGap
+    }, layoutStore.maximizedPaneId);
+    return padMap[props.node.id] || {
+      pt: SPATIAL_TOKENS.outerBezel,
+      pr: SPATIAL_TOKENS.outerBezel,
+      pb: SPATIAL_TOKENS.outerBezel,
+      pl: SPATIAL_TOKENS.outerBezel
+    };
+  });
+  const isFocused = () => !layoutStore.maximizedPaneId && props.activePaneId === props.node.id && !props.isOnlyPane && !window.IS_WEB_DEMO;
+  const focusStyle = () => {
+    if (!isFocused()) return {};
+    const col = profileColor();
+    return {
+      "box-shadow": `0 0 0 1.5px ${col}b0, 0 0 0 3px ${col}18, 0 4px 16px -2px ${col}1e, inset 0 1px 0 rgba(255,255,255,0.9), inset 0 0 0 1px rgba(0,0,0,0.04)`
+    };
+  };
+  onMount(() => {
+    if (!isPreviewGhost()) {
+      window.dispatchEvent(new CustomEvent("pane-target-mounted", {
+        detail: props.node.id
+      }));
+    }
+  });
+  return createComponent(Show, {
+    get when() {
+      return !isPreviewGhost();
+    },
+    get fallback() {
+      return (() => {
+        var _el$13 = _tmpl$4$a(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
+        insert(_el$15, () => props.node.title || "Split Preview");
+        return _el$13;
+      })();
+    },
+    get children() {
+      var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
+      _el$.$$click = () => props.onActivePaneChange(props.node.id);
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return memo(() => !!isTarget())() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "top");
+        },
+        get children() {
+          var _el$4 = _tmpl$$w();
+          insert(_el$4, () => props.dragTarget?.direction === "left" ? "Drop Left" : "Drop Top");
+          return _el$4;
+        }
+      }), _el$5);
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return memo(() => !!isTarget())() && props.dragTarget?.direction === "replace";
+        },
+        get children() {
+          return _tmpl$2$n();
+        }
+      }), null);
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return memo(() => !!isTarget())() && (props.dragTarget?.direction === "right" || props.dragTarget?.direction === "bottom");
+        },
+        get children() {
+          var _el$7 = _tmpl$$w();
+          insert(_el$7, () => props.dragTarget?.direction === "right" ? "Drop Right" : "Drop Bottom");
+          return _el$7;
+        }
+      }), null);
+      _el$0.$$click = (e) => {
+        e.stopPropagation();
+        props.onSplit(props.node.id, "bottom");
+      };
+      _el$10.$$click = (e) => {
+        e.stopPropagation();
+        props.onSplit(props.node.id, "left");
+      };
+      _el$12.$$click = (e) => {
+        e.stopPropagation();
+        props.onSplit(props.node.id, "right");
+      };
+      insert(_el$2, createComponent(PaneIsland, {
+        get node() {
+          return props.node;
+        },
+        get isOnlyPane() {
+          return props.isOnlyPane;
+        },
+        get onSplit() {
+          return props.onSplit;
+        },
+        get onClose() {
+          return props.onClose;
+        },
+        get onUpdatePane() {
+          return props.onUpdatePane;
+        },
+        isDraggingThis
+      }), null);
+      createRenderEffect((_p$) => {
+        var _v$ = `w-full h-full relative group/pane-container pointer-events-none ${props.activePaneId === props.node.id ? "z-20" : "z-10"}`, _v$2 = `${padding().pt}px`, _v$3 = `${padding().pr}px`, _v$4 = `${padding().pb}px`, _v$5 = `${padding().pl}px`, _v$6 = props.node.id, _v$7 = `w-full h-full relative overflow-visible flex flex-col pointer-events-none rounded-[14px] transition-shadow duration-200 ease-out ${isDraggingThis() || layoutStore.maximizedPaneId ? "opacity-0" : ""}`, _v$8 = focusStyle(), _v$9 = `flex-1 w-full h-full flex transition-all duration-200 gap-1.5 relative ${isTarget() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "right") ? "flex-row" : "flex-col"}`, _v$0 = `pane-container-${props.node.id}`;
+        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$, "padding-top", _p$.t = _v$2);
+        _v$3 !== _p$.a && setStyleProperty(_el$, "padding-right", _p$.a = _v$3);
+        _v$4 !== _p$.o && setStyleProperty(_el$, "padding-bottom", _p$.o = _v$4);
+        _v$5 !== _p$.i && setStyleProperty(_el$, "padding-left", _p$.i = _v$5);
+        _v$6 !== _p$.n && setAttribute(_el$, "data-pane-id", _p$.n = _v$6);
+        _v$7 !== _p$.s && className(_el$2, _p$.s = _v$7);
+        _p$.h = style(_el$2, _v$8, _p$.h);
+        _v$9 !== _p$.r && className(_el$3, _p$.r = _v$9);
+        _v$0 !== _p$.d && setAttribute(_el$5, "id", _p$.d = _v$0);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0,
+        a: void 0,
+        o: void 0,
+        i: void 0,
+        n: void 0,
+        s: void 0,
+        h: void 0,
+        r: void 0,
+        d: void 0
+      });
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$v = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$m = /* @__PURE__ */ template(`<div>`);
+function LayoutNode(props) {
+  const node = () => (props.nodes || layoutStore.nodes)[props.nodeId];
+  return createComponent(Show, {
+    get when() {
+      return node()?.type === "split";
+    },
+    get fallback() {
+      return createComponent(Show, {
+        get when() {
+          return node()?.type === "pane";
+        },
+        get children() {
+          return createComponent(PaneNode, {
+            get activePaneId() {
+              return props.activePaneId;
+            },
+            get onActivePaneChange() {
+              return props.onActivePaneChange;
+            },
+            get onSplit() {
+              return props.onSplit;
+            },
+            get onClose() {
+              return props.onClose;
+            },
+            get isOnlyPane() {
+              return props.isOnlyPane;
+            },
+            get dragTarget() {
+              return props.dragTarget;
+            },
+            get activeDragId() {
+              return props.activeDragId;
+            },
+            get onUpdatePane() {
+              return props.onUpdatePane;
+            },
+            get node() {
+              return node();
+            },
+            get nodes() {
+              return props.nodes;
+            }
+          });
+        }
+      });
+    },
+    get children() {
+      var _el$ = _tmpl$2$m();
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return props.activeDragId !== node().a;
+        },
+        get children() {
+          var _el$2 = _tmpl$$v();
+          insert(_el$2, createComponent(LayoutNode, {
+            get nodeId() {
+              return node().a;
+            },
+            get activePaneId() {
+              return props.activePaneId;
+            },
+            get onActivePaneChange() {
+              return props.onActivePaneChange;
+            },
+            get onSplit() {
+              return props.onSplit;
+            },
+            get onClose() {
+              return props.onClose;
+            },
+            get onRatioChange() {
+              return props.onRatioChange;
+            },
+            get isOnlyPane() {
+              return props.isOnlyPane;
+            },
+            get dragTarget() {
+              return props.dragTarget;
+            },
+            get activeDragId() {
+              return props.activeDragId;
+            },
+            get onUpdatePane() {
+              return props.onUpdatePane;
+            },
+            get nodes() {
+              return props.nodes;
+            }
+          }));
+          createRenderEffect((_$p) => setStyleProperty(_el$2, "flex", props.activeDragId === node().b ? 1 : node().ratio));
+          return _el$2;
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return memo(() => props.activeDragId !== node().a)() && props.activeDragId !== node().b;
+        },
+        get children() {
+          return createComponent(Resizer, {
+            get isHorizontal() {
+              return node().direction === "horizontal";
+            },
+            onRatioChange: (newRatio) => props.onRatioChange(node().id, newRatio),
+            get initialRatio() {
+              return node().ratio;
+            }
+          });
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return props.activeDragId !== node().b;
+        },
+        get children() {
+          var _el$3 = _tmpl$$v();
+          insert(_el$3, createComponent(LayoutNode, {
+            get nodeId() {
+              return node().b;
+            },
+            get activePaneId() {
+              return props.activePaneId;
+            },
+            get onActivePaneChange() {
+              return props.onActivePaneChange;
+            },
+            get onSplit() {
+              return props.onSplit;
+            },
+            get onClose() {
+              return props.onClose;
+            },
+            get onRatioChange() {
+              return props.onRatioChange;
+            },
+            get isOnlyPane() {
+              return props.isOnlyPane;
+            },
+            get dragTarget() {
+              return props.dragTarget;
+            },
+            get activeDragId() {
+              return props.activeDragId;
+            },
+            get onUpdatePane() {
+              return props.onUpdatePane;
+            },
+            get nodes() {
+              return props.nodes;
+            }
+          }));
+          createRenderEffect((_$p) => setStyleProperty(_el$3, "flex", props.activeDragId === node().a ? 1 : 1 - node().ratio));
+          return _el$3;
+        }
+      }), null);
+      createRenderEffect(() => className(_el$, `w-full h-full flex ${node()?.type === "split" && node().direction === "horizontal" ? "flex-row" : "flex-col"} overflow-visible pointer-events-none`));
+      return _el$;
+    }
+  });
+}
+var _tmpl$$u = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
+function AbsolutePane(props) {
+  let paneRef;
+  const [style$1, setStyle] = createSignal({
+    top: "0px",
+    left: "0px",
+    width: "0px",
+    height: "0px",
+    opacity: "0"
+  });
+  const [hasPosition, setHasPosition] = createSignal(false);
+  const [isEntering, setIsEntering] = createSignal(true);
+  const [isFlashing, setIsFlashing] = createSignal(false);
+  onMount(() => {
+    let ro = null;
+    const updatePosition = () => {
+      if (props.isDragging) return;
+      const target2 = document.getElementById(props.targetId);
+      const container2 = document.getElementById("main-canvas");
+      if (!target2 || !container2) {
+        if (!hasPosition()) {
+          setStyle((s) => ({
+            ...s,
+            opacity: "0"
+          }));
+          if (props.paneId) {
+            window.api?.viewSetBounds?.(props.paneId, {
+              x: -1e4,
+              y: -1e4,
+              width: 0,
+              height: 0
+            });
+          }
+        }
+        return;
+      }
+      const rect = target2.getBoundingClientRect();
+      const containerRect = container2.getBoundingClientRect();
+      const isMaximized = layoutStore.maximizedPaneId === props.paneId;
+      if (layoutStore.maximizedPaneId && !isMaximized) {
+        setStyle((s) => ({
+          ...s,
+          opacity: "0"
+        }));
+        if (props.paneId) {
+          window.api?.viewSetBounds?.(props.paneId, {
+            x: -1e4,
+            y: -1e4,
+            width: 0,
+            height: 0
+          });
+        }
+        return;
+      }
+      if (rect.width === 0 && rect.height === 0) {
+        return;
+      }
+      const scaleX = container2.offsetWidth > 0 ? containerRect.width / container2.offsetWidth : 1;
+      const scaleY = container2.offsetHeight > 0 ? containerRect.height / container2.offsetHeight : 1;
+      const relX = isMaximized ? 12 : Math.round((rect.left - containerRect.left) / scaleX);
+      const relY = isMaximized ? 12 : Math.round((rect.top - containerRect.top) / scaleY);
+      const finalWidth = isMaximized ? Math.round(container2.offsetWidth - 24) : Math.round(rect.width / scaleX);
+      const finalHeight = isMaximized ? Math.round(container2.offsetHeight - 24) : Math.round(rect.height / scaleY);
+      setStyle({
+        top: `${relY}px`,
+        left: `${relX}px`,
+        width: `${finalWidth}px`,
+        height: `${finalHeight}px`,
+        opacity: "1"
+      });
+      if (!hasPosition()) {
+        setHasPosition(true);
+        if (props.isActive) {
+          setIsFlashing(true);
+          setTimeout(() => setIsFlashing(false), 350);
+        }
+        setTimeout(() => setIsEntering(false), 350);
+      }
+    };
+    let rafId = null;
+    const scheduleUpdate = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        updatePosition();
+      });
+    };
+    ro = new ResizeObserver(scheduleUpdate);
+    const target = document.getElementById(props.targetId);
+    if (target) {
+      ro.observe(target);
+    }
+    const container = document.getElementById("main-canvas");
+    if (container) {
+      ro.observe(container);
+    }
+    updatePosition();
+    window.addEventListener("resize", scheduleUpdate);
+    const onTargetMounted = (e) => {
+      if (`pane-container-${e.detail}` === props.targetId) {
+        const t = document.getElementById(props.targetId);
+        if (t && ro) {
+          ro.observe(t);
+        }
+        updatePosition();
+      }
+    };
+    const onLayoutSync = () => {
+      updatePosition();
+      if (props.isActive) {
+        setIsFlashing(true);
+        setTimeout(() => setIsFlashing(false), 400);
+      }
+    };
+    window.addEventListener("pane-target-mounted", onTargetMounted);
+    window.addEventListener("app:dragend", updatePosition);
+    window.addEventListener("app:layout-sync", onLayoutSync);
+    createEffect(() => {
+      layoutStore.maximizedPaneId;
+      requestAnimationFrame(updatePosition);
+    });
+    onCleanup(() => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      window.removeEventListener("pane-target-mounted", onTargetMounted);
+      window.removeEventListener("app:dragend", updatePosition);
+      window.removeEventListener("app:layout-sync", onLayoutSync);
+      window.removeEventListener("resize", scheduleUpdate);
+      if (ro) ro.disconnect();
+    });
+  });
+  return (() => {
+    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
+    var _ref$ = paneRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
+    insert(_el$2, () => props.children);
+    createRenderEffect((_p$) => {
+      var _v$ = `absolute z-0 absolute-pane-container overflow-hidden p-0 bg-transparent rounded-[12px] will-change-[top,left,width,height] ${props.isGlobalDragging ? "pointer-events-none" : "pointer-events-auto"} ${props.isDragging ? "transition-transform duration-75" : hasPosition() && !isEntering() ? "transition-[top,left,width,height] duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]" : "transition-none"} ${isEntering() ? "animate-in fade-in zoom-in-[0.97] duration-300 ease-out" : ""}`, _v$2 = layoutStore.maximizedPaneId === props.paneId ? {
+        ...style$1(),
+        "z-index": 9990,
+        opacity: props.isReplaceTarget ? "0" : "1"
+      } : {
+        ...style$1(),
+        "transform-origin": "center",
+        "z-index": props.isDragging ? 9999 : 0,
+        "box-shadow": props.isDragging ? "0 25px 50px -12px rgba(0, 0, 0, 0.45)" : "",
+        opacity: props.isReplaceTarget ? "0.4" : props.isDragging ? "0.92" : "1",
+        filter: props.isDragging ? "blur(0.2px)" : "none"
+      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border ${props.isActive ? "border-neutral-300 dark:border-neutral-700 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_2px_12px_rgba(0,0,0,0.06)]" : "border-neutral-200/50 dark:border-neutral-800 shadow-[0_2px_8px_rgba(0,0,0,0.04)]"} overflow-hidden relative z-50 transition-all ${isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
+      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+      _p$.t = style(_el$, _v$2, _p$.t);
+      _v$3 !== _p$.a && setAttribute(_el$, "data-target-id", _p$.a = _v$3);
+      _v$4 !== _p$.o && className(_el$2, _p$.o = _v$4);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0
+    });
+    return _el$;
+  })();
 }
 function useDefaultPanelController(props) {
   const [urlInput, setUrlInput] = createSignal(
@@ -14637,7 +18987,7 @@ function useDefaultPanelController(props) {
     handleKeyDown
   };
 }
-var _tmpl$$s = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
+var _tmpl$$t = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
 function WorkspaceNotes(props) {
   const [notes, setNotes] = createSignal("");
   let textareaRef;
@@ -14665,7 +19015,7 @@ function WorkspaceNotes(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$s(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild;
     _el$.$$click = () => {
       if (textareaRef) {
         textareaRef.focus();
@@ -14682,14 +19032,14 @@ function WorkspaceNotes(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$r = /* @__PURE__ */ template(`<div class="fixed inset-0 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center z-[100] p-4"><div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-xs shadow-xl p-5 space-y-4 relative animate-in fade-in zoom-in-95 duration-150"><div class=space-y-1><h3 class="text-xs font-bold text-neutral-800">Add Workspace Shortcut</h3><p class="text-[9px] text-neutral-400 font-semibold uppercase tracking-wider">Save a quick link to this dashboard</p></div><div class=space-y-3><div class=space-y-1><label class="text-[9px] font-extrabold text-neutral-400 uppercase tracking-wider">Website URL</label><input type=text class="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-300 focus:ring-1 focus:ring-neutral-300 font-medium"placeholder="e.g. app.todoist.com, figma.com"></div></div><div class="flex items-center justify-end gap-2 pt-1"><button class="text-[9px] font-bold text-neutral-400 hover:text-neutral-600 px-3 py-1.5 cursor-pointer">Cancel</button><button class="text-[9px] font-bold bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer">Add Shortcut`);
+var _tmpl$$s = /* @__PURE__ */ template(`<div class="fixed inset-0 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center z-[100] p-4"><div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-xs shadow-xl p-5 space-y-4 relative animate-in fade-in zoom-in-95 duration-150"><div class=space-y-1><h3 class="text-xs font-bold text-neutral-800">Add Workspace Shortcut</h3><p class="text-[9px] text-neutral-400 font-semibold uppercase tracking-wider">Save a quick link to this dashboard</p></div><div class=space-y-3><div class=space-y-1><label class="text-[9px] font-extrabold text-neutral-400 uppercase tracking-wider">Website URL</label><input type=text class="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-300 focus:ring-1 focus:ring-neutral-300 font-medium"placeholder="e.g. app.todoist.com, figma.com"></div></div><div class="flex items-center justify-end gap-2 pt-1"><button class="text-[9px] font-bold text-neutral-400 hover:text-neutral-600 px-3 py-1.5 cursor-pointer">Cancel</button><button class="text-[9px] font-bold bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer">Add Shortcut`);
 function AddCustomAppModal(props) {
   return createComponent(Show, {
     get when() {
       return props.show;
     },
     get children() {
-      var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+      var _el$ = _tmpl$$s(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
       _el$7.$$input = (e) => props.setNewAppUrl(e.currentTarget.value);
       addEventListener(_el$9, "click", props.onClose, true);
       _el$0.$$click = () => props.onSave(props.newAppUrl);
@@ -14700,16 +19050,16 @@ function AddCustomAppModal(props) {
   });
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$q = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$k = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
+var _tmpl$$r = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
 function PinnedShortcuts(props) {
   return (() => {
-    var _el$ = _tmpl$$q(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     insert(_el$2, createComponent(For, {
       get each() {
         return props.profileApps;
       },
       children: (app, idx) => (() => {
-        var _el$4 = _tmpl$2$k(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$l(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         _el$4.addEventListener("drop", (e) => props.onDrop(idx(), e));
         addEventListener(_el$4, "dragover", props.onDragOver);
         _el$4.addEventListener("dragstart", (e) => props.onDragStart(idx(), e));
@@ -14735,108 +19085,11 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$p = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/60 p-1.5 max-h-[220px] overflow-y-auto z-50">`), _tmpl$2$j = /* @__PURE__ */ template(`<span class="text-[8px] text-neutral-400 font-medium truncate">`), _tmpl$3$f = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-400 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0">Launch`), _tmpl$4$9 = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$7 = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded bg-neutral-100 shrink-0">`);
-function CommandBarDropdown(props) {
-  return createComponent(Show, {
-    get when() {
-      return memo(() => !!props.show)() && props.suggestions.length > 0;
-    },
-    get children() {
-      var _el$ = _tmpl$$p();
-      var _ref$ = props.containerRef;
-      typeof _ref$ === "function" ? use(_ref$, _el$) : props.containerRef = _el$;
-      insert(_el$, createComponent(For, {
-        get each() {
-          return props.suggestions;
-        },
-        children: (item, idx) => (() => {
-          var _el$2 = _tmpl$4$9(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
-          _el$2.$$click = () => props.onExecute(item);
-          insert(_el$3, createComponent(Show, {
-            get when() {
-              return item.appItem;
-            },
-            get fallback() {
-              return (() => {
-                var _el$8 = _tmpl$5$7();
-                insert(_el$8, createComponent(Switch, {
-                  get children() {
-                    return [createComponent(Match, {
-                      get when() {
-                        return item.type === "google";
-                      },
-                      get children() {
-                        return createComponent(search_default, {
-                          "class": "w-3 h-3 text-neutral-500"
-                        });
-                      }
-                    }), createComponent(Match, {
-                      get when() {
-                        return item.type === "add_app";
-                      },
-                      get children() {
-                        return createComponent(plus_default, {
-                          "class": "w-3 h-3 text-neutral-500"
-                        });
-                      }
-                    }), createComponent(Match, {
-                      when: true,
-                      get children() {
-                        return createComponent(globe_default, {
-                          "class": "w-3 h-3 text-neutral-500"
-                        });
-                      }
-                    })];
-                  }
-                }));
-                return _el$8;
-              })();
-            },
-            get children() {
-              return createComponent(AppIcon, {
-                get app() {
-                  return item.appItem;
-                },
-                "class": "w-5 h-5"
-              });
-            }
-          }), _el$4);
-          insert(_el$5, () => item.label);
-          insert(_el$4, createComponent(Show, {
-            get when() {
-              return item.subtitle;
-            },
-            get children() {
-              var _el$6 = _tmpl$2$j();
-              insert(_el$6, () => item.subtitle);
-              return _el$6;
-            }
-          }), null);
-          insert(_el$2, createComponent(Show, {
-            get when() {
-              return item.type === "app" || item.type === "shortcut";
-            },
-            get children() {
-              return _tmpl$3$f();
-            }
-          }), null);
-          createRenderEffect((_$p) => classList(_el$2, {
-            "bg-neutral-50 text-neutral-900 font-semibold": props.activeIdx === idx(),
-            "hover:bg-neutral-50/50 text-neutral-600": props.activeIdx !== idx()
-          }, _$p));
-          return _el$2;
-        })()
-      }));
-      return _el$;
-    }
-  });
-}
-delegateEvents(["click"]);
-var _tmpl$$o = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$e = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
+var _tmpl$$q = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$k = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$g = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === props.currentProfileId);
   return (() => {
-    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$k(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
       e.stopPropagation();
       props.onToggle();
@@ -14847,7 +19100,7 @@ function ProfileMenu(props) {
         return props.show;
       },
       get children() {
-        var _el$3 = _tmpl$$o();
+        var _el$3 = _tmpl$$q();
         insert(_el$3, createComponent(For, {
           get each() {
             return [{
@@ -14857,7 +19110,7 @@ function ProfileMenu(props) {
             }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
           },
           children: (profile) => (() => {
-            var _el$4 = _tmpl$3$e(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+            var _el$4 = _tmpl$3$g(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
             _el$4.$$click = () => {
               props.onSelect(profile.id === "main" ? void 0 : profile.id);
             };
@@ -14891,7 +19144,7 @@ function ProfileMenu(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$n = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 text-neutral-800 relative @container wake-region"style=container-type:size><style>
+var _tmpl$$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 text-neutral-800 relative @container wake-region"style=container-type:size><style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @container (max-height: 380px) {
@@ -14905,11 +19158,11 @@ var _tmpl$$n = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full
           .default-panel-header h1 { font-size: 0.95rem !important; }
           .default-panel-shortcuts { flex-wrap: wrap !important; justify-content: center !important; gap: 0.25rem !important; }
         }
-      `), _tmpl$2$h = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
+      `), _tmpl$2$j = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
 function DefaultPanel(props) {
   const ctrl = useDefaultPanelController(props);
   return (() => {
-    var _el$ = _tmpl$$n();
+    var _el$ = _tmpl$$p();
     _el$.firstChild;
     _el$.$$click = (e) => {
       const target = e.target;
@@ -14928,7 +19181,7 @@ function DefaultPanel(props) {
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$h(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
+          var _el$3 = _tmpl$2$j(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
           insert(_el$7, () => props.activeWorkspaceName);
           insert(_el$8, createComponent(CommandBar, {
             get id() {
@@ -15058,10 +19311,10 @@ function DefaultPanel(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$m = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+var _tmpl$$o = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
-    var _el$ = _tmpl$2$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
     var _ref$ = props.gateContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.gateContainerRef = _el$;
     var _ref$2 = props.topGateRef;
@@ -15073,7 +19326,7 @@ function GateAnimation(props) {
         return props.gateDomain;
       },
       get children() {
-        var _el$6 = _tmpl$$m();
+        var _el$6 = _tmpl$$o();
         createRenderEffect(() => setAttribute(_el$6, "src", `https://www.google.com/s2/favicons?domain=${props.gateDomain}&sz=128`));
         return _el$6;
       }
@@ -15084,11 +19337,11 @@ function GateAnimation(props) {
     return _el$;
   })();
 }
-var _tmpl$$l = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$f = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$d = /* @__PURE__ */ template(`<div class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
+var _tmpl$$n = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$h = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$f = /* @__PURE__ */ template(`<div class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
 function MenuItem(props) {
   const IconComp = props.icon;
   return (() => {
-    var _el$ = _tmpl$2$f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     addEventListener(_el$, "click", props.onClick, true);
     insert(_el$2, createComponent(IconComp, {
       "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
@@ -15099,7 +19352,7 @@ function MenuItem(props) {
         return props.badge;
       },
       get children() {
-        var _el$4 = _tmpl$$l();
+        var _el$4 = _tmpl$$n();
         insert(_el$4, () => props.badge);
         return _el$4;
       }
@@ -15155,7 +19408,7 @@ function PaneContextMenu(props) {
   };
   return createComponent(Portal, {
     get children() {
-      var _el$5 = _tmpl$3$d(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.nextSibling;
+      var _el$5 = _tmpl$3$f(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.nextSibling;
       _el$5.$$contextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -15316,19 +19569,19 @@ function PaneContextMenu(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$k = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
+var _tmpl$$m = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
 function MaximizedPaneControls(props) {
   return (() => {
-    var _el$ = _tmpl$$k(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$m(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$3.$$click = () => setLayoutStore("maximizedPaneId", null);
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$j = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
+var _tmpl$$l = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
 function DemoIframe(props) {
   return (() => {
-    var _el$ = _tmpl$$j();
+    var _el$ = _tmpl$$l();
     use((el) => {
       if (el) {
         el.onload = () => {
@@ -15456,19 +19709,19 @@ function DemoIframe(props) {
     return _el$;
   })();
 }
-var _tmpl$$i = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 z-10 pointer-events-none">`), _tmpl$2$e = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/30 backdrop-blur-sm z-20 pointer-events-none"><div class="px-4 py-2 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl">Restoring…`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-900 z-[5] pointer-events-none">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/10 backdrop-blur-sm z-10 cursor-pointer transition-all duration-700"><div class="px-5 py-2.5 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300">Click to Wake`);
+var _tmpl$$k = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 z-10 pointer-events-none">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/30 backdrop-blur-sm z-20 pointer-events-none"><div class="px-4 py-2 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl">Restoring…`), _tmpl$3$e = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-900 z-[5] pointer-events-none">`), _tmpl$4$9 = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/10 backdrop-blur-sm z-10 cursor-pointer transition-all duration-700"><div class="px-5 py-2.5 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300">Click to Wake`);
 function PaneSleepOverlay(props) {
   return [createComponent(Show, {
     get when() {
       return memo(() => !!props.isHibernated)() && props.canDeepHibernate;
     },
     get children() {
-      return [_tmpl$$i(), createComponent(Show, {
+      return [_tmpl$$k(), createComponent(Show, {
         get when() {
           return props.isRestoring;
         },
         get children() {
-          return _tmpl$2$e();
+          return _tmpl$2$g();
         }
       })];
     }
@@ -15477,8 +19730,8 @@ function PaneSleepOverlay(props) {
       return memo(() => !!(props.isHibernated && !props.canDeepHibernate))() && !props.isBlank;
     },
     get children() {
-      return [_tmpl$3$c(), (() => {
-        var _el$4 = _tmpl$4$8();
+      return [_tmpl$3$e(), (() => {
+        var _el$4 = _tmpl$4$9();
         addEventListener(_el$4, "mouseenter", props.onWake);
         addEventListener(_el$4, "click", props.onWake, true);
         return _el$4;
@@ -15487,10 +19740,10 @@ function PaneSleepOverlay(props) {
   })];
 }
 delegateEvents(["click"]);
-var _tmpl$$h = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto"><div class="text-sm font-semibold text-neutral-800 mb-1">Session Suspended</div><div class="text-xs text-neutral-500 mb-4 max-w-xs">The webview process stopped unexpectedly.</div><button class="px-4 py-2 bg-neutral-900 text-white text-xs font-medium rounded-lg shadow-sm hover:bg-neutral-800 active:scale-95 transition-all">Reload Session`);
+var _tmpl$$j = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto"><div class="text-sm font-semibold text-neutral-800 mb-1">Session Suspended</div><div class="text-xs text-neutral-500 mb-4 max-w-xs">The webview process stopped unexpectedly.</div><button class="px-4 py-2 bg-neutral-900 text-white text-xs font-medium rounded-lg shadow-sm hover:bg-neutral-800 active:scale-95 transition-all">Reload Session`);
 function PaneCrashedOverlay(props) {
   return (() => {
-    var _el$ = _tmpl$$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
+    var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
     addEventListener(_el$4, "click", props.onReload, true);
     return _el$;
   })();
@@ -15833,6 +20086,9 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
         new CustomEvent("pane.first-paint", { detail: paneId })
       );
     };
+    const emitMedia = (isPlaying) => window.dispatchEvent(
+      new CustomEvent("app:media-status", { detail: { paneId, isPlaying } })
+    );
     const events = [
       ["did-navigate", handleNavigate],
       ["did-navigate-in-page", handleNavigate],
@@ -15844,17 +20100,24 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       ["contextmenu", handleContextMenu],
       ["dom-ready", handleDomReady],
       ["did-first-visually-non-empty-paint", handleFirstPaint],
-      ["new-window", handleNewWindow]
+      ["new-window", handleNewWindow],
+      ["media-started-playing", () => emitMedia(true)],
+      ["media-paused", () => emitMedia(false)]
     ];
     events.forEach(([ev, fn]) => el.addEventListener(ev, fn));
-    registerWc();
-    onCleanup(() => {
+    if (el.__bridgeCleanup) {
+      el.__bridgeCleanup();
+    }
+    const cleanup = () => {
       unsubscribeAuth?.();
       isDomReady = false;
       pendingUrl = null;
       webContentsRegistry.unregisterPane(paneId);
       events.forEach(([ev, fn]) => el.removeEventListener(ev, fn));
-    });
+      el.__bridgeCleanup = null;
+    };
+    el.__bridgeCleanup = cleanup;
+    onCleanup(cleanup);
   };
   const focusWebview = () => {
     if (webviewRef) {
@@ -15881,6 +20144,11 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
           return;
         }
       }
+      if (typeof webviewRef.isLoading === "function" && webviewRef.isLoading()) {
+        if (isCanonicalSameUrl(current, url)) {
+          return;
+        }
+      }
       if (isDomReady && typeof webviewRef.loadURL === "function") {
         const promise = webviewRef.loadURL(url);
         if (promise && typeof promise.catch === "function") {
@@ -15891,8 +20159,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
         pendingUrl = url;
         webviewRef.src = url;
       }
-    } catch (err) {
-      console.error("loadURL error:", err);
+    } catch {
       try {
         webviewRef.src = url;
       } catch {
@@ -15918,7 +20185,37 @@ function usePaneLauncher(paneId, setCurrentType, setCurrentUrl, onUpdate) {
   };
   return { launchApp, handlePointerActivity };
 }
-var _tmpl$$g = /* @__PURE__ */ template(`<div><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$3$b = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=yes"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
+function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebview) {
+  onMount(() => {
+    const unsub = window.api?.onPartitionCookieChanged?.((data) => {
+      try {
+        const myPart = partition();
+        if (!myPart || myPart !== data.partition) return;
+        const url = currentUrl();
+        if (!url) return;
+        let host = "";
+        try {
+          host = new URL(url).hostname;
+        } catch {
+          return;
+        }
+        const cookieDomain = data.domain.startsWith(".") ? data.domain.substring(1) : data.domain;
+        if (host.includes(cookieDomain) || cookieDomain.includes(host)) {
+          if (isActivePane()) {
+            return;
+          }
+          reloadWebview();
+        }
+      } catch (err) {
+        console.debug("useSessionSync error", err);
+      }
+    });
+    onCleanup(() => {
+      unsub?.();
+    });
+  });
+}
+var _tmpl$$i = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$2$f = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$3$d = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=yes"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
 const gateTriggeredSet = /* @__PURE__ */ new Set();
 function Pane(props) {
   const [currentUrl, setCurrentUrl] = createSignal(props.url);
@@ -15926,8 +20223,8 @@ function Pane(props) {
   const [isCrashed, setIsCrashed] = createSignal(false);
   let paneRef;
   const initialUrl = props.url || "";
-  const initialPartition = props.profileId && props.profileId !== "main" ? `persist:${props.profileId}` : "persist:main";
-  const initialUserAgent = layoutStore.profiles.find((p) => p.id === (props.profileId || "main"))?.user_agent || window.api?.defaultUserAgent;
+  const currentPartition = () => props.profileId && props.profileId !== "main" ? `persist:${props.profileId}` : "persist:main";
+  const currentUserAgent = () => layoutStore.profiles.find((p) => p.id === (props.profileId || "main"))?.user_agent || window.api?.defaultUserAgent;
   const isBlank = () => !currentUrl() && currentType() !== "terminal" && !props.children;
   createEffect(() => {
     if (props.paneType !== void 0 && props.paneType !== currentType()) setCurrentType(props.paneType);
@@ -15975,6 +20272,7 @@ function Pane(props) {
     launchApp,
     handlePointerActivity
   } = usePaneLauncher(props.id, setCurrentType, setCurrentUrl, props.onUpdate);
+  useSessionSync(props.id, currentPartition, currentUrl, () => props.isActivePane, () => window.api?.viewReload?.(props.id));
   onMount(() => {
     const unsubCrash = window.api?.onViewCrashed?.((data) => {
       if (data.paneId === props.id) setIsCrashed(true);
@@ -15992,7 +20290,7 @@ function Pane(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.$$contextmenu = handleContextMenu;
     _el$.$$click = () => {
       wake();
@@ -16019,7 +20317,7 @@ function Pane(props) {
       },
       get fallback() {
         return (() => {
-          var _el$4 = _tmpl$2$d();
+          var _el$4 = _tmpl$2$f();
           insert(_el$4, () => props.children);
           return _el$4;
         })();
@@ -16030,25 +20328,33 @@ function Pane(props) {
             return window.IS_WEB_DEMO;
           },
           get fallback() {
-            return (() => {
-              var _el$5 = _tmpl$3$b();
-              use(setupWebview, _el$5);
-              setAttribute(_el$5, "src", initialUrl);
-              setAttribute(_el$5, "partition", initialPartition);
-              setAttribute(_el$5, "useragent", initialUserAgent);
-              createRenderEffect((_p$) => {
-                var _v$4 = `webview-${props.id}`, _v$5 = isHibernated() ? "none" : "flex", _v$6 = window.api?.panePreloadUrl;
-                _v$4 !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$4);
-                _v$5 !== _p$.t && setStyleProperty(_el$5, "display", _p$.t = _v$5);
-                _v$6 !== _p$.a && setAttribute(_el$5, "preload", _p$.a = _v$6);
-                return _p$;
-              }, {
-                e: void 0,
-                t: void 0,
-                a: void 0
-              });
-              return _el$5;
-            })();
+            return createComponent(Show, {
+              get when() {
+                return currentPartition();
+              },
+              keyed: true,
+              children: (partitionVal) => (() => {
+                var _el$5 = _tmpl$3$d();
+                use(setupWebview, _el$5);
+                setAttribute(_el$5, "partition", partitionVal);
+                createRenderEffect((_p$) => {
+                  var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = isHibernated() ? "none" : "flex", _v$7 = window.api?.panePreloadUrl;
+                  _v$3 !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$3);
+                  _v$4 !== _p$.t && setAttribute(_el$5, "src", _p$.t = _v$4);
+                  _v$5 !== _p$.a && setAttribute(_el$5, "useragent", _p$.a = _v$5);
+                  _v$6 !== _p$.o && setStyleProperty(_el$5, "display", _p$.o = _v$6);
+                  _v$7 !== _p$.i && setAttribute(_el$5, "preload", _p$.i = _v$7);
+                  return _p$;
+                }, {
+                  e: void 0,
+                  t: void 0,
+                  a: void 0,
+                  o: void 0,
+                  i: void 0
+                });
+                return _el$5;
+              })()
+            });
           },
           get children() {
             return createComponent(DemoIframe, {
@@ -16179,49 +20485,80 @@ function Pane(props) {
       }
     }), null);
     createRenderEffect((_p$) => {
-      var _v$ = `w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden transition-all duration-500 relative group/pane ${props.isActivePane ? "ring-1 ring-inset ring-neutral-400/40 dark:ring-neutral-500/40" : ""}`, _v$2 = `webview-container-${props.id}`, _v$3 = isBlank() ? "none" : "flex";
-      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _v$2 !== _p$.t && setAttribute(_el$3, "id", _p$.t = _v$2);
-      _v$3 !== _p$.a && setStyleProperty(_el$3, "display", _p$.a = _v$3);
+      var _v$ = `webview-container-${props.id}`, _v$2 = isBlank() ? "none" : "flex";
+      _v$ !== _p$.e && setAttribute(_el$3, "id", _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$3, "display", _p$.t = _v$2);
       return _p$;
     }, {
       e: void 0,
-      t: void 0,
-      a: void 0
+      t: void 0
     });
     return _el$;
   })();
 }
 delegateEvents(["mousemove", "focusin", "mousedown", "click", "contextmenu"]);
-var _tmpl$$f = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$h = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function DropSnapPreview(props) {
   const isSplitTarget = () => {
     if (!props.target) return false;
     const node = layoutStore.nodes[props.target.id];
-    return node && node.type === "split";
+    return node && (node.type === "split" || props.target.id === layoutStore.rootId);
+  };
+  const getBoundsStyle = () => {
+    const dir = props.target?.direction;
+    const m = SPATIAL_TOKENS.outerBezel;
+    const h = SPATIAL_TOKENS.halfSplitGap;
+    switch (dir) {
+      case "left":
+        return {
+          top: `${m}px`,
+          bottom: `${m}px`,
+          left: `${m}px`,
+          width: `calc(50% - ${m + h}px)`
+        };
+      case "right":
+        return {
+          top: `${m}px`,
+          bottom: `${m}px`,
+          right: `${m}px`,
+          width: `calc(50% - ${m + h}px)`
+        };
+      case "top":
+        return {
+          left: `${m}px`,
+          right: `${m}px`,
+          top: `${m}px`,
+          height: `calc(50% - ${m + h}px)`
+        };
+      case "bottom":
+        return {
+          left: `${m}px`,
+          right: `${m}px`,
+          bottom: `${m}px`,
+          height: `calc(50% - ${m + h}px)`
+        };
+      default:
+        return {};
+    }
   };
   return createComponent(Show, {
     get when() {
-      return isSplitTarget();
+      return memo(() => !!isSplitTarget())() && props.target;
     },
     get children() {
-      var _el$ = _tmpl$$f();
-      insert(_el$, () => props.target.direction === "left" && "Dock Left", null);
-      insert(_el$, () => props.target.direction === "right" && "Dock Right", null);
-      insert(_el$, () => props.target.direction === "top" && "Dock Top", null);
-      insert(_el$, () => props.target.direction === "bottom" && "Dock Bottom", null);
-      createRenderEffect(() => className(_el$, `absolute z-[99] pointer-events-none transition-all duration-200 border-2 border-dashed border-neutral-400/60 bg-black/[0.02] dark:bg-white/[0.04] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]
-          ${props.target.direction === "left" ? "left-3 top-3 bottom-3 w-[calc(50%-18px)]" : ""}
-          ${props.target.direction === "right" ? "right-3 top-3 bottom-3 w-[calc(50%-18px)]" : ""}
-          ${props.target.direction === "top" ? "left-3 right-3 top-3 h-[calc(50%-18px)]" : ""}
-          ${props.target.direction === "bottom" ? "left-3 right-3 bottom-3 h-[calc(50%-18px)]" : ""}
-        `));
+      var _el$ = _tmpl$$h(), _el$2 = _el$.firstChild;
+      insert(_el$2, () => props.target.direction === "left" && "Dock Left", null);
+      insert(_el$2, () => props.target.direction === "right" && "Dock Right", null);
+      insert(_el$2, () => props.target.direction === "top" && "Dock Top", null);
+      insert(_el$2, () => props.target.direction === "bottom" && "Dock Bottom", null);
+      createRenderEffect((_$p) => style(_el$, getBoundsStyle(), _$p));
       return _el$;
     }
   });
 }
-var _tmpl$$e = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent"style=right:0px;bottom:0px>`), _tmpl$2$c = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent"style=padding-top:0px;padding-left:0px;padding-right:0px;padding-bottom:0px><div id=main-canvas><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20 transition-opacity duration-300 ease-out"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$a = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><div class="text-red-500 mb-4"><svg width=48 height=48 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2><circle cx=12 cy=12 r=10></circle><line x1=12 y1=8 x2=12 y2=12></line><line x1=12 y1=16 x2=12.01 y2=16></line></svg></div><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors">Reset & Reload Workspace`);
+var _tmpl$$g = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`), _tmpl$2$e = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors">Reset & Reload Workspace`);
 function AppMainCanvas(props) {
+  const displayTree = createMemo(() => getComputedPreviewTree());
   const activePaneIds = createMemo(() => {
     const ids = [];
     const visited = /* @__PURE__ */ new Set();
@@ -16230,8 +20567,9 @@ function AppMainCanvas(props) {
       visited.add(id);
       const node = layoutStore.nodes[id];
       if (!node) return;
-      if (node.type === "pane") ids.push(node.id);
-      else if (node.type === "split") {
+      if (node.type === "pane" && node.id !== SPLIT_PREVIEW_GHOST_ID) {
+        ids.push(node.id);
+      } else if (node.type === "split") {
         if (node.a) traverse(node.a);
         if (node.b) traverse(node.b);
       }
@@ -16239,18 +20577,46 @@ function AppMainCanvas(props) {
     if (layoutStore.rootId) traverse(layoutStore.rootId);
     if (ids.length === 0 && Object.keys(layoutStore.nodes).length > 0) {
       for (const [nodeId, n] of Object.entries(layoutStore.nodes)) {
-        if (n && n.type === "pane") {
+        if (n && n.type === "pane" && nodeId !== SPLIT_PREVIEW_GHOST_ID) {
           ids.push(nodeId);
         }
       }
     }
     return ids.sort((a, b) => a.localeCompare(b));
   });
+  const handleResetLayout = (reset) => {
+    const defaultPaneId = `pane_${Date.now()}`;
+    setLayoutStore("nodes", reconcile({
+      [defaultPaneId]: {
+        type: "pane",
+        id: defaultPaneId,
+        paneType: "web",
+        title: "New Tab",
+        url: "",
+        profileId: "main"
+      }
+    }));
+    setLayoutStore("rootId", defaultPaneId);
+    props.ws.setActivePaneId(defaultPaneId);
+    props.ws.saveLayout(true);
+    reset();
+  };
+  const isEdgeHovered = (axis) => {
+    const z = props.hoverZone;
+    if (axis === "top") return z === "top" || z === "topLeft" || z === "topRight" || z === "left";
+    if (axis === "left") return z === "left" || z === "topLeft" || z === "bottomLeft" || z === "top";
+    if (axis === "right") return z === "bottomRight" || z === "right" || z === "bottom";
+    return z === "bottomRight" || z === "bottom" || z === "right";
+  };
   return (() => {
-    var _el$ = _tmpl$2$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling;
+    var _el$ = _tmpl$2$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling;
     var _ref$ = props.canvasContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.canvasContainerRef = _el$;
-    insert(_el$2, createComponent(CommandPalette, {}), _el$3);
+    insert(_el$2, createComponent(CommandPalette, {
+      get ws() {
+        return props.ws;
+      }
+    }), _el$3);
     insert(_el$2, createComponent(DropSnapPreview, {
       get target() {
         return props.drag.dragTarget();
@@ -16261,18 +20627,22 @@ function AppMainCanvas(props) {
         return props.hoverZone !== "none";
       },
       get children() {
-        var _el$4 = _tmpl$$e();
+        var _el$4 = _tmpl$$g();
         _el$4.addEventListener("pointerenter", () => {
           window.dispatchEvent(new CustomEvent("app:zone-leave"));
         });
         createRenderEffect((_p$) => {
-          var _v$ = props.hoverZone === "top" || props.hoverZone === "topLeft" || props.hoverZone === "topRight" || props.hoverZone === "left" ? "80px" : "0px", _v$2 = props.hoverZone === "left" || props.hoverZone === "topLeft" || props.hoverZone === "bottomLeft" || props.hoverZone === "top" ? "80px" : "0px";
+          var _v$ = isEdgeHovered("top") ? "80px" : "0px", _v$2 = isEdgeHovered("left") ? "80px" : "0px", _v$3 = isEdgeHovered("right") ? "80px" : "0px", _v$4 = isEdgeHovered("bottom") ? "80px" : "0px";
           _v$ !== _p$.e && setStyleProperty(_el$4, "top", _p$.e = _v$);
           _v$2 !== _p$.t && setStyleProperty(_el$4, "left", _p$.t = _v$2);
+          _v$3 !== _p$.a && setStyleProperty(_el$4, "right", _p$.a = _v$3);
+          _v$4 !== _p$.o && setStyleProperty(_el$4, "bottom", _p$.o = _v$4);
           return _p$;
         }, {
           e: void 0,
-          t: void 0
+          t: void 0,
+          a: void 0,
+          o: void 0
         });
         return _el$4;
       }
@@ -16340,36 +20710,23 @@ function AppMainCanvas(props) {
     }));
     insert(_el$6, createComponent(ErrorBoundary, {
       fallback: (err, reset) => (() => {
-        var _el$7 = _tmpl$3$a(), _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
-        insert(_el$0, () => err.toString());
-        _el$1.$$click = () => {
-          const defaultPaneId = `pane_${Date.now()}`;
-          setLayoutStore("nodes", reconcile({
-            [defaultPaneId]: {
-              type: "pane",
-              id: defaultPaneId,
-              paneType: "web",
-              title: "New Tab",
-              url: "",
-              profileId: "main"
-            }
-          }));
-          setLayoutStore("rootId", defaultPaneId);
-          props.ws.setActivePaneId(defaultPaneId);
-          props.ws.saveLayout(true);
-          reset();
-        };
+        var _el$7 = _tmpl$3$c(), _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling;
+        insert(_el$9, () => err.toString());
+        _el$0.$$click = () => handleResetLayout(reset);
         return _el$7;
       })(),
       get children() {
         return createComponent(Show, {
           get when() {
-            return layoutStore.rootId;
+            return displayTree().rootId;
           },
           get children() {
             return createComponent(LayoutNode, {
               get nodeId() {
-                return layoutStore.rootId;
+                return displayTree().rootId;
+              },
+              get nodes() {
+                return displayTree().nodes;
               },
               get activePaneId() {
                 return props.ws.activePaneId();
@@ -16387,7 +20744,7 @@ function AppMainCanvas(props) {
                 return props.ws.handleRatioChange;
               },
               get isOnlyPane() {
-                return layoutStore.nodes[layoutStore.rootId]?.type === "pane";
+                return displayTree().nodes[displayTree().rootId]?.type === "pane";
               },
               get dragTarget() {
                 return props.drag.dragTarget();
@@ -16404,19 +20761,23 @@ function AppMainCanvas(props) {
       }
     }));
     createRenderEffect((_p$) => {
-      var _v$3 = `flex-1 relative bg-transparent w-full h-full overflow-hidden transition-[border-radius] duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] ${props.hoverZone !== "none" ? "rounded-[16px]" : "rounded-none"}`, _v$4 = props.hoverZone !== "none" ? "1" : "0";
-      _v$3 !== _p$.e && className(_el$2, _p$.e = _v$3);
-      _v$4 !== _p$.t && setStyleProperty(_el$3, "opacity", _p$.t = _v$4);
+      var _v$5 = `${SPATIAL_TOKENS.baseMargin}px`, _v$6 = `${SPATIAL_TOKENS.baseMargin}px`, _v$7 = `${SPATIAL_TOKENS.baseMargin}px`, _v$8 = `${SPATIAL_TOKENS.baseMargin}px`;
+      _v$5 !== _p$.e && setStyleProperty(_el$, "padding-top", _p$.e = _v$5);
+      _v$6 !== _p$.t && setStyleProperty(_el$, "padding-left", _p$.t = _v$6);
+      _v$7 !== _p$.a && setStyleProperty(_el$, "padding-right", _p$.a = _v$7);
+      _v$8 !== _p$.o && setStyleProperty(_el$, "padding-bottom", _p$.o = _v$8);
       return _p$;
     }, {
       e: void 0,
-      t: void 0
+      t: void 0,
+      a: void 0,
+      o: void 0
     });
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$d = /* @__PURE__ */ template(`<div class="fixed left-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-left-2 duration-150 whitespace-nowrap select-none">Previous Tab`), _tmpl$2$b = /* @__PURE__ */ template(`<div>`), _tmpl$3$9 = /* @__PURE__ */ template(`<div class="fixed right-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-right-2 duration-150 whitespace-nowrap select-none">`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class="fixed top-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-top-2 duration-150 whitespace-nowrap select-none">Previous Workspace`), _tmpl$5$6 = /* @__PURE__ */ template(`<div class="fixed bottom-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-150 whitespace-nowrap select-none">Next Workspace`);
+var _tmpl$$f = /* @__PURE__ */ template(`<div class="fixed left-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-left-2 duration-150 whitespace-nowrap select-none">Previous Tab`), _tmpl$2$d = /* @__PURE__ */ template(`<div>`), _tmpl$3$b = /* @__PURE__ */ template(`<div class="fixed right-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-right-2 duration-150 whitespace-nowrap select-none">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div class="fixed top-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-top-2 duration-150 whitespace-nowrap select-none">Previous Workspace`), _tmpl$5$6 = /* @__PURE__ */ template(`<div class="fixed bottom-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-150 whitespace-nowrap select-none">Next Workspace`);
 function EdgeDragZones(props) {
   const showLeft = () => {
     const ts = props.ws.tabs();
@@ -16453,13 +20814,13 @@ function EdgeDragZones(props) {
           return showLeft();
         },
         get children() {
-          var _el$ = _tmpl$2$b();
+          var _el$ = _tmpl$2$d();
           insert(_el$, createComponent(Show, {
             get when() {
               return props.hoverDir === "left";
             },
             get children() {
-              return _tmpl$$d();
+              return _tmpl$$f();
             }
           }));
           createRenderEffect(() => className(_el$, `${baseZone} inset-y-12 left-1.5 w-3 rounded-full ${props.hoverDir === "left" ? activeStyle : idleStyle}`));
@@ -16470,13 +20831,13 @@ function EdgeDragZones(props) {
           return showRight();
         },
         get children() {
-          var _el$3 = _tmpl$2$b();
+          var _el$3 = _tmpl$2$d();
           insert(_el$3, createComponent(Show, {
             get when() {
               return props.hoverDir === "right";
             },
             get children() {
-              var _el$4 = _tmpl$3$9();
+              var _el$4 = _tmpl$3$b();
               insert(_el$4, () => props.ws.tabs().findIndex((t) => t.id === props.ws.activeTabId()) < props.ws.tabs().length - 1 ? "Next Tab" : "New Tab");
               return _el$4;
             }
@@ -16489,13 +20850,13 @@ function EdgeDragZones(props) {
           return showTop();
         },
         get children() {
-          var _el$5 = _tmpl$2$b();
+          var _el$5 = _tmpl$2$d();
           insert(_el$5, createComponent(Show, {
             get when() {
               return props.hoverDir === "top";
             },
             get children() {
-              return _tmpl$4$7();
+              return _tmpl$4$8();
             }
           }));
           createRenderEffect(() => className(_el$5, `${baseZone} inset-x-12 top-1.5 h-3 rounded-full ${props.hoverDir === "top" ? activeStyle : idleStyle}`));
@@ -16506,7 +20867,7 @@ function EdgeDragZones(props) {
           return showBottom();
         },
         get children() {
-          var _el$7 = _tmpl$2$b();
+          var _el$7 = _tmpl$2$d();
           insert(_el$7, createComponent(Show, {
             get when() {
               return props.hoverDir === "bottom";
@@ -16522,7 +20883,7 @@ function EdgeDragZones(props) {
     }
   });
 }
-var _tmpl$$c = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$8 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$6 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+var _tmpl$$e = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$c = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$a = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "";
@@ -16535,7 +20896,7 @@ function AccountTab(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$7$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
+    var _el$ = _tmpl$7$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
     var _el$24 = _el$9.nextSibling, _el$25 = _el$24.firstChild, _el$26 = _el$25.firstChild, _el$27 = _el$26.nextSibling;
     insert(_el$3, createComponent(Show, {
@@ -16543,10 +20904,10 @@ function AccountTab(props) {
         return layoutStore.licenseState?.customer?.avatar_url;
       },
       get fallback() {
-        return _tmpl$8$2();
+        return _tmpl$8$1();
       },
       get children() {
-        var _el$4 = _tmpl$$c();
+        var _el$4 = _tmpl$$e();
         createRenderEffect(() => setAttribute(_el$4, "src", layoutStore.licenseState?.customer?.avatar_url));
         return _el$4;
       }
@@ -16556,7 +20917,7 @@ function AccountTab(props) {
         return layoutStore.isPremium;
       },
       get children() {
-        return _tmpl$2$a();
+        return _tmpl$2$c();
       }
     }), null);
     insert(_el$7, () => layoutStore.licenseState?.customer?.name || "Local Profile");
@@ -16566,10 +20927,10 @@ function AccountTab(props) {
         return layoutStore.isPremium;
       },
       get fallback() {
-        return _tmpl$9$1();
+        return _tmpl$9();
       },
       get children() {
-        return _tmpl$3$8();
+        return _tmpl$3$a();
       }
     }), null);
     insert(_el$9, createComponent(Show, {
@@ -16578,7 +20939,7 @@ function AccountTab(props) {
       },
       get children() {
         return [(() => {
-          var _el$11 = _tmpl$4$6(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+          var _el$11 = _tmpl$4$7(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
           _el$14.$$click = async () => {
             const key = layoutStore.licenseState?.key;
             if (key) {
@@ -16650,18 +21011,24 @@ function AccountTab(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$b = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-4">Default Profiles</p><div class="bg-white/50 border border-black/[0.04] rounded-[16px] overflow-hidden divide-y divide-black/[0.04]">`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-4 hover:bg-neutral-50 transition-colors"><div class="flex items-center gap-3"><div class="relative shrink-0 flex items-center justify-center w-8 h-8 rounded-md bg-neutral-100 border border-neutral-200 text-neutral-600"></div><div class="text-sm font-medium text-neutral-900"></div></div><select class="text-sm border border-neutral-200 rounded-lg py-2 px-3 bg-white text-neutral-700 focus:outline-none focus:border-neutral-900 focus:ring-1 focus:ring-neutral-900 cursor-pointer shadow-sm hover:border-neutral-300 transition-colors"><option value=main>Main (Default)`), _tmpl$3$7 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$$d = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-4">Default Profiles</p><div class="bg-white/50 border border-black/[0.04] rounded-[16px] overflow-hidden divide-y divide-black/[0.04]">`), _tmpl$2$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-4 hover:bg-neutral-50 transition-colors"><div class="flex items-center gap-3"><div class="relative shrink-0 flex items-center justify-center w-8 h-8 rounded-md bg-neutral-100 border border-neutral-200 text-neutral-600"></div><div class="text-sm font-medium text-neutral-900"></div></div><select class="text-sm border border-neutral-200 rounded-lg py-2 px-3 bg-white text-neutral-700 focus:outline-none focus:border-neutral-900 focus:ring-1 focus:ring-neutral-900 cursor-pointer shadow-sm hover:border-neutral-300 transition-colors"><option value=main>Main (Default)`), _tmpl$3$9 = /* @__PURE__ */ template(`<option>`);
 function WorkspacesTab(props) {
   return (() => {
-    var _el$ = _tmpl$$b(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     insert(_el$3, createComponent(For, {
       get each() {
         return props.ws.workspaces();
       },
       children: (workspace) => (() => {
-        var _el$4 = _tmpl$2$9(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$b(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling;
         _el$8.firstChild;
-        insert(_el$6, () => getSmartIcon(workspace.name, {
+        insert(_el$6, createComponent(WorkspaceIcon, {
+          get icon() {
+            return workspace.icon;
+          },
+          get name() {
+            return workspace.name;
+          },
           size: 16,
           strokeWidth: 1.75
         }));
@@ -16687,7 +21054,7 @@ function WorkspacesTab(props) {
             return layoutStore.profiles.filter((p) => p.id !== "main");
           },
           children: (profile) => (() => {
-            var _el$0 = _tmpl$3$7();
+            var _el$0 = _tmpl$3$9();
             insert(_el$0, () => profile.name);
             createRenderEffect(() => _el$0.value = profile.id);
             return _el$0;
@@ -16700,7 +21067,7 @@ function WorkspacesTab(props) {
     return _el$;
   })();
 }
-var _tmpl$$a = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="text-xs font-bold text-neutral-800 uppercase tracking-wider">Launchpad Apps</h4><p class="text-[10px] text-neutral-400 font-semibold uppercase tracking-wider">Configure shortcuts for this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-300 focus:ring-1 focus:ring-neutral-300 font-medium"placeholder="Website URL (e.g. app.todoist.com)"><button class="text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl px-4 py-2 disabled:opacity-50 transition-colors cursor-pointer">Add Shortcut</button></div><div class="border border-neutral-200 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="p-3 text-center text-xs text-neutral-450 font-medium italic">No app shortcuts added.`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs font-bold text-neutral-700 truncate"></span><span class="text-[9px] text-neutral-400 font-medium truncate"></span></div></div><div class="flex items-center gap-1 shrink-0"><button class="p-1 text-neutral-400 hover:text-neutral-700 disabled:opacity-30 transition-colors cursor-pointer text-xs"title="Move Up">▲</button><button class="p-1 text-neutral-400 hover:text-neutral-700 disabled:opacity-30 transition-colors cursor-pointer text-xs"title="Move Down">▼</button><button class="p-1 text-neutral-400 hover:text-red-500 transition-colors ml-1 cursor-pointer"title=Delete><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">`), _tmpl$4$5 = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Isolated Sessions</p><button class="flex items-center gap-1.5 text-xs font-medium bg-neutral-900 hover:bg-neutral-800 text-white px-3 py-2 rounded-lg transition-colors shadow-sm"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto">`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="bg-white/50 border border-black/[0.04] rounded-[16px] p-5 animate-in fade-in zoom-in-95 duration-200"><h3 class="text-sm font-semibold text-neutral-900 mb-4">`), _tmpl$8$1 = /* @__PURE__ */ template(`<span class="px-2 py-0.5 rounded bg-neutral-100 border border-neutral-200 text-[10px] font-semibold text-neutral-600 uppercase tracking-wider">Incognito`), _tmpl$9 = /* @__PURE__ */ template(`<span class="px-2 py-0.5 rounded bg-neutral-100 border border-neutral-300 text-[10px] font-semibold text-neutral-800 uppercase tracking-wider">Default`), _tmpl$0 = /* @__PURE__ */ template(`<div class="text-[11px] text-neutral-500 mt-1 flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9">`), _tmpl$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-4 bg-white/60 border border-black/[0.04] rounded-[16px] hover:border-black/[0.08] transition-colors group"><div class="flex items-center gap-4"><div class="flex items-center justify-center w-8 h-8 rounded-full text-white text-xs font-semibold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] ring-4 ring-neutral-50 shrink-0"></div><div><div class="flex items-center gap-2"><span class="text-sm font-medium text-neutral-900"></span></div></div></div><button class="opacity-0 group-hover:opacity-100 px-3 py-1.5 text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 rounded-lg transition-all">Configure`);
+var _tmpl$$c = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Launchpad Shortcuts</h4><p class="text-[10px] text-neutral-500">Default bookmarks opened within this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-800 shadow-xs"placeholder="Website URL (e.g. app.slack.com)"><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg px-3.5 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-xs">Add</button></div><div class="border border-neutral-200/80 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="p-3 text-center text-xs text-neutral-400 italic">No shortcuts configured.`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[9px] text-neutral-400 font-mono truncate"></span></div></div><div class="flex items-center gap-1"><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▲</button><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▼</button><button class="p-1 hover:bg-red-50 text-neutral-400 hover:text-red-600 rounded cursor-pointer">✕`);
 function ProfileShortcutsManager(props) {
   const [apps, setApps] = createSignal([]);
   const [newUrl, setNewUrl] = createSignal("");
@@ -16740,7 +21107,7 @@ function ProfileShortcutsManager(props) {
     let domain = "";
     try {
       domain = new URL(formattedUrl).hostname;
-    } catch (e) {
+    } catch {
       domain = formattedUrl;
     }
     const newItem = {
@@ -16771,7 +21138,7 @@ function ProfileShortcutsManager(props) {
     saveApps(list);
   };
   return (() => {
-    var _el$ = _tmpl$$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling;
+    var _el$ = _tmpl$$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling;
     _el$4.$$input = (e) => setNewUrl(e.currentTarget.value);
     _el$5.$$click = handleAdd;
     insert(_el$6, createComponent(Show, {
@@ -16779,7 +21146,7 @@ function ProfileShortcutsManager(props) {
         return apps().length > 0;
       },
       get fallback() {
-        return _tmpl$2$8();
+        return _tmpl$2$a();
       },
       get children() {
         return createComponent(For, {
@@ -16787,10 +21154,10 @@ function ProfileShortcutsManager(props) {
             return apps();
           },
           children: (app, idx) => (() => {
-            var _el$8 = _tmpl$3$6(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$9.nextSibling, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.nextSibling;
+            var _el$8 = _tmpl$3$8(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$9.nextSibling, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.nextSibling;
             insert(_el$9, createComponent(AppIcon, {
               app,
-              "class": "w-5 h-5"
+              "class": "w-4 h-4"
             }), _el$0);
             insert(_el$1, () => app.name);
             insert(_el$10, () => app.domain);
@@ -16816,18 +21183,177 @@ function ProfileShortcutsManager(props) {
     return _el$;
   })();
 }
+delegateEvents(["input", "click"]);
+var _tmpl$$b = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-500 bg-neutral-100 border border-neutral-200">DEFAULT`), _tmpl$2$9 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-600 bg-neutral-100 border border-neutral-200">RAM-ONLY`), _tmpl$3$7 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono text-neutral-500 bg-neutral-50 border border-neutral-200 truncate max-w-[130px]">Proxy: `), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-9 h-9 rounded-xl text-white text-xs font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-2"><span class="text-sm font-semibold text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-medium text-neutral-700 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/80 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/60 shadow-xs">Configure</button></div><div class="flex items-center gap-1.5 pt-2 border-t border-neutral-100 flex-wrap"><span class="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider shrink-0 mr-1.5">SSO:`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white border border-neutral-300 shadow-xs ring-1 ring-black/5"><div class="relative flex items-center justify-center"><img class="w-3.5 h-3.5 object-contain"><div class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-white"></div></div><span class="font-mono text-[10px] text-neutral-800 font-medium truncate max-w-[140px]">`), _tmpl$6$2 = /* @__PURE__ */ template(`<button type=button class="relative group/pbtn flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-50 hover:bg-white border border-neutral-200/60 hover:border-neutral-300 transition-all cursor-pointer shadow-2xs active:scale-95"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40 group-hover/pbtn:grayscale-0 group-hover/pbtn:opacity-100 transition-all">`);
+const IDENTITY_PROVIDERS = [{
+  id: "google",
+  name: "Google",
+  domain: "google.com",
+  loginUrl: "https://accounts.google.com"
+}, {
+  id: "github",
+  name: "GitHub",
+  domain: "github.com",
+  loginUrl: "https://github.com/login"
+}, {
+  id: "microsoft",
+  name: "Microsoft",
+  domain: "microsoft.com",
+  loginUrl: "https://login.microsoftonline.com"
+}, {
+  id: "apple",
+  name: "Apple",
+  domain: "apple.com",
+  loginUrl: "https://appleid.apple.com"
+}, {
+  id: "x",
+  name: "X (Twitter)",
+  domain: "x.com",
+  loginUrl: "https://twitter.com/login"
+}, {
+  id: "discord",
+  name: "Discord",
+  domain: "discord.com",
+  loginUrl: "https://discord.com/login"
+}, {
+  id: "gitlab",
+  name: "GitLab",
+  domain: "gitlab.com",
+  loginUrl: "https://gitlab.com/users/sign_in"
+}, {
+  id: "slack",
+  name: "Slack",
+  domain: "slack.com",
+  loginUrl: "https://slack.com/signin"
+}];
+function ProfileCard(props) {
+  const getIdentities = () => {
+    try {
+      return props.profile.identities_json ? JSON.parse(props.profile.identities_json) : {};
+    } catch {
+      return {};
+    }
+  };
+  const handleConnect = (loginUrl) => {
+    const api = window.api;
+    if (api?.openGoogleAuth) {
+      api.openGoogleAuth({
+        url: loginUrl,
+        profileId: props.profile.id
+      });
+    } else if (api?.auth?.openGoogleAuth) {
+      api.auth.openGoogleAuth({
+        url: loginUrl,
+        profileId: props.profile.id
+      });
+    }
+  };
+  const isDefault = () => props.profile.id === "main";
+  return (() => {
+    var _el$ = _tmpl$4$6(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$10 = _el$3.nextSibling, _el$11 = _el$2.nextSibling;
+    _el$11.firstChild;
+    insert(_el$4, () => props.profile.name.charAt(0).toUpperCase());
+    insert(_el$7, () => props.profile.name);
+    insert(_el$6, createComponent(Show, {
+      get when() {
+        return isDefault();
+      },
+      get children() {
+        return _tmpl$$b();
+      }
+    }), null);
+    insert(_el$6, createComponent(Show, {
+      get when() {
+        return props.profile.is_ephemeral;
+      },
+      get children() {
+        return _tmpl$2$9();
+      }
+    }), null);
+    insert(_el$6, createComponent(Show, {
+      get when() {
+        return props.profile.proxy_server;
+      },
+      get children() {
+        var _el$0 = _tmpl$3$7();
+        _el$0.firstChild;
+        insert(_el$0, () => props.profile.proxy_server, null);
+        createRenderEffect(() => setAttribute(_el$0, "title", props.profile.proxy_server));
+        return _el$0;
+      }
+    }), null);
+    addEventListener(_el$10, "click", props.onConfigure, true);
+    insert(_el$11, createComponent(For, {
+      each: IDENTITY_PROVIDERS,
+      children: (p) => {
+        const identity = () => getIdentities()[p.id];
+        return createComponent(Show, {
+          get when() {
+            return identity();
+          },
+          get fallback() {
+            return (() => {
+              var _el$17 = _tmpl$6$2(), _el$18 = _el$17.firstChild;
+              _el$17.$$click = () => handleConnect(p.loginUrl);
+              _el$18.addEventListener("error", (e) => {
+                e.currentTarget.style.display = "none";
+              });
+              createRenderEffect((_p$) => {
+                var _v$3 = `Sign in with ${p.name}`, _v$4 = `https://www.google.com/s2/favicons?domain=${p.domain}&sz=64`, _v$5 = p.name;
+                _v$3 !== _p$.e && setAttribute(_el$17, "title", _p$.e = _v$3);
+                _v$4 !== _p$.t && setAttribute(_el$18, "src", _p$.t = _v$4);
+                _v$5 !== _p$.a && setAttribute(_el$18, "alt", _p$.a = _v$5);
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0,
+                a: void 0
+              });
+              return _el$17;
+            })();
+          },
+          get children() {
+            var _el$13 = _tmpl$5$4(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild, _el$16 = _el$14.nextSibling;
+            _el$15.addEventListener("error", (e) => {
+              e.currentTarget.style.display = "none";
+            });
+            insert(_el$16, () => identity()?.email || identity()?.handle || p.name);
+            createRenderEffect((_p$) => {
+              var _v$ = `https://www.google.com/s2/favicons?domain=${p.domain}&sz=64`, _v$2 = p.name;
+              _v$ !== _p$.e && setAttribute(_el$15, "src", _p$.e = _v$);
+              _v$2 !== _p$.t && setAttribute(_el$15, "alt", _p$.t = _v$2);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$13;
+          }
+        });
+      }
+    }), null);
+    createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", props.profile.color || "#4a4a49"));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$a = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><div class=space-y-0.5><h3 class="text-sm font-bold text-neutral-900 tracking-tight">Profiles</h3><p class="text-xs text-neutral-500">Isolated sessions with independent logins, cookies, and cache.</p></div><button class="flex items-center gap-1.5 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 text-white px-3.5 py-2 rounded-xl transition-colors shadow-xs shrink-0 cursor-pointer"><span>+</span><span>New Profile`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class=p-6>`), _tmpl$4$5 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2 mb-4"><button class="text-xs text-neutral-500 hover:text-neutral-900 transition-colors flex items-center gap-1 cursor-pointer font-medium"><span>←</span> Back to Profiles</button></div><h3 class="text-sm font-bold text-neutral-900 mb-4">`);
 function ProfilesTab(props) {
   return (() => {
-    var _el$15 = _tmpl$6$2();
-    insert(_el$15, createComponent(Show, {
+    var _el$ = _tmpl$3$6();
+    insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!!props.isCreatingProfile)() && !props.editingProfileId;
       },
       get fallback() {
         return (() => {
-          var _el$20 = _tmpl$7$1(), _el$21 = _el$20.firstChild;
-          insert(_el$21, () => props.isCreatingProfile ? "Create New Profile" : "Edit Profile");
-          insert(_el$20, createComponent(ProfileForm, {
+          var _el$6 = _tmpl$4$5(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling;
+          _el$8.$$click = () => {
+            props.setIsCreatingProfile(false);
+            props.setEditingProfileId(null);
+          };
+          insert(_el$9, () => props.isCreatingProfile ? "Create New Profile" : "Edit Profile");
+          insert(_el$6, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((p2) => p2.id === props.editingProfileId);
               if (!p) return void 0;
@@ -16835,7 +21361,8 @@ function ProfilesTab(props) {
                 ...p,
                 is_ephemeral: !!p.is_ephemeral,
                 proxy_server: p.proxy_server || "",
-                user_agent: p.user_agent || ""
+                user_agent: p.user_agent || "",
+                identities_json: p.identities_json
               };
             },
             get onSave() {
@@ -16852,7 +21379,7 @@ function ProfilesTab(props) {
               } : void 0;
             }
           }), null);
-          insert(_el$20, createComponent(Show, {
+          insert(_el$6, createComponent(Show, {
             get when() {
               return props.editingProfileId;
             },
@@ -16864,13 +21391,13 @@ function ProfilesTab(props) {
               });
             }
           }), null);
-          return _el$20;
+          return _el$6;
         })();
       },
       get children() {
         return [(() => {
-          var _el$16 = _tmpl$4$5(), _el$17 = _el$16.firstChild, _el$18 = _el$17.nextSibling;
-          _el$18.$$click = () => {
+          var _el$2 = _tmpl$$a(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+          _el$4.$$click = () => {
             if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
               props.onClose();
               setLayoutStore("paywallReason", "profile");
@@ -16879,57 +21406,26 @@ function ProfilesTab(props) {
             }
             props.setIsCreatingProfile(true);
           };
-          return _el$16;
+          return _el$2;
         })(), (() => {
-          var _el$19 = _tmpl$5$4();
-          insert(_el$19, createComponent(For, {
+          var _el$5 = _tmpl$2$8();
+          insert(_el$5, createComponent(For, {
             get each() {
               return layoutStore.profiles;
             },
-            children: (profile) => (() => {
-              var _el$22 = _tmpl$1(), _el$23 = _el$22.firstChild, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling, _el$26 = _el$25.firstChild, _el$27 = _el$26.firstChild, _el$32 = _el$23.nextSibling;
-              insert(_el$24, () => profile.name.charAt(0).toUpperCase());
-              insert(_el$27, () => profile.name);
-              insert(_el$26, createComponent(Show, {
-                get when() {
-                  return profile.is_ephemeral;
-                },
-                get children() {
-                  return _tmpl$8$1();
-                }
-              }), null);
-              insert(_el$26, createComponent(Show, {
-                get when() {
-                  return profile.id === "main";
-                },
-                get children() {
-                  return _tmpl$9();
-                }
-              }), null);
-              insert(_el$25, createComponent(Show, {
-                get when() {
-                  return profile.proxy_server;
-                },
-                get children() {
-                  var _el$30 = _tmpl$0();
-                  _el$30.firstChild;
-                  insert(_el$30, () => profile.proxy_server, null);
-                  return _el$30;
-                }
-              }), null);
-              _el$32.$$click = () => props.setEditingProfileId(profile.id);
-              createRenderEffect((_$p) => setStyleProperty(_el$24, "background-color", profile.color));
-              return _el$22;
-            })()
+            children: (profile) => createComponent(ProfileCard, {
+              profile,
+              onConfigure: () => props.setEditingProfileId(profile.id)
+            })
           }));
-          return _el$19;
+          return _el$5;
         })()];
       }
     }));
-    return _el$15;
+    return _el$;
   })();
 }
-delegateEvents(["input", "click"]);
+delegateEvents(["click"]);
 var _tmpl$$9 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-1 text-[10px] font-medium">+`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-2 py-1 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[11px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex items-center">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div data-shortcut-recorder=true tabindex=0>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-medium text-neutral-900 animate-pulse">Press any key... (Esc to cancel)`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><div class="flex items-center justify-between mb-4"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Keyboard Shortcuts</p><button class="text-xs font-medium text-neutral-500 hover:text-red-600 transition-colors px-2 py-1 rounded hover:bg-red-50">Reset Defaults</button></div><div class="space-y-6 pb-6">`), _tmpl$7 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-3 px-1"></h3><div class="bg-white border border-neutral-200 rounded-xl overflow-hidden divide-y divide-neutral-100 shadow-sm">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-3 hover:bg-neutral-50 transition-colors"><span class="text-sm text-neutral-700">`);
 function ShortcutRecorder(props) {
   const [isRecording, setIsRecording] = createSignal(false);
@@ -17039,7 +21535,7 @@ function ShortcutsTab() {
 delegateEvents(["click", "keydown"]);
 var _tmpl$$8 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[600px] h-[480px] bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-5 py-4 border-b border-black/[0.04] bg-transparent"><div class="flex items-center gap-6"><h2 class="text-sm font-semibold text-neutral-800">Settings</h2><div class="flex items-center gap-1 bg-neutral-100/80 p-1 rounded-[14px]"></div></div></div><div class="flex-1 overflow-y-auto bg-transparent p-6 relative z-10">`), _tmpl$3$4 = /* @__PURE__ */ template(`<button>`);
 function SettingsPopover(props) {
-  const [activeTab, setActiveTab] = createSignal("account");
+  const [activeTab, setActiveTab] = createSignal(layoutStore.settingsActiveTab || "account");
   const [editingProfileId, setEditingProfileId] = createSignal(null);
   const [isCreatingProfile, setIsCreatingProfile] = createSignal(false);
   const handleSaveProfile = async (data) => {
@@ -17805,7 +22301,7 @@ function useAppGestures(switchWorkspace, switchTab, workspaces, tabs, activeWork
   });
   return onWheel;
 }
-function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader, setTempShowHeader, activeDragId, getCanvasContainerRef, getJustCollapsed, setJustCollapsed) {
+function useMouseRouting(hoverZone, setHoverZone, uiMode, tempShowHeader, setTempShowHeader, activeDragId, getCanvasContainerRef, getJustCollapsed, setJustCollapsed) {
   const handleZoneLeave = () => {
     if (hoverZone() !== "none") setHoverZone("none");
   };
@@ -17823,6 +22319,11 @@ function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader,
       ticking = false;
       const x = mouseX;
       const y = mouseY;
+      if (getJustCollapsed()) {
+        if (x > 80 || y > 80) {
+          setJustCollapsed(false);
+        }
+      }
       if (x < -40 || y < -40 || x > appWidth + 40 || y > appHeight + 40) {
         handleZoneLeave();
         return;
@@ -17839,6 +22340,10 @@ function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader,
       } else if (current === "bottomLeft" || current === "bottom") {
         const inBtn = x <= 60 + CORNER_TOLERANCE && y >= appHeight - 60 - CORNER_TOLERANCE;
         if (!inBtn) handleZoneLeave();
+      } else if (current === "bottomRight" || current === "right" || current === "bottom") {
+        const inBottomBar = x >= appWidth - 320 && y >= appHeight - 60 - TOPBAR_TOLERANCE;
+        const inRightDock = x >= appWidth - 60 - DOCK_TOLERANCE && y >= appHeight - 300;
+        if (!inBottomBar && !inRightDock) handleZoneLeave();
       }
     };
     const updateCoordinates = (clientX, clientY) => {
@@ -17869,10 +22374,20 @@ function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader,
     const handleZoneLeaveEvent = () => {
       handleZoneLeave();
     };
+    const handleBlur = (e) => {
+      if (e.relatedTarget || document.hasFocus && document.hasFocus()) {
+        return;
+      }
+      if (mouseX >= 0 && mouseY >= 0 && mouseX <= appWidth && mouseY <= appHeight) {
+        checkProximity();
+      } else {
+        handleZoneLeave();
+      }
+    };
     window.addEventListener("mousemove", handleMouseMoveProx, { passive: true });
     window.addEventListener("app:zone-leave", handleZoneLeaveEvent);
     document.addEventListener("mouseleave", handleZoneLeave);
-    window.addEventListener("blur", handleZoneLeave);
+    window.addEventListener("blur", handleBlur);
     let frameId;
     let lastX = window.innerWidth / 2;
     let lastY = window.innerHeight / 2;
@@ -17880,9 +22395,9 @@ function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader,
       if (activeDragId()) return;
       const target = document.elementFromPoint(x, y);
       const isOverInteractiveUi = !!target?.closest?.(
-        '#ui-hub, #topbar, #workspace-dock, .wake-region, [data-wake="true"], .split-divider, .split-handle, .modal-backdrop, [role="dialog"], [role="menu"], [role="tablist"], button, input, select'
+        '#ui-hub, #topbar, #active-pane-bar, #workspace-dock, #support-cluster, #action-cluster, #action-split-bar, #action-dock, .wake-region, [data-wake="true"], .split-divider, .split-handle, .modal-backdrop, [role="dialog"], [role="menu"], [role="tablist"], button, input, select'
       );
-      if (isUiCollapsed()) {
+      if (uiMode() === "collapse") {
         if (isOverInteractiveUi) {
           if (getJustCollapsed()) return;
           if (hideTimer) {
@@ -17917,7 +22432,7 @@ function useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader,
       window.removeEventListener("mousemove", handleMouseMoveProx);
       window.removeEventListener("app:zone-leave", handleZoneLeaveEvent);
       document.removeEventListener("mouseleave", handleZoneLeave);
-      window.removeEventListener("blur", handleZoneLeave);
+      window.removeEventListener("blur", handleBlur);
       window.removeEventListener("mousemove", handleMouseMoveHole);
       window.removeEventListener("pointerup", handleDragEnd);
       window.removeEventListener("app:dragend", handleDragEnd);
@@ -17977,9 +22492,15 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       );
       ws.saveLayout(false);
     });
+    window.api?.onViewLoadStart?.((data) => {
+      const paneId = typeof data === "string" ? data : data?.paneId;
+      if (paneId) {
+        window.dispatchEvent(new CustomEvent("pane.load-start", { detail: { id: paneId } }));
+      }
+    });
     window.api?.onViewLoaded?.((data) => {
       const paneId = typeof data === "string" ? data : data?.paneId;
-      window.dispatchEvent(new CustomEvent("pane.loaded", { detail: paneId }));
+      window.dispatchEvent(new CustomEvent("pane.loaded", { detail: { id: paneId } }));
     });
     window.api?.onWorkspaceDeepLink?.((data) => {
       const workspaceId = typeof data === "string" ? data : data?.workspaceId;
@@ -17988,7 +22509,11 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       }
     });
     window.api?.onOpenInNewPane?.((url) => {
-      ws.handleCreateTab(void 0, url);
+      if (typeof ws.handleOpenUrlInPaneOrTab === "function") {
+        ws.handleOpenUrlInPaneOrTab(url);
+      } else {
+        ws.handleCreateTab(void 0, url);
+      }
     });
     window.api?.onViewFocusWc?.((data) => {
       const wcId = typeof data === "number" ? data : data?.webContentsId;
@@ -18073,78 +22598,83 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
     });
   });
 }
-function useLayoutAnimations(isUiCollapsed, hoverZone, getHubRef, getTopbarRef, getDockRef, getCanvasContainerRef) {
+function useLayoutAnimations(uiMode, hoverZone, getJustCollapsed, getHubRef, getTopbarRef, getActiveBarRef, getDockRef, getCanvasContainerRef, getActionHubRef, getActionSplitBarRef, getActionDockRef) {
   createEffect(() => {
-    const collapsed = isUiCollapsed();
+    const mode = uiMode();
     const zone = hoverZone();
+    const justCollapsed = getJustCollapsed();
     const hubRef = getHubRef();
     const topbarRef = getTopbarRef();
+    const activeBarRef = getActiveBarRef();
     const dockRef = getDockRef();
     const canvasContainerRef = getCanvasContainerRef();
-    const showTopbar = !collapsed || zone === "top" || zone === "topLeft" || zone === "topRight" || zone === "left";
-    const showDock = !collapsed || zone === "left" || zone === "topLeft" || zone === "bottomLeft" || zone === "top";
+    const actionHubRef = getActionHubRef?.();
+    const actionSplitBarRef = getActionSplitBarRef?.();
+    const actionDockRef = getActionDockRef?.();
+    const isHoverActiveTop = !justCollapsed && (zone === "top" || zone === "topLeft" || zone === "topRight");
+    const isHoverActiveLeft = !justCollapsed && (zone === "left" || zone === "topLeft" || zone === "bottomLeft");
+    const showActionCluster = zone === "bottomRight" || zone === "bottom" || zone === "right";
+    const showTopbar = mode !== "collapse" || isHoverActiveTop;
+    const showActiveBar = mode !== "collapse" || isHoverActiveTop;
+    const showDock = mode !== "collapse" || isHoverActiveLeft;
+    const base = SPATIAL_TOKENS.baseMargin;
+    const expanded = SPATIAL_TOKENS.expandedOffset;
+    const inset = SPATIAL_TOKENS.insetPad;
     if (hubRef) {
-      gsapWithCSS.to(hubRef, {
-        top: 12,
-        left: 12,
-        borderRadius: 16,
-        duration: 0.5,
-        ease: "power4.out",
-        overwrite: "auto"
-      });
+      gsapWithCSS.to(hubRef, { top: base, left: base, borderRadius: 16, duration: 0.5, ease: "power4.out", overwrite: "auto" });
     }
     if (topbarRef) {
       if (!showTopbar) {
-        gsapWithCSS.to(topbarRef, {
-          left: 12,
-          maxWidth: 0,
-          autoAlpha: 0,
-          duration: 0.4,
-          ease: "power3.out",
-          overwrite: "auto"
-        });
+        gsapWithCSS.to(topbarRef, { left: base, maxWidth: 0, autoAlpha: 0, duration: 0.4, ease: "power3.out", overwrite: "auto" });
       } else {
-        gsapWithCSS.to(topbarRef, {
-          left: 60,
-          maxWidth: 800,
-          autoAlpha: 1,
-          duration: 0.5,
-          ease: "power4.out",
-          overwrite: "auto"
-        });
+        const availableW = window.innerWidth - (expanded + 200);
+        const maxTopbarW = Math.min(
+          Math.max(480, window.innerWidth / 2 - 100),
+          Math.max(200, availableW)
+        );
+        gsapWithCSS.to(topbarRef, { left: expanded, maxWidth: maxTopbarW, autoAlpha: 1, duration: 0.5, ease: "power4.out", overwrite: "auto" });
+      }
+    }
+    if (activeBarRef) {
+      if (!showActiveBar) {
+        gsapWithCSS.to(activeBarRef, { y: -24, scale: 0.94, autoAlpha: 0, duration: 0.35, ease: "power3.out", overwrite: "auto" });
+      } else {
+        gsapWithCSS.to(activeBarRef, { y: 0, scale: 1, autoAlpha: 1, duration: 0.45, ease: "power4.out", overwrite: "auto" });
       }
     }
     if (dockRef) {
       const containerH = document.getElementById("canvas-container")?.clientHeight || window.innerHeight;
       if (!showDock) {
-        gsapWithCSS.to(dockRef, {
-          top: 12,
-          maxHeight: 0,
-          autoAlpha: 0,
-          duration: 0.4,
-          ease: "power3.out",
-          overwrite: "auto"
-        });
+        gsapWithCSS.to(dockRef, { top: base, maxHeight: 0, autoAlpha: 0, duration: 0.4, ease: "power3.out", overwrite: "auto" });
       } else {
-        gsapWithCSS.to(dockRef, {
-          top: 60,
-          maxHeight: containerH - 120,
-          autoAlpha: 1,
-          duration: 0.5,
-          ease: "power4.out",
-          overwrite: "auto"
-        });
+        gsapWithCSS.to(dockRef, { top: expanded, maxHeight: containerH - 120, autoAlpha: 1, duration: 0.5, ease: "power4.out", overwrite: "auto" });
+      }
+    }
+    if (actionHubRef) {
+      gsapWithCSS.to(actionHubRef, { bottom: base, right: base, borderRadius: 16, duration: 0.5, ease: "power4.out", overwrite: "auto" });
+    }
+    if (actionSplitBarRef) {
+      if (!showActionCluster) {
+        gsapWithCSS.to(actionSplitBarRef, { right: base, maxWidth: 0, autoAlpha: 0, duration: 0.4, ease: "power3.out", overwrite: "auto" });
+      } else {
+        gsapWithCSS.to(actionSplitBarRef, { right: expanded, maxWidth: 240, autoAlpha: 1, duration: 0.5, ease: "power4.out", overwrite: "auto" });
+      }
+    }
+    if (actionDockRef) {
+      if (!showActionCluster) {
+        gsapWithCSS.to(actionDockRef, { bottom: base, maxHeight: 0, autoAlpha: 0, duration: 0.4, ease: "power3.out", overwrite: "auto" });
+      } else {
+        gsapWithCSS.to(actionDockRef, { bottom: expanded, maxHeight: 200, autoAlpha: 1, duration: 0.5, ease: "power4.out", overwrite: "auto" });
       }
     }
     if (canvasContainerRef) {
       const isMaximized = !!layoutStore.maximizedPaneId;
-      const isEdgeHoveredTop = zone === "top" || zone === "topLeft" || zone === "topRight" || zone === "left";
-      const isEdgeHoveredLeft = zone === "left" || zone === "topLeft" || zone === "bottomLeft" || zone === "top";
-      const isInset = !isMaximized && zone !== "none";
-      const pt = isInset ? isEdgeHoveredTop ? 60 : 12 : 0;
-      const pl = isInset ? isEdgeHoveredLeft ? 60 : 12 : 0;
-      const pr = isInset ? 12 : 0;
-      const pb = isInset ? 12 : 0;
+      const isEdgeHoveredBottom = zone === "bottom" || zone === "bottomRight" || zone === "right";
+      const isEdgeHoveredRight = zone === "right" || zone === "bottomRight" || zone === "bottom";
+      const pt = isMaximized ? 0 : mode === "inset" || (mode === "overlap" || mode === "collapse") && isHoverActiveTop ? inset : base;
+      const pl = isMaximized ? 0 : mode === "inset" || (mode === "overlap" || mode === "collapse") && isHoverActiveLeft ? inset : base;
+      const pr = isMaximized ? 0 : (mode === "inset" || mode === "overlap" || mode === "collapse") && isEdgeHoveredRight ? inset : base;
+      const pb = isMaximized ? 0 : (mode === "inset" || mode === "overlap" || mode === "collapse") && isEdgeHoveredBottom ? inset : base;
       gsapWithCSS.to(canvasContainerRef, {
         paddingTop: pt,
         paddingLeft: pl,
@@ -18163,7 +22693,7 @@ function useWakeRegions() {
     let cachedRectsString = "";
     const updateRegions = () => {
       const elements = document.querySelectorAll(
-        "#ui-hub, #topbar, #workspace-dock, #window-controls, #support-cluster, .wake-region, [role='dialog'], [role='menu']"
+        "#ui-hub, #topbar, #workspace-dock, #window-controls, #support-cluster, #action-cluster, #action-split-bar, #action-dock, .wake-region, [role='dialog'], [role='menu']"
       );
       const rects = [];
       for (let i = 0; i < elements.length; i++) {
@@ -18254,14 +22784,26 @@ var _tmpl$$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg w
 function App() {
   const ws = useWorkspaceManager();
   const drag = useDragEngine(ws.saveLayout, ws.handleClose, ws.getParent, ws.activeTabId, ws.switchTab, ws.cleanupEmptyTabs);
-  const [isUiCollapsed, setIsUiCollapsed] = createSignal(false);
+  const initialMode = typeof localStorage !== "undefined" ? localStorage.getItem("apposition:ui_mode") : null;
+  const [uiMode, setUiModeState] = createSignal(initialMode === "overlap" || initialMode === "collapse" ? initialMode : "inset");
+  const setUiMode = (mode) => {
+    setUiModeState(mode);
+    try {
+      localStorage.setItem("apposition:ui_mode", mode);
+    } catch {
+    }
+  };
   const [hoverZone, setHoverZone] = createSignal("none");
   const [tempShowHeader, setTempShowHeader] = createSignal(false);
   const [cascadePrompt, setCascadePrompt] = createSignal(null);
   const [toast, setToast] = createSignal(null);
   let hubRef;
   let topbarRef;
+  let activeBarRef;
   let dockRef;
+  let actionHubRef;
+  let actionSplitBarRef;
+  let actionDockRef;
   let canvasContainerRef;
   const justCollapsedRef = {
     current: false
@@ -18272,24 +22814,24 @@ function App() {
   useAppLifecycle(ws);
   useWakeRegions();
   useAppGestures(ws.switchWorkspace, ws.switchTab, ws.workspaces, ws.tabs, ws.activeWorkspace, ws.activeTabId);
-  useMouseRouting(hoverZone, setHoverZone, isUiCollapsed, tempShowHeader, setTempShowHeader, drag.activeDragId, () => canvasContainerRef, () => justCollapsedRef.current, (val) => justCollapsedRef.current = val);
+  useMouseRouting(hoverZone, setHoverZone, uiMode, tempShowHeader, setTempShowHeader, drag.activeDragId, () => canvasContainerRef, () => justCollapsedRef.current, (val) => justCollapsedRef.current = val);
   useAppIpc(ws, setCascadePrompt, setToast);
   useShortcutEngine({
     ...ws,
     layoutStore,
     setLayoutStore
   }, {
-    isUiCollapsed,
-    setIsUiCollapsed,
+    uiMode,
+    setUiMode,
     setTempShowHeader
   });
-  useLayoutAnimations(isUiCollapsed, hoverZone, () => hubRef, () => topbarRef, () => dockRef, () => canvasContainerRef);
+  useLayoutAnimations(uiMode, hoverZone, () => justCollapsedRef.current, () => hubRef, () => topbarRef, () => activeBarRef, () => dockRef, () => canvasContainerRef, () => actionHubRef, () => actionSplitBarRef, () => actionDockRef);
   return (() => {
     var _el$ = _tmpl$4();
     insert(_el$, createComponent(AppUiHub, {
       hubRef: (el) => hubRef = el,
-      isUiCollapsed,
-      setIsUiCollapsed,
+      uiMode,
+      setUiMode,
       justCollapsedRef,
       onZoneEnter: handleZoneEnter,
       get isMaximized() {
@@ -18303,6 +22845,14 @@ function App() {
       },
       onZoneEnter: handleZoneEnter,
       ws
+    }), null);
+    insert(_el$, createComponent(ActivePaneBar, {
+      activeBarRef: (el) => activeBarRef = el,
+      ws,
+      get isMaximized() {
+        return !!layoutStore.maximizedPaneId;
+      },
+      onZoneEnter: handleZoneEnter
     }), null);
     insert(_el$, createComponent(AppDock, {
       dockRef: (el) => dockRef = el,
@@ -18322,8 +22872,8 @@ function App() {
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
       },
-      get isUiCollapsed() {
-        return isUiCollapsed();
+      get uiMode() {
+        return uiMode();
       },
       onZoneEnter: handleZoneEnter
     }), null);
@@ -18334,10 +22884,23 @@ function App() {
       onZoneEnter: handleZoneEnter,
       ws
     }), null);
+    insert(_el$, createComponent(ActionCluster, {
+      hubRef: (el) => actionHubRef = el,
+      splitBarRef: (el) => actionSplitBarRef = el,
+      dockRef: (el) => actionDockRef = el,
+      get isMaximized() {
+        return !!layoutStore.maximizedPaneId;
+      },
+      onZoneEnter: handleZoneEnter,
+      ws
+    }), null);
     insert(_el$, createComponent(AppMainCanvas, {
       canvasContainerRef: (el) => canvasContainerRef = el,
       get hoverZone() {
         return hoverZone();
+      },
+      get uiMode() {
+        return uiMode();
       },
       ws,
       drag

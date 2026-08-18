@@ -4,6 +4,8 @@ const utils$2 = require("@electron-toolkit/utils");
 const Database = require("better-sqlite3");
 const require$$1$1 = require("path");
 const require$$1$2 = require("fs");
+const require$$1$3 = require("child_process");
+require("readline");
 const os = require("os");
 const crypto = require("crypto");
 const require$$4 = require("http");
@@ -11,9 +13,8 @@ const require$$0 = require("constants");
 const require$$0$1 = require("stream");
 const require$$4$1 = require("util");
 const require$$5 = require("assert");
-const require$$1$4 = require("child_process");
 const require$$0$2 = require("events");
-const require$$1$3 = require("tty");
+const require$$1$4 = require("tty");
 const require$$2 = require("url");
 const require$$14 = require("zlib");
 function _interopNamespaceDefault(e) {
@@ -129,6 +130,7 @@ try {
   db.exec("ALTER TABLE profiles ADD COLUMN is_ephemeral INTEGER DEFAULT 0");
   db.exec("ALTER TABLE profiles ADD COLUMN proxy_server TEXT DEFAULT NULL");
   db.exec("ALTER TABLE profiles ADD COLUMN user_agent TEXT DEFAULT NULL");
+  db.exec("ALTER TABLE profiles ADD COLUMN identities_json TEXT DEFAULT NULL");
 } catch (e) {
 }
 try {
@@ -138,9 +140,17 @@ try {
 } catch (e) {
 }
 try {
+  db.exec("ALTER TABLE workspaces ADD COLUMN icon TEXT DEFAULT NULL");
+} catch (e) {
+}
+try {
   db.exec(
     "ALTER TABLE tabs ADD COLUMN default_profile_id TEXT DEFAULT NULL REFERENCES profiles(id) ON DELETE SET NULL"
   );
+} catch (e) {
+}
+try {
+  db.exec("ALTER TABLE tabs ADD COLUMN custom_name TEXT DEFAULT NULL");
 } catch (e) {
 }
 function closeDb() {
@@ -229,12 +239,12 @@ function gcDeletedSessions() {
 function getTabs(workspaceId) {
   return db.prepare("SELECT * FROM tabs WHERE workspace_id = ? ORDER BY order_idx ASC").all(workspaceId);
 }
-function createTab(id, workspaceId, name) {
+function createTab(id, workspaceId, name, customName = null) {
   const maxOrderRow = db.prepare("SELECT MAX(order_idx) as m FROM tabs WHERE workspace_id = ?").get(workspaceId);
   const maxOrder = maxOrderRow?.m || 0;
   db.prepare(
-    "INSERT INTO tabs (id, workspace_id, name, order_idx) VALUES (?, ?, ?, ?)"
-  ).run(id, workspaceId, name, maxOrder + 1);
+    "INSERT INTO tabs (id, workspace_id, name, custom_name, order_idx) VALUES (?, ?, ?, ?, ?)"
+  ).run(id, workspaceId, name, customName, maxOrder + 1);
 }
 function setTabDefaultProfile(id, profileId) {
   db.prepare("UPDATE tabs SET default_profile_id = ? WHERE id = ?").run(
@@ -262,8 +272,16 @@ function updatePaneProfilesForTab(tabId, profileId) {
   `
   ).run(profileId || "main", tabId);
 }
-function updateTab(id, name) {
-  db.prepare("UPDATE tabs SET name = ? WHERE id = ?").run(name, id);
+function updateTab(id, name, customName) {
+  if (customName !== void 0) {
+    db.prepare("UPDATE tabs SET name = ?, custom_name = ? WHERE id = ?").run(
+      name,
+      customName,
+      id
+    );
+  } else {
+    db.prepare("UPDATE tabs SET name = ? WHERE id = ?").run(name, id);
+  }
 }
 function deleteTab(id) {
   const nodes = db.prepare("SELECT id FROM nodes WHERE tab_id = ?").all(id);
@@ -286,15 +304,23 @@ function getWorkspaces() {
   }
   return db.prepare("SELECT * FROM workspaces ORDER BY created_at ASC").all();
 }
-function createWorkspace(id, name) {
+function createWorkspace(id, name, icon) {
   const stmt = db.prepare(
-    "INSERT INTO workspaces (id, name, created_at) VALUES (?, ?, ?)"
+    "INSERT INTO workspaces (id, name, icon, created_at) VALUES (?, ?, ?, ?)"
   );
-  stmt.run(id, name, Date.now());
+  stmt.run(id, name, icon || null, Date.now());
   createTab(`tab_${id}_main`, id, "Main");
 }
-function updateWorkspace(id, name) {
-  db.prepare("UPDATE workspaces SET name = ? WHERE id = ?").run(name, id);
+function updateWorkspace(id, name, icon) {
+  if (icon !== void 0) {
+    db.prepare("UPDATE workspaces SET name = ?, icon = ? WHERE id = ?").run(
+      name,
+      icon,
+      id
+    );
+  } else {
+    db.prepare("UPDATE workspaces SET name = ? WHERE id = ?").run(name, id);
+  }
 }
 function deleteWorkspace(id) {
   const tabs = db.prepare("SELECT id FROM tabs WHERE workspace_id = ?").all(id);
@@ -323,6 +349,567 @@ function getInitialAppState() {
   } catch (e) {
     console.error("Failed to get initial app state", e);
     return null;
+  }
+}
+const LOG_LEVEL_SEVERITY = {
+  TRACE: 10,
+  DEBUG: 20,
+  INFO: 30,
+  WARN: 40,
+  ERROR: 50,
+  INVARIANT: 60,
+  FATAL: 70
+};
+const BENIGN_NOISE_PATTERNS = [
+  /ResizeObserver loop (limit exceeded|completed with undelivered notifications)/i,
+  /net::ERR_BLOCKED_BY_CLIENT/i,
+  /Third-party cookie will be blocked/i,
+  /DevTools listening on/i,
+  /Autofill\.enable/i,
+  /Autofocus processing was blocked/i,
+  /%cElectron Security Warning/i,
+  /cleanups created outside/i,
+  /\[Featurebase SDK\]/i,
+  /checkForUpdates/i,
+  /Permissions-Policy header/i,
+  /Feature-Policy header/i,
+  /source-map.*404/i,
+  /favicon\.ico.*404/i,
+  /Failed to load resource.*net::ERR_FAILED/i,
+  /\[Violation\]/i,
+  /non-passive event listener/i
+];
+const SECRET_PATTERNS = [
+  [/polar_[-a-zA-Z0-9_]{20,}/g, "polar_[REDACTED]"],
+  [
+    /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
+    "[UUID-KEY-REDACTED]"
+  ],
+  [/Bearer\s+[-a-zA-Z0-9._~+/]+=*/gi, "Bearer [REDACTED]"],
+  [/password["']?\s*[:=]\s*["'][^"']+["']/gi, 'password: "[REDACTED]"'],
+  [/token["']?\s*[:=]\s*["'][-a-zA-Z0-9._~+/]{16,}["']/gi, 'token: "[REDACTED]"']
+];
+class NoiseFilter {
+  guestBuckets = /* @__PURE__ */ new Map();
+  maxPerWindow = 30;
+  windowMs = 1e3;
+  isBenignNoise(msg) {
+    if (!msg) return true;
+    for (const pattern of BENIGN_NOISE_PATTERNS) {
+      if (pattern.test(msg)) return true;
+    }
+    return false;
+  }
+  redactSecrets(raw) {
+    if (!raw || typeof raw !== "string") return raw;
+    let redacted = raw;
+    for (const [pattern, replacement] of SECRET_PATTERNS) {
+      redacted = redacted.replace(pattern, replacement);
+    }
+    return redacted;
+  }
+  isRateLimited(key) {
+    const now = Date.now();
+    let bucket = this.guestBuckets.get(key);
+    if (!bucket || now - bucket.lastReset > this.windowMs) {
+      bucket = { count: 1, lastReset: now };
+      this.guestBuckets.set(key, bucket);
+      return false;
+    }
+    bucket.count++;
+    return bucket.count > this.maxPerWindow;
+  }
+}
+const defaultNoiseFilter = new NoiseFilter();
+function cleanSourcePath(raw) {
+  if (!raw) return void 0;
+  let clean = raw.replace(/^https?:\/\/[^/]+\/@fs\//, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\?.*$/, "");
+  const match = clean.match(/(?:src\/[^:]+|[^/]+\.[a-zA-Z0-9]+)$/);
+  return match ? match[0] : clean;
+}
+function filterStackTrace(raw) {
+  if (!raw || typeof raw !== "string") return raw;
+  const lines = raw.split("\n");
+  const filtered = lines.filter(
+    (line) => !line.includes("node_modules") && !line.includes("node:electron") && !line.includes("node:internal")
+  );
+  return filtered.length > 0 ? filtered.join("\n") : lines.slice(0, 3).join("\n");
+}
+class LogFormatter {
+  formatInteractive(entry) {
+    const timeStr = `\x1B[90m${entry.isoTime.substring(11, 23)}\x1B[0m`;
+    const domainText = entry.subsystem ? `[${entry.domain}:${entry.subsystem}]` : `[${entry.domain}]`;
+    const domainTag = `\x1B[1m\x1B[37m${domainText}\x1B[0m`;
+    let levelBadge = "";
+    if (entry.level === "ERROR") {
+      levelBadge = ` \x1B[1m\x1B[31mERROR\x1B[0m`;
+    } else if (entry.level === "FATAL") {
+      levelBadge = ` \x1B[1m\x1B[41m\x1B[37m FATAL \x1B[0m`;
+    } else if (entry.level === "WARN") {
+      levelBadge = ` \x1B[33mWARN\x1B[0m`;
+    } else if (entry.level === "INVARIANT") {
+      levelBadge = ` \x1B[1m\x1B[45m\x1B[37m INVARIANT \x1B[0m`;
+    }
+    let line = `${timeStr} ${domainTag}${levelBadge}: ${entry.message}`;
+    if (entry.durationMs !== void 0) {
+      if (entry.durationMs > 30) {
+        line += ` \x1B[33m(SLOW: ${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
+      } else {
+        line += ` \x1B[90m(${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
+      }
+    }
+    if (entry.correlationId) {
+      line += ` \x1B[36m#${entry.correlationId}\x1B[0m`;
+    }
+    const cleanSrc = cleanSourcePath(entry.source?.file);
+    if (cleanSrc) {
+      line += ` \x1B[90m(${cleanSrc}${entry.source?.line ? `:${entry.source.line}` : ""})\x1B[0m`;
+    }
+    if (entry.details !== void 0) {
+      let detailsStr = "";
+      if (typeof entry.details === "string") {
+        detailsStr = filterStackTrace(entry.details);
+      } else if (typeof entry.details === "object") {
+        detailsStr = JSON.stringify(entry.details);
+      } else {
+        detailsStr = String(entry.details);
+      }
+      line += ` \x1B[90m| ${detailsStr}\x1B[0m`;
+    }
+    return line;
+  }
+  formatCompactAi(entry) {
+    const timeStr = entry.isoTime.substring(11, 19);
+    const domain = entry.subsystem ? `${entry.domain}:${entry.subsystem}` : entry.domain;
+    let out2 = `${timeStr} [${entry.level[0]}][${domain}] ${entry.message}`;
+    if (entry.durationMs !== void 0) {
+      out2 += ` ${entry.durationMs.toFixed(0)}ms`;
+    }
+    if (entry.correlationId) {
+      out2 += ` #${entry.correlationId}`;
+    }
+    const cleanSrc = cleanSourcePath(entry.source?.file);
+    if (cleanSrc) {
+      out2 += ` (${cleanSrc}:${entry.source?.line || 0})`;
+    }
+    if (entry.details !== void 0) {
+      out2 += ` :: ${JSON.stringify(entry.details)}`;
+    }
+    return out2;
+  }
+  formatJson(entry) {
+    return JSON.stringify(entry);
+  }
+}
+const defaultFormatter = new LogFormatter();
+class RingBuffer {
+  buffer;
+  pointer = 0;
+  isFull = false;
+  capacity;
+  constructor(capacity = 500) {
+    this.capacity = capacity;
+    this.buffer = new Array(capacity).fill(null);
+  }
+  push(entry) {
+    this.buffer[this.pointer] = entry;
+    this.pointer = (this.pointer + 1) % this.capacity;
+    if (this.pointer === 0) {
+      this.isFull = true;
+    }
+  }
+  snapshot() {
+    if (!this.isFull) {
+      return this.buffer.slice(0, this.pointer).filter(Boolean);
+    }
+    const tail = this.buffer.slice(this.pointer).filter(Boolean);
+    const head = this.buffer.slice(0, this.pointer).filter(Boolean);
+    return [...tail, ...head];
+  }
+  getErrors() {
+    return this.snapshot().filter(
+      (e) => e.level === "ERROR" || e.level === "FATAL" || e.level === "INVARIANT"
+    );
+  }
+  dumpSummary(limit = 20) {
+    const recent = this.snapshot().slice(-limit);
+    return recent.map(
+      (e) => `[${e.isoTime.substring(11, 23)}] [${e.level}][${e.domain}] ${e.message}${e.correlationId ? ` #${e.correlationId}` : ""}`
+    ).join("\n");
+  }
+  clear() {
+    this.buffer.fill(null);
+    this.pointer = 0;
+    this.isFull = false;
+  }
+}
+const flightRecorder = new RingBuffer(500);
+const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024;
+class AsyncFileSink {
+  stream = null;
+  queue = [];
+  flushTimer = null;
+  filePath = null;
+  isWriting = false;
+  init(filePath) {
+    try {
+      this.filePath = filePath;
+      const dir = require$$1$1.dirname(filePath);
+      if (!require$$1$2.existsSync(dir)) {
+        require$$1$2.mkdirSync(dir, { recursive: true });
+      }
+      if (require$$1$2.existsSync(filePath)) {
+        try {
+          const stats = require$$1$2.statSync(filePath);
+          if (stats.size > MAX_LOG_SIZE_BYTES) {
+            const oldPath = `${filePath}.old`;
+            if (require$$1$2.existsSync(oldPath)) {
+              require$$1$2.unlinkSync(oldPath);
+            }
+            require$$1$2.renameSync(filePath, oldPath);
+          }
+        } catch {
+        }
+      }
+      this.stream = require$$1$2.createWriteStream(filePath, { flags: "a", encoding: "utf8" });
+      this.stream.on("error", () => {
+        this.stream = null;
+      });
+      this.startTimer();
+      const sessionHeader = `
+--- [APPOSITION LOG SESSION START: ${(/* @__PURE__ */ new Date()).toISOString()}] (PID ${typeof process !== "undefined" ? process.pid : "N/A"}) ---
+`;
+      this.write(sessionHeader);
+      if (typeof process !== "undefined") {
+        process.on("exit", () => {
+          this.close();
+        });
+      }
+    } catch {
+      this.stream = null;
+    }
+  }
+  write(line) {
+    this.queue.push(line + "\n");
+    if (this.queue.length >= 50) {
+      this.flush();
+    }
+  }
+  startTimer() {
+    if (this.flushTimer) return;
+    this.flushTimer = setInterval(() => {
+      this.flush();
+    }, 500);
+  }
+  flush() {
+    if (this.isWriting || !this.stream || this.queue.length === 0) return;
+    this.isWriting = true;
+    const batch = this.queue.join("");
+    this.queue = [];
+    try {
+      this.stream.write(batch, () => {
+        this.isWriting = false;
+      });
+    } catch {
+      this.isWriting = false;
+    }
+  }
+  close() {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.stream) {
+      if (this.queue.length > 0) {
+        try {
+          this.stream.write(this.queue.join(""));
+        } catch {
+        }
+      }
+      this.stream.end();
+      this.stream = null;
+    }
+  }
+}
+const defaultFileSink = new AsyncFileSink();
+class RuntimeStateManager {
+  state;
+  filePath = null;
+  constructor() {
+    const now = Date.now();
+    this.state = {
+      version: "1.1.3",
+      pid: typeof process !== "undefined" ? process.pid : 0,
+      startedAt: now,
+      rssMb: "0.0",
+      heapMb: "0.0",
+      errorCount: 0,
+      warningCount: 0,
+      guestLogsMuted: true,
+      lastUpdated: new Date(now).toISOString()
+    };
+  }
+  init(filePath) {
+    this.filePath = filePath;
+    this.syncMetrics();
+    this.persist();
+  }
+  setGuestLogsMuted(muted) {
+    this.state.guestLogsMuted = muted;
+    this.persist();
+  }
+  incrementError() {
+    this.state.errorCount++;
+    this.syncMetrics();
+    this.persist();
+  }
+  incrementWarning() {
+    this.state.warningCount++;
+    this.syncMetrics();
+    this.persist();
+  }
+  syncMetrics() {
+    if (typeof process !== "undefined" && typeof process.memoryUsage === "function") {
+      try {
+        const mem = process.memoryUsage();
+        this.state.rssMb = (mem.rss / 1024 / 1024).toFixed(1);
+        this.state.heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
+      } catch {
+      }
+    }
+  }
+  getState() {
+    this.syncMetrics();
+    return this.state;
+  }
+  persist() {
+    if (!this.filePath) return;
+    try {
+      this.syncMetrics();
+      this.state.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      const dir = require$$1$1.dirname(this.filePath);
+      if (!require$$1$2.existsSync(dir)) {
+        require$$1$2.mkdirSync(dir, { recursive: true });
+      }
+      require$$1$2.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
+    } catch {
+    }
+  }
+}
+const runtimeState = new RuntimeStateManager();
+let globalCounter = 0;
+class Logger {
+  domain;
+  options;
+  constructor(domain = "MAIN", options = {}) {
+    this.domain = domain;
+    this.options = {
+      minLevel: options.minLevel || "INFO",
+      muteGuestInStdout: options.muteGuestInStdout ?? true,
+      compactMode: options.compactMode ?? (typeof process !== "undefined" && (process.env?.AI_AGENT_MODE === "1" || process.env?.APPLY_AI_LOGS === "1")),
+      enableRedaction: options.enableRedaction ?? true,
+      enableFileSink: options.enableFileSink ?? true,
+      filePath: options.filePath || ""
+    };
+  }
+  setFileSink(filePath) {
+    this.options.filePath = filePath;
+    defaultFileSink.init(filePath);
+  }
+  lastEntryKey = "";
+  repeatCount = 0;
+  lastEntryTime = 0;
+  log(level, message, details, subsystem, correlationId, durationMs, source) {
+    let cleanMsg = message;
+    if (this.options.enableRedaction) {
+      cleanMsg = defaultNoiseFilter.redactSecrets(cleanMsg);
+    }
+    if (defaultNoiseFilter.isBenignNoise(cleanMsg)) {
+      return;
+    }
+    if (this.domain === "GUEST" && defaultNoiseFilter.isRateLimited(subsystem || "guest")) {
+      return;
+    }
+    const now = Date.now();
+    const entryKey = `${this.domain}:${level}:${cleanMsg}`;
+    if (entryKey === this.lastEntryKey && now - this.lastEntryTime < 1e3) {
+      this.repeatCount++;
+      return;
+    }
+    if (this.repeatCount > 0) {
+      const repeats = this.repeatCount;
+      this.repeatCount = 0;
+      this.log("DEBUG", `(Previous message repeated ${repeats} times)`);
+    }
+    this.lastEntryKey = entryKey;
+    this.lastEntryTime = now;
+    const entry = {
+      id: `${now}-${++globalCounter}`,
+      timestamp: now,
+      isoTime: new Date(now).toISOString(),
+      level,
+      domain: this.domain,
+      subsystem,
+      message: cleanMsg,
+      details,
+      correlationId,
+      durationMs,
+      source
+    };
+    flightRecorder.push(entry);
+    if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
+      runtimeState.incrementError();
+    } else if (level === "WARN") {
+      runtimeState.incrementWarning();
+    }
+    if (this.options.enableFileSink) {
+      defaultFileSink.write(defaultFormatter.formatJson(entry));
+    }
+    const entrySev = LOG_LEVEL_SEVERITY[level] || 0;
+    const minSev = LOG_LEVEL_SEVERITY[this.options.minLevel] || 0;
+    if (this.domain === "GUEST" && this.options.muteGuestInStdout && level !== "ERROR" && level !== "FATAL") {
+      return;
+    }
+    if (entrySev >= minSev) {
+      const output = this.options.compactMode ? defaultFormatter.formatCompactAi(entry) : defaultFormatter.formatInteractive(entry);
+      if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
+        console.error(output);
+      } else if (level === "WARN") {
+        console.warn(output);
+      } else {
+        console.log(output);
+      }
+    }
+  }
+  trace(msg, details, sub, source) {
+    this.log("TRACE", msg, details, sub, void 0, void 0, source);
+  }
+  debug(msg, details, sub, source) {
+    this.log("DEBUG", msg, details, sub, void 0, void 0, source);
+  }
+  info(msg, details, sub, source) {
+    this.log("INFO", msg, details, sub, void 0, void 0, source);
+  }
+  warn(msg, details, sub, source) {
+    this.log("WARN", msg, details, sub, void 0, void 0, source);
+  }
+  error(msg, details, sub, source) {
+    this.log("ERROR", msg, details, sub, void 0, void 0, source);
+  }
+  fatal(msg, details, sub, source) {
+    this.log("FATAL", msg, details, sub, void 0, void 0, source);
+  }
+  invariant(condition, breachMsg, details, sub) {
+    if (!condition) {
+      this.log("INVARIANT", `[INVARIANT BREACH] ${breachMsg}`, details, sub);
+    }
+  }
+  tx(name, correlationId, durationMs, error2) {
+    if (error2) {
+      this.log("ERROR", `[TX FAILED] ${name}`, error2, "IPC", correlationId, durationMs);
+    } else {
+      this.log("INFO", `[TX OK] ${name}`, void 0, "IPC", correlationId, durationMs);
+    }
+  }
+}
+const logger = new Logger("MAIN");
+const createLogger = (domain, opts) => new Logger(domain, opts);
+function printStartupBanner(version = "1.1.3", logFile = "apposition.log") {
+  const isDev = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
+  if (!isDev) return;
+  console.log("");
+  console.log("  \x1B[1m\x1B[37mApposition " + version + " (Development Environment)\x1B[0m");
+  console.log("  \x1B[90mDatabase: Connected · Log File: " + logFile + " · Noise Filter: Active\x1B[0m");
+  console.log("");
+  console.log("  \x1B[1mTerminal Controls (Press single key):\x1B[0m");
+  console.log("    \x1B[1m[e]\x1B[0m \x1B[37mShow Errors\x1B[0m        \x1B[90m- View only what failed (press [y] to copy)\x1B[0m");
+  console.log("    \x1B[1m[w]\x1B[0m \x1B[37mShow Warnings\x1B[0m      \x1B[90m- View recent warnings without noisy spam\x1B[0m");
+  console.log("    \x1B[1m[f]\x1B[0m \x1B[37mRecent Actions\x1B[0m     \x1B[90m- See action history right before a crash\x1B[0m");
+  console.log("    \x1B[1m[s]\x1B[0m \x1B[37mSystem Health\x1B[0m      \x1B[90m- Check memory usage, uptime, and error counter\x1B[0m");
+  console.log("    \x1B[1m[d]\x1B[0m \x1B[37mDatabase Health\x1B[0m    \x1B[90m- Check SQLite size, tables, and WAL status\x1B[0m");
+  console.log("    \x1B[1m[r]\x1B[0m \x1B[37mSoft Reload\x1B[0m        \x1B[90m- Instantly reload window (<150ms)\x1B[0m");
+  console.log("    \x1B[1m[t]\x1B[0m \x1B[37mToggle Tab Logs\x1B[0m    \x1B[90m- Mute/unmute external website chatter\x1B[0m");
+  console.log("    \x1B[1m[o]\x1B[0m \x1B[37mOpen Log File\x1B[0m      \x1B[90m- Open apposition.log in your text editor\x1B[0m");
+  console.log("    \x1B[1m[c]\x1B[0m \x1B[37mClean Screen\x1B[0m       \x1B[90m- Clear terminal display & scrollback\x1B[0m");
+  console.log("    \x1B[1m[q]\x1B[0m \x1B[37mClean Quit\x1B[0m         \x1B[90m- Gracefully flush database and exit\x1B[0m");
+  console.log("    \x1B[1m[?]\x1B[0m \x1B[37mHelp Menu\x1B[0m          \x1B[90m- Show all available keyboard shortcuts\x1B[0m");
+  console.log("");
+}
+function executeCommand(key, logFilePath, toggleGuestCallback) {
+  const lower = key.toLowerCase().trim();
+  if (!lower) return;
+  if (lower === "e") {
+    const errors = flightRecorder.getErrors();
+    console.log(`
+\x1B[1m--- Recent Errors (${errors.length}) ---\x1B[0m`);
+    if (errors.length === 0) {
+      console.log("  \x1B[90mNo errors recorded in current session. All systems running cleanly.\x1B[0m\n");
+    } else {
+      for (const err of errors.slice(-10)) {
+        console.log(`  ${defaultFormatter.formatInteractive(err)}`);
+      }
+      console.log("");
+    }
+  } else if (lower === "w") {
+    const warns = flightRecorder.snapshot().filter((e) => e.level === "WARN");
+    console.log(`
+\x1B[1m--- Recent Warnings (${warns.length}) ---\x1B[0m`);
+    if (warns.length === 0) {
+      console.log("  \x1B[90mNo warnings in current session.\x1B[0m\n");
+    } else {
+      for (const w of warns.slice(-10)) {
+        console.log(`  ${defaultFormatter.formatInteractive(w)}`);
+      }
+      console.log("");
+    }
+  } else if (lower === "f") {
+    console.log("\n\x1B[1m--- Recent Actions History (Flight Recorder) ---\x1B[0m");
+    const dump = flightRecorder.dumpSummary(15);
+    console.log(dump || "  \x1B[90mAction buffer is empty.\x1B[0m");
+    console.log("");
+  } else if (lower === "s") {
+    const state = runtimeState.getState();
+    const uptimeSec = Math.floor((Date.now() - state.startedAt) / 1e3);
+    const mins = Math.floor(uptimeSec / 60);
+    const secs = uptimeSec % 60;
+    console.log("\n\x1B[1m--- System Health & Diagnostics ---\x1B[0m");
+    console.log(`  \x1B[37mRAM Usage:\x1B[0m ${state.rssMb} MB (Heap: ${state.heapMb} MB)`);
+    console.log(`  \x1B[37mUptime:\x1B[0m ${mins}m ${secs}s (PID: ${state.pid})`);
+    console.log(`  \x1B[37mErrors:\x1B[0m ${state.errorCount} | \x1B[37mWarnings:\x1B[0m ${state.warningCount}`);
+    console.log(`  \x1B[37mExternal Tab Noise:\x1B[0m ${state.guestLogsMuted ? "MUTED" : "ACTIVE"}
+`);
+  } else if (lower === "o") {
+    console.log(`
+\x1B[90mOpening log file: ${logFilePath}\x1B[0m
+`);
+    const openCmd = process.platform === "win32" ? `start "" "${logFilePath}"` : process.platform === "darwin" ? `open "${logFilePath}"` : `xdg-open "${logFilePath}"`;
+    require$$1$3.exec(openCmd, () => {
+    });
+  } else if (lower === "c") {
+    process.stdout.write("\x1B[2J\x1B[3J\x1B[H");
+    printStartupBanner("1.1.3", logFilePath);
+  } else if (lower === "h" || lower === "?") {
+    printStartupBanner("1.1.3", logFilePath);
+  }
+}
+function initInteractiveTerminal(logFilePath = "apposition.log", toggleGuestCallback) {
+  if (typeof process === "undefined" || !process.stdin) return;
+  try {
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      const text = String(chunk);
+      if (text === "" || text === "") {
+        process.exit();
+      }
+      for (const char of text.trim()) {
+        executeCommand(char, logFilePath, toggleGuestCallback);
+      }
+    });
+  } catch {
   }
 }
 const ANTI_DETECTION_SCRIPT = `(function() {
@@ -472,6 +1059,30 @@ function registerOAuthPopup(webContentsId) {
 }
 function unregisterOAuthPopup(webContentsId) {
   activeOAuthPopupIds.delete(webContentsId);
+}
+function applyBrowserSwitches(app) {
+  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
+  app.userAgentFallback = getDefaultChromeUserAgent();
+  app.commandLine.appendSwitch("disable-background-timer-throttling");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("max-active-webgl-contexts", "128");
+  app.commandLine.appendSwitch("hide-scrollbars");
+  if (process.platform === "darwin") {
+    app.commandLine.appendSwitch("disable-skia-graphite");
+  }
+  app.commandLine.appendSwitch(
+    "disable-features",
+    "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
+  );
+  app.commandLine.appendSwitch(
+    "disable-blink-features",
+    "WebAuthentication,WebAuthenticationConditionalUI"
+  );
+  app.commandLine.appendSwitch(
+    "force-webrtc-ip-handling-policy",
+    "default_public_interface_only"
+  );
 }
 const IPC_CHANNELS = {
   DB: {
@@ -947,7 +1558,7 @@ function initDbIpc() {
   });
   require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
   require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name) => {
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name, icon) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const workspaces = getWorkspaces();
@@ -955,10 +1566,10 @@ function initDbIpc() {
         throw new Error("Free tier limits exceeded: Max 1 workspace.");
       }
     }
-    createWorkspace(id, name);
+    createWorkspace(id, name, icon);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name) => {
-    updateWorkspace(id, name);
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name, icon) => {
+    updateWorkspace(id, name, icon);
   });
   require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
     deleteWorkspace(id);
@@ -990,8 +1601,8 @@ function initDbIpc() {
     createTab(id, workspaceId, name);
     return { id, workspaceId, name };
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name) => {
-    updateTab(id, name);
+  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name, customName) => {
+    updateTab(id, name, customName);
   });
   require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
     deleteTab(id);
@@ -1496,6 +2107,7 @@ const OAUTH_DOMAINS = [
   "id.atlassian.com"
 ];
 const SSO_KEYWORDS = ["login", "signin", "auth", "sso", "oauth"];
+const SYSTEM_PROTOCOLS = ["mailto:", "tel:", "slack:", "zoommtg:", "magnet:", "viber:", "tg:"];
 function isOAuthOrAuthEndpoint(url) {
   if (!url) return false;
   const lower = url.toLowerCase();
@@ -1518,6 +2130,12 @@ function evaluateWindowOpenRequest(url, disposition, features) {
       url
     };
   }
+  if (SYSTEM_PROTOCOLS.some((proto) => urlLower.startsWith(proto))) {
+    return {
+      type: "OPEN_SYSTEM_BROWSER",
+      url
+    };
+  }
   if (disposition === "new-window" || isPopup || isBlank) {
     return {
       type: "ALLOW_OAUTH_POPUP",
@@ -1536,7 +2154,7 @@ function evaluateWindowOpenRequest(url, disposition, features) {
     };
   }
   return {
-    type: "OPEN_SYSTEM_BROWSER",
+    type: "OPEN_IN_APP",
     url
   };
 }
@@ -1586,13 +2204,23 @@ function getTargetWindow() {
   return win && !win.isDestroyed() ? win : null;
 }
 function bindViewEvents(paneId, view) {
+  if (view.webContents.__eventsBound) {
+    return;
+  }
+  view.webContents.__eventsBound = true;
   view.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (defaultNoiseFilter.isBenignNoise(message)) {
+      return;
+    }
+    if (defaultNoiseFilter.isRateLimited(paneId)) {
+      return;
+    }
     const win = getTargetWindow();
     if (win) {
       win.webContents.send("view.console-message", {
         paneId,
         level,
-        message,
+        message: defaultNoiseFilter.redactSecrets(message),
         line,
         sourceId,
         timestamp: Date.now()
@@ -1651,14 +2279,67 @@ function bindViewEvents(paneId, view) {
       });
     }
   };
+  view.webContents.on("did-start-loading", () => {
+    getTargetWindow()?.webContents.send("view.load-start", { paneId });
+  });
+  view.webContents.on("did-stop-loading", () => {
+    getTargetWindow()?.webContents.send("view.loaded", { paneId });
+  });
+  view.webContents.on("dom-ready", () => {
+    getTargetWindow()?.webContents.send("view.loaded", { paneId });
+  });
+  view.webContents.on("did-fail-load", (_e, errorCode, errorDescription, validatedURL) => {
+    const win = getTargetWindow();
+    if (win) {
+      win.webContents.send("view.loaded", { paneId });
+      win.webContents.send("view.fail-load", { paneId, errorCode, errorDescription, validatedURL });
+    }
+  });
   view.webContents.on("did-navigate", (_e, url) => sendNav(url));
   view.webContents.on("did-navigate-in-page", (_e, url) => sendNav(url));
   view.webContents.on("page-title-updated", () => sendNav(view.webContents.getURL()));
+  view.webContents.on("page-favicon-updated", (_e, favicons) => {
+    if (favicons && favicons.length > 0) {
+      const pageUrl = view.webContents.getURL();
+      let icon = favicons[0];
+      try {
+        if (icon && !icon.startsWith("data:")) {
+          icon = new URL(icon, pageUrl).href;
+        }
+      } catch {
+      }
+      getTargetWindow()?.webContents.send("view.favicon-updated", {
+        paneId,
+        url: pageUrl,
+        favicon: icon
+      });
+    }
+  });
+  view.webContents.on("audio-state-changed", (_event, audible) => {
+    const isAudible = typeof audible === "boolean" ? audible : Boolean(audible?.audible);
+    getTargetWindow()?.webContents.send("view.media-status", {
+      paneId,
+      isPlaying: isAudible
+    });
+  });
   view.webContents.on("media-started-playing", () => {
-    getTargetWindow()?.webContents.send("view.media-status", { paneId, isPlaying: true });
+    getTargetWindow()?.webContents.send("view.media-status", {
+      paneId,
+      isPlaying: true
+    });
   });
   view.webContents.on("media-paused", () => {
-    getTargetWindow()?.webContents.send("view.media-status", { paneId, isPlaying: false });
+    const isAudible = typeof view.webContents.isCurrentlyAudible === "function" ? view.webContents.isCurrentlyAudible() : false;
+    getTargetWindow()?.webContents.send("view.media-status", {
+      paneId,
+      isPlaying: isAudible
+    });
+  });
+  view.webContents.ipc.on("pane.media-playing", (_e, isPlaying) => {
+    getTargetWindow()?.webContents.send("view.media-status", {
+      paneId,
+      isPlaying: Boolean(isPlaying)
+    });
   });
   view.webContents.on("context-menu", (_e, params) => {
     getTargetWindow()?.webContents.send("view.context-menu", {
@@ -1984,6 +2665,7 @@ function initCaptureIpc() {
     }
   );
 }
+const viewLogger = createLogger("VIEW");
 function initViewIpc() {
   require$$1.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
     if (paneId && typeof wcId === "number") {
@@ -2162,7 +2844,7 @@ function initViewIpc() {
         const data = await response.json();
         return data && Array.isArray(data[1]) ? data[1] : [];
       } catch (e) {
-        console.error("Failed to fetch autocomplete suggestions", e);
+        viewLogger.debug("Search suggestions fetch failed", e?.message || e);
         return [];
       }
     }
@@ -2238,15 +2920,8 @@ function initTearWindowIpc() {
     }
   });
 }
-function logToFile(msg) {
-  try {
-    const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
-    require$$1$2.appendFileSync(logPath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${msg}
-`, "utf8");
-  } catch (e) {
-    console.error("Failed to write to log file:", e);
-  }
-}
+const rendererLogger = createLogger("RENDERER");
+const windowLogger = createLogger("WINDOW");
 function createWindow() {
   const mainWindow = new require$$1.BrowserWindow({
     width: 1200,
@@ -2274,17 +2949,25 @@ function createWindow() {
   mainWindow.webContents.on(
     "console-message",
     (_event, level, message, line, sourceId) => {
-      const msg = `[RENDERER CONSOLE ${level}] (${sourceId}:${line}): ${message}`;
-      console.log(msg);
-      logToFile(msg);
+      const source = sourceId ? { file: sourceId, line } : void 0;
+      if (level >= 3) {
+        rendererLogger.error(message, void 0, void 0, source);
+      } else if (level === 2) {
+        rendererLogger.warn(message, void 0, void 0, source);
+      } else if (level === 1) {
+        rendererLogger.info(message, void 0, void 0, source);
+      } else {
+        rendererLogger.debug(message, void 0, void 0, source);
+      }
     }
   );
   mainWindow.webContents.on(
     "did-fail-load",
     (_event, errorCode, errorDescription, validatedURL) => {
-      const msg = `[MAINWINDOW LOAD ERROR] Code ${errorCode}: ${errorDescription} (${validatedURL})`;
-      console.error(msg);
-      logToFile(msg);
+      windowLogger.error(
+        `MainWindow load failure [Code ${errorCode}]: ${errorDescription}`,
+        { validatedURL }
+      );
       if (!utils$2.is.dev) {
         setTimeout(() => {
           if (!mainWindow.isDestroyed()) {
@@ -2530,6 +3213,12 @@ function initSessionSecurity() {
         webContents.loadURL(decision.url);
         return { action: "deny" };
       }
+      if (decision.type === "OPEN_IN_APP") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("open-in-new-pane", decision.url);
+        }
+        return { action: "deny" };
+      }
       if (decision.type === "OPEN_SYSTEM_BROWSER") {
         require$$1.shell.openExternal(decision.url);
         return { action: "deny" };
@@ -2549,6 +3238,63 @@ function initSessionSecurity() {
       console.warn("GPU Process Crashed. Electron will restart it.");
     }
   });
+}
+async function flushAllSessions() {
+  try {
+    const profiles = getProfiles();
+    const partitions = /* @__PURE__ */ new Set([
+      "persist:main",
+      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+    ]);
+    for (const part of partitions) {
+      try {
+        const ses = require$$1.session.fromPartition(part);
+        await ses.flushStorageData();
+      } catch (err) {
+        logger.debug(`Flush failed for ${part}`, err);
+      }
+    }
+    await require$$1.session.defaultSession.flushStorageData();
+  } catch (e) {
+    logger.warn("Failed to flush session storage", e);
+  }
+}
+const monitoredPartitions = /* @__PURE__ */ new Set();
+function monitorPartitionCookies(partition) {
+  if (monitoredPartitions.has(partition)) return;
+  monitoredPartitions.add(partition);
+  try {
+    const ses = require$$1.session.fromPartition(partition);
+    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
+      if (!removed && cause === "explicit") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("partition.cookie-changed", {
+            partition,
+            domain: cookie.domain,
+            name: cookie.name
+          });
+        }
+      }
+    });
+  } catch (e) {
+    logger.debug(`Failed to attach cookie monitor for ${partition}`, e);
+  }
+}
+function initSessionPersistenceHooks() {
+  try {
+    require$$1.powerMonitor.on("suspend", async () => {
+      logger.info("System suspending - flushing session data to disk");
+      await flushAllSessions();
+    });
+    monitorPartitionCookies("persist:main");
+    const profiles = getProfiles();
+    for (const p of profiles) {
+      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
+      monitorPartitionCookies(part);
+    }
+  } catch (e) {
+    logger.warn("PowerMonitor / Cookie monitor hook unavailable", e);
+  }
 }
 const BLOCKED_PATTERNS = [
   "*://*.google-analytics.com/*",
@@ -5740,7 +6486,7 @@ function requireSupportsColor() {
   if (hasRequiredSupportsColor) return supportsColor_1;
   hasRequiredSupportsColor = 1;
   const os$1 = os;
-  const tty = require$$1$3;
+  const tty = require$$1$4;
   const hasFlag2 = requireHasFlag();
   const { env } = process;
   let forceColor;
@@ -5841,7 +6587,7 @@ function requireNode() {
   if (hasRequiredNode) return node.exports;
   hasRequiredNode = 1;
   (function(module, exports) {
-    const tty = require$$1$3;
+    const tty = require$$1$4;
     const util2 = require$$4$1;
     exports.init = init;
     exports.log = log;
@@ -14534,7 +15280,7 @@ function requireDownloadedUpdateHelper() {
     get cacheDirForPendingUpdate() {
       return path.join(this.cacheDir, "pending");
     }
-    async validateDownloadedPath(updateFile, updateInfo, fileInfo, logger) {
+    async validateDownloadedPath(updateFile, updateInfo, fileInfo, logger2) {
       if (this.versionInfo != null && this.file === updateFile && this.fileInfo != null) {
         if (isEqual(this.versionInfo, updateInfo) && isEqual(this.fileInfo.info, fileInfo.info) && await (0, fs_extra_1.pathExists)(updateFile)) {
           return updateFile;
@@ -14542,11 +15288,11 @@ function requireDownloadedUpdateHelper() {
           return null;
         }
       }
-      const cachedUpdateFile = await this.getValidCachedUpdateFile(fileInfo, logger);
+      const cachedUpdateFile = await this.getValidCachedUpdateFile(fileInfo, logger2);
       if (cachedUpdateFile === null) {
         return null;
       }
-      logger.info(`Update has already been downloaded to ${updateFile}).`);
+      logger2.info(`Update has already been downloaded to ${updateFile}).`);
       this._file = cachedUpdateFile;
       return cachedUpdateFile;
     }
@@ -14582,7 +15328,7 @@ function requireDownloadedUpdateHelper() {
      * @param fileInfo
      * @param logger
      */
-    async getValidCachedUpdateFile(fileInfo, logger) {
+    async getValidCachedUpdateFile(fileInfo, logger2) {
       const updateInfoFilePath = this.getUpdateInfoFile();
       const doesUpdateInfoFileExist = await (0, fs_extra_1.pathExists)(updateInfoFilePath);
       if (!doesUpdateInfoFileExist) {
@@ -14597,28 +15343,28 @@ function requireDownloadedUpdateHelper() {
           await this.cleanCacheDirForPendingUpdate();
           message += ` (error on read: ${error2.message})`;
         }
-        logger.info(message);
+        logger2.info(message);
         return null;
       }
       const isCachedInfoFileNameValid = (cachedInfo === null || cachedInfo === void 0 ? void 0 : cachedInfo.fileName) !== null;
       if (!isCachedInfoFileNameValid) {
-        logger.warn(`Cached update info is corrupted: no fileName, directory for cached update will be cleaned`);
+        logger2.warn(`Cached update info is corrupted: no fileName, directory for cached update will be cleaned`);
         await this.cleanCacheDirForPendingUpdate();
         return null;
       }
       if (fileInfo.info.sha512 !== cachedInfo.sha512) {
-        logger.info(`Cached update sha512 checksum doesn't match the latest available update. New update must be downloaded. Cached: ${cachedInfo.sha512}, expected: ${fileInfo.info.sha512}. Directory for cached update will be cleaned`);
+        logger2.info(`Cached update sha512 checksum doesn't match the latest available update. New update must be downloaded. Cached: ${cachedInfo.sha512}, expected: ${fileInfo.info.sha512}. Directory for cached update will be cleaned`);
         await this.cleanCacheDirForPendingUpdate();
         return null;
       }
       const updateFile = path.join(this.cacheDirForPendingUpdate, cachedInfo.fileName);
       if (!await (0, fs_extra_1.pathExists)(updateFile)) {
-        logger.info("Cached update file doesn't exist");
+        logger2.info("Cached update file doesn't exist");
         return null;
       }
       const sha512 = await hashFile(updateFile);
       if (fileInfo.info.sha512 !== sha512) {
-        logger.warn(`Sha512 checksum doesn't match the latest available update. New update must be downloaded. Cached: ${sha512}, expected: ${fileInfo.info.sha512}`);
+        logger2.warn(`Sha512 checksum doesn't match the latest available update. New update must be downloaded. Cached: ${sha512}, expected: ${fileInfo.info.sha512}`);
         await this.cleanCacheDirForPendingUpdate();
         return null;
       }
@@ -15824,7 +16570,7 @@ function requireDownloadPlanBuilder() {
     OperationKind2[OperationKind2["COPY"] = 0] = "COPY";
     OperationKind2[OperationKind2["DOWNLOAD"] = 1] = "DOWNLOAD";
   })(OperationKind || (downloadPlanBuilder.OperationKind = OperationKind = {}));
-  function computeOperations(oldBlockMap, newBlockMap, logger) {
+  function computeOperations(oldBlockMap, newBlockMap, logger2) {
     const nameToOldBlocks = buildBlockFileMap(oldBlockMap.files);
     const nameToNewBlocks = buildBlockFileMap(newBlockMap.files);
     let lastOperation = null;
@@ -15837,14 +16583,14 @@ function requireDownloadPlanBuilder() {
     }
     const newFile = nameToNewBlocks.get(name);
     let changedBlockCount = 0;
-    const { checksumToOffset: checksumToOldOffset, checksumToOldSize } = buildChecksumMap(nameToOldBlocks.get(name), oldEntry.offset, logger);
+    const { checksumToOffset: checksumToOldOffset, checksumToOldSize } = buildChecksumMap(nameToOldBlocks.get(name), oldEntry.offset, logger2);
     let newOffset = blockMapFile.offset;
     for (let i = 0; i < newFile.checksums.length; newOffset += newFile.sizes[i], i++) {
       const blockSize = newFile.sizes[i];
       const checksum = newFile.checksums[i];
       let oldOffset = checksumToOldOffset.get(checksum);
       if (oldOffset != null && checksumToOldSize.get(checksum) !== blockSize) {
-        logger.warn(`Checksum ("${checksum}") matches, but size differs (old: ${checksumToOldSize.get(checksum)}, new: ${blockSize})`);
+        logger2.warn(`Checksum ("${checksum}") matches, but size differs (old: ${checksumToOldSize.get(checksum)}, new: ${blockSize})`);
         oldOffset = void 0;
       }
       if (oldOffset === void 0) {
@@ -15875,7 +16621,7 @@ function requireDownloadPlanBuilder() {
       }
     }
     if (changedBlockCount > 0) {
-      logger.info(`File${blockMapFile.name === "file" ? "" : " " + blockMapFile.name} has ${changedBlockCount} changed blocks`);
+      logger2.info(`File${blockMapFile.name === "file" ? "" : " " + blockMapFile.name} has ${changedBlockCount} changed blocks`);
     }
     return operations;
   }
@@ -15892,7 +16638,7 @@ rel: ${lastOperation.start - min} until ${lastOperation.end - min} and ${operati
     }
     operations.push(operation);
   }
-  function buildChecksumMap(file2, fileOffset, logger) {
+  function buildChecksumMap(file2, fileOffset, logger2) {
     const checksumToOffset = /* @__PURE__ */ new Map();
     const checksumToSize = /* @__PURE__ */ new Map();
     let offset = fileOffset;
@@ -15903,9 +16649,9 @@ rel: ${lastOperation.start - min} until ${lastOperation.end - min} and ${operati
       if (existing === void 0) {
         checksumToOffset.set(checksum, offset);
         checksumToSize.set(checksum, size);
-      } else if (logger.debug != null) {
+      } else if (logger2.debug != null) {
         const sizeExplanation = existing === size ? "(same size)" : `(size: ${existing}, this size: ${size})`;
-        logger.debug(`${checksum} duplicated in blockmap ${sizeExplanation}, it doesn't lead to broken differential downloader, just corresponding block will be skipped)`);
+        logger2.debug(`${checksum} duplicated in blockmap ${sizeExplanation}, it doesn't lead to broken differential downloader, just corresponding block will be skipped)`);
       }
       offset += size;
     }
@@ -16386,10 +17132,10 @@ function requireDifferentialDownloader() {
       if (oldBlockMap.version !== newBlockMap.version) {
         throw new Error(`version is different (${oldBlockMap.version} - ${newBlockMap.version}), full download is required`);
       }
-      const logger = this.logger;
-      const operations = (0, downloadPlanBuilder_1.computeOperations)(oldBlockMap, newBlockMap, logger);
-      if (logger.debug != null) {
-        logger.debug(JSON.stringify(operations, null, 2));
+      const logger2 = this.logger;
+      const operations = (0, downloadPlanBuilder_1.computeOperations)(oldBlockMap, newBlockMap, logger2);
+      if (logger2.debug != null) {
+        logger2.debug(JSON.stringify(operations, null, 2));
       }
       let downloadSize = 0;
       let copySize = 0;
@@ -16405,7 +17151,7 @@ function requireDifferentialDownloader() {
       if (downloadSize + copySize + (this.fileMetadataBuffer == null ? 0 : this.fileMetadataBuffer.length) !== newSize) {
         throw new Error(`Internal error, size mismatch: downloadSize: ${downloadSize}, copySize: ${copySize}, newSize: ${newSize}`);
       }
-      logger.info(`Full: ${formatBytes(newSize)}, To download: ${formatBytes(downloadSize)} (${Math.round(downloadSize / (newSize / 100))}%)`);
+      logger2.info(`Full: ${formatBytes(newSize)}, To download: ${formatBytes(downloadSize)} (${Math.round(downloadSize / (newSize / 100))}%)`);
       return this.downloadFile(operations);
     }
     downloadFile(tasks) {
@@ -17105,13 +17851,13 @@ function requireAppUpdater() {
       let result = this.downloadedUpdateHelper;
       if (result == null) {
         const dirName = (await this.configOnDisk.value).updaterCacheDirName;
-        const logger = this._logger;
+        const logger2 = this._logger;
         if (dirName == null) {
-          logger.error("updaterCacheDirName is not specified in app-update.yml Was app build using at least electron-builder 20.34.0?");
+          logger2.error("updaterCacheDirName is not specified in app-update.yml Was app build using at least electron-builder 20.34.0?");
         }
         const cacheDir = path.join(this.app.baseCachePath, dirName || this.app.name);
-        if (logger.debug != null) {
-          logger.debug(`updater cache dir: ${cacheDir}`);
+        if (logger2.debug != null) {
+          logger2.debug(`updater cache dir: ${cacheDir}`);
         }
         result = new DownloadedUpdateHelper_1.DownloadedUpdateHelper(cacheDir);
         this.downloadedUpdateHelper = result;
@@ -17286,7 +18032,7 @@ function requireBaseUpdater() {
   hasRequiredBaseUpdater = 1;
   Object.defineProperty(BaseUpdater, "__esModule", { value: true });
   BaseUpdater.BaseUpdater = void 0;
-  const child_process_1 = require$$1$4;
+  const child_process_1 = require$$1$3;
   const path = require$$1$1;
   const AppUpdater_1 = requireAppUpdater();
   let BaseUpdater$1 = class BaseUpdater extends AppUpdater_1.AppUpdater {
@@ -17473,7 +18219,7 @@ function requireAppImageUpdater() {
   Object.defineProperty(AppImageUpdater, "__esModule", { value: true });
   AppImageUpdater.AppImageUpdater = void 0;
   const builder_util_runtime_1 = requireOut();
-  const child_process_1 = require$$1$4;
+  const child_process_1 = require$$1$3;
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const fs_1 = require$$1$2;
   const path = require$$1$1;
@@ -17742,18 +18488,18 @@ function requireDebUpdater() {
       }
       return true;
     }
-    static installWithCommandRunner(packageManager, installerPath, commandRunner, logger) {
+    static installWithCommandRunner(packageManager, installerPath, commandRunner, logger2) {
       var _a;
       if (packageManager === "dpkg") {
         try {
           commandRunner(["dpkg", "-i", installerPath]);
         } catch (error2) {
-          logger.warn((_a = error2.message) !== null && _a !== void 0 ? _a : error2);
-          logger.warn("dpkg installation failed, trying to fix broken dependencies with apt-get");
+          logger2.warn((_a = error2.message) !== null && _a !== void 0 ? _a : error2);
+          logger2.warn("dpkg installation failed, trying to fix broken dependencies with apt-get");
           commandRunner(["apt-get", "install", "-f", "-y"]);
         }
       } else if (packageManager === "apt") {
-        logger.warn("Using apt to install a local .deb. This may fail for unsigned packages unless properly configured.");
+        logger2.warn("Using apt to install a local .deb. This may fail for unsigned packages unless properly configured.");
         commandRunner([
           "apt",
           "install",
@@ -17820,18 +18566,18 @@ function requirePacmanUpdater() {
       }
       return true;
     }
-    static installWithCommandRunner(installerPath, commandRunner, logger) {
+    static installWithCommandRunner(installerPath, commandRunner, logger2) {
       var _a;
       try {
         commandRunner(["pacman", "-U", "--noconfirm", installerPath]);
       } catch (error2) {
-        logger.warn((_a = error2.message) !== null && _a !== void 0 ? _a : error2);
-        logger.warn("pacman installation failed, attempting to update package database and retry");
+        logger2.warn((_a = error2.message) !== null && _a !== void 0 ? _a : error2);
+        logger2.warn("pacman installation failed, attempting to update package database and retry");
         try {
           commandRunner(["pacman", "-Sy", "--noconfirm"]);
           commandRunner(["pacman", "-U", "--noconfirm", installerPath]);
         } catch (retryError) {
-          logger.error("Retry after pacman -Sy failed");
+          logger2.error("Retry after pacman -Sy failed");
           throw retryError;
         }
       }
@@ -17889,7 +18635,7 @@ function requireRpmUpdater() {
       }
       return true;
     }
-    static installWithCommandRunner(packageManager, installerPath, commandRunner, logger) {
+    static installWithCommandRunner(packageManager, installerPath, commandRunner, logger2) {
       if (packageManager === "zypper") {
         return commandRunner(["zypper", "--non-interactive", "--no-refresh", "install", "--allow-unsigned-rpm", "-f", installerPath]);
       }
@@ -17900,7 +18646,7 @@ function requireRpmUpdater() {
         return commandRunner(["yum", "install", "--nogpgcheck", "-y", installerPath]);
       }
       if (packageManager === "rpm") {
-        logger.warn("Installing with rpm only (no dependency resolution).");
+        logger2.warn("Installing with rpm only (no dependency resolution).");
         return commandRunner(["rpm", "-Uvh", "--replacepkgs", "--replacefiles", "--nodeps", installerPath]);
       }
       throw new Error(`Package manager ${packageManager} not supported`);
@@ -17923,7 +18669,7 @@ function requireMacUpdater() {
   const http_1 = require$$4;
   const AppUpdater_1 = requireAppUpdater();
   const Provider_1 = requireProvider();
-  const child_process_1 = require$$1$4;
+  const child_process_1 = require$$1$3;
   const crypto_1 = crypto;
   let MacUpdater$1 = class MacUpdater2 extends AppUpdater_1.AppUpdater {
     constructor(options, app) {
@@ -18164,7 +18910,7 @@ function requireWindowsExecutableCodeSignatureVerifier() {
   Object.defineProperty(windowsExecutableCodeSignatureVerifier, "__esModule", { value: true });
   windowsExecutableCodeSignatureVerifier.verifySignature = verifySignature;
   const builder_util_runtime_1 = requireOut();
-  const child_process_1 = require$$1$4;
+  const child_process_1 = require$$1$3;
   const os$1 = os;
   const path = require$$1$1;
   function preparePowerShellExec(command, timeout) {
@@ -18176,15 +18922,15 @@ function requireWindowsExecutableCodeSignatureVerifier() {
     };
     return [executable, args, options];
   }
-  function verifySignature(publisherNames, unescapedTempUpdateFile, logger) {
+  function verifySignature(publisherNames, unescapedTempUpdateFile, logger2) {
     return new Promise((resolve, reject) => {
       const tempUpdateFile = unescapedTempUpdateFile.replace(/'/g, "''");
-      logger.info(`Verifying signature ${tempUpdateFile}`);
+      logger2.info(`Verifying signature ${tempUpdateFile}`);
       (0, child_process_1.execFile)(...preparePowerShellExec(`"Get-AuthenticodeSignature -LiteralPath '${tempUpdateFile}' | ConvertTo-Json -Compress"`, 20 * 1e3), (error2, stdout, stderr) => {
         var _a;
         try {
           if (error2 != null || stderr) {
-            handleError(logger, error2, stderr, reject);
+            handleError(logger2, error2, stderr, reject);
             resolve(null);
             return;
           }
@@ -18193,14 +18939,14 @@ function requireWindowsExecutableCodeSignatureVerifier() {
             try {
               const normlaizedUpdateFilePath = path.normalize(data.Path);
               const normalizedTempUpdateFile = path.normalize(unescapedTempUpdateFile);
-              logger.info(`LiteralPath: ${normlaizedUpdateFilePath}. Update Path: ${normalizedTempUpdateFile}`);
+              logger2.info(`LiteralPath: ${normlaizedUpdateFilePath}. Update Path: ${normalizedTempUpdateFile}`);
               if (normlaizedUpdateFilePath !== normalizedTempUpdateFile) {
-                handleError(logger, new Error(`LiteralPath of ${normlaizedUpdateFilePath} is different than ${normalizedTempUpdateFile}`), stderr, reject);
+                handleError(logger2, new Error(`LiteralPath of ${normlaizedUpdateFilePath} is different than ${normalizedTempUpdateFile}`), stderr, reject);
                 resolve(null);
                 return;
               }
             } catch (error3) {
-              logger.warn(`Unable to verify LiteralPath of update asset due to missing data.Path. Skipping this step of validation. Message: ${(_a = error3.message) !== null && _a !== void 0 ? _a : error3.stack}`);
+              logger2.warn(`Unable to verify LiteralPath of update asset due to missing data.Path. Skipping this step of validation. Message: ${(_a = error3.message) !== null && _a !== void 0 ? _a : error3.stack}`);
             }
             const subject = (0, builder_util_runtime_1.parseDn)(data.SignerCertificate.Subject);
             let match = false;
@@ -18212,7 +18958,7 @@ function requireWindowsExecutableCodeSignatureVerifier() {
                   return dn.get(key) === subject.get(key);
                 });
               } else if (name === subject.get("CN")) {
-                logger.warn(`Signature validated using only CN ${name}. Please add your full Distinguished Name (DN) to publisherNames configuration`);
+                logger2.warn(`Signature validated using only CN ${name}. Please add your full Distinguished Name (DN) to publisherNames configuration`);
                 match = true;
               }
               if (match) {
@@ -18222,10 +18968,10 @@ function requireWindowsExecutableCodeSignatureVerifier() {
             }
           }
           const result = `publisherNames: ${publisherNames.join(" | ")}, raw info: ` + JSON.stringify(data, (name, value) => name === "RawData" ? void 0 : value, 2);
-          logger.warn(`Sign verification failed, installer signed with incorrect certificate: ${result}`);
+          logger2.warn(`Sign verification failed, installer signed with incorrect certificate: ${result}`);
           resolve(result);
         } catch (e) {
-          handleError(logger, e, null, reject);
+          handleError(logger2, e, null, reject);
           resolve(null);
           return;
         }
@@ -18247,15 +18993,15 @@ function requireWindowsExecutableCodeSignatureVerifier() {
     }
     return data;
   }
-  function handleError(logger, error2, stderr, reject) {
+  function handleError(logger2, error2, stderr, reject) {
     if (isOldWin6()) {
-      logger.warn(`Cannot execute Get-AuthenticodeSignature: ${error2 || stderr}. Ignoring signature validation due to unsupported powershell version. Please upgrade to powershell 3 or higher.`);
+      logger2.warn(`Cannot execute Get-AuthenticodeSignature: ${error2 || stderr}. Ignoring signature validation due to unsupported powershell version. Please upgrade to powershell 3 or higher.`);
       return;
     }
     try {
       (0, child_process_1.execFileSync)(...preparePowerShellExec("ConvertTo-Json test", 10 * 1e3));
     } catch (testError) {
-      logger.warn(`Cannot execute ConvertTo-Json: ${testError.message}. Ignoring signature validation due to unsupported powershell version. Please upgrade to powershell 3 or higher.`);
+      logger2.warn(`Cannot execute ConvertTo-Json: ${testError.message}. Ignoring signature validation due to unsupported powershell version. Please upgrade to powershell 3 or higher.`);
       return;
     }
     if (error2 != null) {
@@ -18543,7 +19289,9 @@ function requireMain() {
   return main$1;
 }
 var mainExports = requireMain();
+const updateLogger = createLogger("UPDATE");
 function initAutoUpdater() {
+  mainExports.autoUpdater.logger = null;
   require$$1.ipcMain.handle("updater.check", async () => {
     try {
       await mainExports.autoUpdater.checkForUpdates();
@@ -18553,18 +19301,18 @@ function initAutoUpdater() {
     }
   });
   mainExports.autoUpdater.on("error", (err) => {
-    console.error("AutoUpdater error:", err);
+    updateLogger.warn("AutoUpdater error", err?.message || err);
   });
-  try {
-    mainExports.autoUpdater.checkForUpdatesAndNotify().catch((err) => {
-      console.warn("AutoUpdater background check skipped:", err?.message || err);
-    });
-  } catch (err) {
-    console.warn("AutoUpdater initialization skipped:", err?.message || err);
+  if (require$$1.app.isPackaged) {
+    try {
+      mainExports.autoUpdater.checkForUpdatesAndNotify().catch(() => {
+      });
+    } catch {
+    }
   }
   mainExports.autoUpdater.on("update-downloaded", () => {
-    const { dialog } = require("electron");
-    dialog.showMessageBox({
+    const { dialog: dialog2 } = require("electron");
+    dialog2.showMessageBox({
       type: "info",
       title: "Update Ready",
       message: "A new version of Apposition is ready to be installed.",
@@ -18576,34 +19324,66 @@ function initAutoUpdater() {
     });
   });
 }
-require$$1.app.userAgentFallback = getDefaultChromeUserAgent();
-require$$1.app.commandLine.appendSwitch("disable-background-timer-throttling");
-require$$1.app.commandLine.appendSwitch("disable-renderer-backgrounding");
-require$$1.app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-require$$1.app.commandLine.appendSwitch("max-active-webgl-contexts", "128");
-require$$1.app.commandLine.appendSwitch("hide-scrollbars");
-if (process.platform === "darwin") {
-  require$$1.app.commandLine.appendSwitch("disable-skia-graphite");
+function initDiagnosticsIpc(logFilePath, isDevMode2) {
+  require$$1.ipcMain.handle("diagnostics.getHealth", () => {
+    return {
+      uptimeSec: Math.floor(process.uptime()),
+      ...runtimeState.getState()
+    };
+  });
+  require$$1.ipcMain.handle("diagnostics.getErrors", () => {
+    return flightRecorder.getErrors();
+  });
+  require$$1.ipcMain.handle("diagnostics.getFlightRecorder", () => {
+    return flightRecorder.snapshot();
+  });
+  require$$1.ipcMain.handle("diagnostics.toggleGuestNoise", () => {
+    const next = !runtimeState.getState().guestLogsMuted;
+    runtimeState.setGuestLogsMuted(next);
+    return next;
+  });
+  require$$1.ipcMain.handle("diagnostics.openLogFile", () => {
+    require$$1.shell.openPath(logFilePath);
+  });
 }
-require$$1.app.commandLine.appendSwitch(
-  "disable-features",
-  "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
-);
-require$$1.app.commandLine.appendSwitch(
-  "disable-blink-features",
-  "WebAuthentication,WebAuthenticationConditionalUI"
-);
-require$$1.app.commandLine.appendSwitch(
-  "force-webrtc-ip-handling-policy",
-  "default_public_interface_only"
-);
+function initDevCommandBridge(isDevMode2) {
+  if (!isDevMode2) return;
+  const cmdPath = require$$1$1.join(require$$1.app.getPath("userData"), ".apposition-command.json");
+  const checkCommand = () => {
+    if (!require$$1$2.existsSync(cmdPath)) return;
+    try {
+      const data = JSON.parse(require$$1$2.readFileSync(cmdPath, "utf8"));
+      require$$1$2.unlinkSync(cmdPath);
+      if (data.command === "reload") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          logger.info("Soft reloading main window via dev command");
+          global.mainWindow.webContents.reload();
+        }
+      } else if (data.command === "quit") {
+        logger.info("Gracefully quitting via dev command");
+        require$$1.app.quit();
+      }
+    } catch {
+    }
+  };
+  try {
+    const dir = require$$1.app.getPath("userData");
+    require$$1$2.watch(dir, (_event, filename) => {
+      if (filename && filename.includes(".apposition-command.json")) {
+        checkCommand();
+      }
+    });
+  } catch {
+    setInterval(checkCommand, 1e3);
+  }
+}
+applyBrowserSwitches(require$$1.app);
 const isDevMode = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
 if (isDevMode) {
   require$$1.app.setName("Apposition Dev");
   try {
     require$$1.app.setPath("userData", require$$1$1.join(require$$1.app.getPath("appData"), "AppositionDev"));
-  } catch (e) {
-    console.warn("Failed to set custom dev userData path:", e);
+  } catch {
   }
 } else {
   require$$1.app.setName("Apposition");
@@ -18612,29 +19392,20 @@ const gotTheLock = require$$1.app.requestSingleInstanceLock();
 if (!gotTheLock) {
   require$$1.app.quit();
 } else {
+  const logFile = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
+  logger.setFileSink(logFile);
+  runtimeState.init(require$$1$1.join(require$$1.app.getPath("userData"), ".apposition-runtime.json"));
+  if (isDevMode) {
+    printStartupBanner("1.1.3", logFile);
+    initInteractiveTerminal(logFile);
+  }
   process.on("uncaughtException", (err) => {
-    try {
-      const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
-      require$$1$2.appendFileSync(
-        logPath,
-        `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNCAUGHT EXCEPTION] ${err.stack || err}
-`,
-        "utf8"
-      );
-    } catch {
-    }
+    runtimeState.incrementError();
+    logger.fatal("Uncaught Exception in Main Process", err?.stack || err);
   });
   process.on("unhandledRejection", (reason) => {
-    try {
-      const logPath = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
-      require$$1$2.appendFileSync(
-        logPath,
-        `[${(/* @__PURE__ */ new Date()).toISOString()}] [MAIN UNHANDLED REJECTION] ${reason}
-`,
-        "utf8"
-      );
-    } catch {
-    }
+    runtimeState.incrementError();
+    logger.error("Unhandled Rejection in Main Process", reason);
   });
   require$$1.app.on("second-instance", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
@@ -18673,18 +19444,24 @@ if (!gotTheLock) {
     gcDeletedSessions();
     initNetworkOptimizer();
     initSessionSecurity();
+    initSessionPersistenceHooks();
     initWindowManagerIpc();
     initViewManager();
     initDbIpc();
     initLicensingIpc();
     initAuthIpc();
+    initDiagnosticsIpc(logFile);
+    initDevCommandBridge(isDevMode);
+    const guestLogger = createLogger("GUEST");
     require$$1.ipcMain.handle("pane.ping", () => "pong");
-    require$$1.ipcMain.on("pane.log", (event, level, ...args) => {
+    require$$1.ipcMain.on("pane.log", (_event, level, ...args) => {
       const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
       if (level === "ERROR") {
-        console.error(`[PANE CONSOLE ${level}]`, msg);
+        guestLogger.error(msg);
+      } else if (level === "WARN") {
+        guestLogger.warn(msg);
       } else {
-        console.log(`[PANE CONSOLE ${level}]`, msg);
+        guestLogger.debug(msg);
       }
     });
     require$$1.ipcMain.handle(
@@ -18701,19 +19478,28 @@ if (!gotTheLock) {
       if (require$$1.BrowserWindow.getAllWindows().length === 0) createWindow();
     });
   });
+  require$$1.app.on("before-quit", async (e) => {
+    try {
+      await flushAllSessions();
+    } catch {
+    }
+  });
   require$$1.app.on("will-quit", () => {
     try {
       destroyAllViews();
     } catch {
     }
     closeDb();
+    defaultFileSink.close();
   });
-  require$$1.app.on("window-all-closed", () => {
+  require$$1.app.on("window-all-closed", async () => {
     try {
+      await flushAllSessions();
       destroyAllViews();
     } catch {
     }
     closeDb();
+    defaultFileSink.close();
     require$$1.app.exit(0);
   });
 }
