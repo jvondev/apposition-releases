@@ -15,7 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        include:
+          - os: macos-14
+            platform: mac
+          - os: ubuntu-22.04
+            platform: linux
+          - os: windows-latest
+            platform: win
     
     steps:
       - name: Checkout Code
@@ -34,9 +40,15 @@ jobs:
 
       - name: Build App Packages
         run: |
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then npx electron-builder --linux -c electron-builder.yml -c.npmRebuild=false --publish never; fi
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then npx electron-builder --mac -c electron-builder.yml -c.npmRebuild=false --publish never; fi
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then npx electron-builder --win -c electron-builder.yml -c.npmRebuild=false --publish never; fi
+          if [ "${{ matrix.platform }}" = "linux" ]; then
+            npx electron-builder --linux -c electron-builder.yml -c.npmRebuild=false --publish never
+          fi
+          if [ "${{ matrix.platform }}" = "mac" ]; then
+            npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never
+          fi
+          if [ "${{ matrix.platform }}" = "win" ]; then
+            npx electron-builder --win --x64 --arm64 -c electron-builder.yml -c.npmRebuild=false --publish never
+          fi
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -49,6 +61,9 @@ jobs:
             dist/*.exe
             dist/*.dmg
             dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.tar.gz
             dist/*.zip
             dist/*.yml
             dist/*.blockmap
