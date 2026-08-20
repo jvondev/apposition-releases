@@ -1,8 +1,8 @@
 cask "apposition" do
   version "1.1.5"
-  sha256 :no_check
+  sha256 "cd2dd1ef71138638f0ceb8877455aa89a0a799180a768fe477b8b198d20f6eac"
 
-  url "https://github.com/jvondev/apposition-releases/releases/download/v#{version}/Apposition-#{version}-universal.dmg"
+  url "https://github.com/jvondev/apposition-releases/releases/download/v#{version}/Apposition.App-#{version}-universal.dmg"
   name "Apposition"
   desc "A smart digital workspace to organize web apps, accounts, and tasks in one place"
   homepage "https://github.com/jvondev/apposition-releases"
