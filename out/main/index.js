@@ -380,14 +380,14 @@ const BENIGN_NOISE_PATTERNS = [
   /non-passive event listener/i
 ];
 const SECRET_PATTERNS = [
-  [/polar_[-a-zA-Z0-9_]{20,}/g, "polar_[REDACTED]"],
+  [/polar_[a-zA-Z0-9_-]{20,}/g, "polar_[REDACTED]"],
   [
     /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
     "[UUID-KEY-REDACTED]"
   ],
-  [/Bearer\s+[-a-zA-Z0-9._~+/]+=*/gi, "Bearer [REDACTED]"],
+  [/Bearer\s+[a-zA-Z0-9._~+/-]+=*/gi, "Bearer [REDACTED]"],
   [/password["']?\s*[:=]\s*["'][^"']+["']/gi, 'password: "[REDACTED]"'],
-  [/token["']?\s*[:=]\s*["'][-a-zA-Z0-9._~+/]{16,}["']/gi, 'token: "[REDACTED]"']
+  [/token["']?\s*[:=]\s*["'][a-zA-Z0-9._~+/-]{16,}["']/gi, 'token: "[REDACTED]"']
 ];
 class NoiseFilter {
   guestBuckets = /* @__PURE__ */ new Map();
@@ -2236,8 +2236,12 @@ function bindViewEvents(paneId, view) {
   });
   view.webContents.on("before-input-event", (event, input) => {
     if (input.type === "keyDown") {
-      const isReload = (input.control || input.meta) && input.key.toLowerCase() === "r" || input.key === "F5";
-      if (input.key === "F12" || input.alt && input.code === "Space" || isReload) {
+      const isMod = Boolean(input.control || input.meta);
+      const keyLower = input.key ? input.key.toLowerCase() : "";
+      const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
+      const isReload = isMod && keyLower === "r" || input.key === "F5";
+      const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
+      if (isAppShortcut) {
         event.preventDefault();
       }
       if (isReload && global.mainWindow && view.webContents.id !== global.mainWindow.webContents.id) {
@@ -2870,6 +2874,7 @@ function initTearWindowIpc() {
         alwaysOnTop: true,
         webPreferences: { preload: require$$1$1.join(__dirname, "../preload/index.js") }
       });
+      win.__isTearWindow = true;
       win.setOpacity(0.8);
       if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
         win.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#tear-${paneId}`);
@@ -2908,6 +2913,7 @@ function initTearWindowIpc() {
           safeDialogs: true
         }
       });
+      finalWin.__isTearWindow = true;
       if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
         finalWin.loadURL(
           `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
@@ -2940,6 +2946,7 @@ function createWindow() {
       webviewTag: true
     }
   });
+  mainWindow.__isMainWindow = true;
   global.mainWindow = mainWindow;
   global.overlayWindow = mainWindow;
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -3026,6 +3033,64 @@ function initWindowManagerIpc() {
   });
   initTearWindowIpc();
 }
+function handleWebContentsWindowOpen(webContents) {
+  webContents.setWindowOpenHandler((details) => {
+    const decision = evaluateWindowOpenRequest(
+      details.url,
+      details.disposition,
+      details.features
+    );
+    if (decision.type === "SYSTEM_AUTH_RELAY") {
+      startAuthRelay(details.url).catch(() => {
+        require$$1.shell.openExternal(details.url);
+      });
+      return { action: "deny" };
+    }
+    if (decision.type === "ALLOW_OAUTH_POPUP") {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          width: decision.width,
+          height: decision.height,
+          center: true,
+          titleBarStyle: "hidden",
+          titleBarOverlay: {
+            color: "#fafaf9",
+            symbolColor: "#121212",
+            height: 36
+          },
+          backgroundColor: "#FFFFFF",
+          show: true,
+          icon: require$$1$1.join(
+            __dirname,
+            process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
+          ),
+          userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
+          webPreferences: {
+            preload: void 0,
+            sandbox: true,
+            contextIsolation: true
+          }
+        }
+      };
+    }
+    if (decision.type === "NAVIGATE_CURRENT_PANE") {
+      webContents.loadURL(decision.url);
+      return { action: "deny" };
+    }
+    if (decision.type === "OPEN_IN_APP") {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("open-in-new-pane", decision.url);
+      }
+      return { action: "deny" };
+    }
+    if (decision.type === "OPEN_SYSTEM_BROWSER") {
+      require$$1.shell.openExternal(decision.url);
+      return { action: "deny" };
+    }
+    return { action: "deny" };
+  });
+}
 const patchedSessions = /* @__PURE__ */ new WeakSet();
 function configureSessionSecurity(session) {
   if (!session || patchedSessions.has(session)) return;
@@ -3077,34 +3142,32 @@ function initSessionSecurity() {
     configureSessionSecurity(session);
   });
   require$$1.app.on("browser-window-created", (_, popupWin) => {
-    if (popupWin !== global.mainWindow) {
-      const watchdog = setTimeout(() => {
-        if (!popupWin.isDestroyed()) popupWin.close();
-      }, 3e5);
-      popupWin.once("closed", () => clearTimeout(watchdog));
-      popupWin.webContents.on("will-navigate", (_e, navUrl) => {
-        if (isGoogleAuthUrl(navUrl)) {
-          popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-        }
-      });
-      popupWin.webContents.on("did-navigate", (_e, navUrl) => {
-        if (isGoogleAuthUrl(navUrl)) {
-          popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-        }
-        popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-        });
-        const lower = (navUrl || "").toLowerCase();
-        if (lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success")) {
-          setTimeout(() => {
-            if (!popupWin.isDestroyed()) popupWin.close();
-          }, 300);
-        }
-      });
-      popupWin.webContents.on("dom-ready", () => {
-        popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-        });
-      });
+    const isAppWindow = popupWin === global.mainWindow || popupWin === global.overlayWindow || popupWin.__isMainWindow || popupWin.__isTearWindow;
+    if (isAppWindow) {
+      return;
     }
+    popupWin.webContents.on("will-navigate", (_e, navUrl) => {
+      if (isGoogleAuthUrl(navUrl)) {
+        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      }
+    });
+    popupWin.webContents.on("did-navigate", (_e, navUrl) => {
+      if (isGoogleAuthUrl(navUrl)) {
+        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      }
+      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      const lower = (navUrl || "").toLowerCase();
+      if (lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success")) {
+        setTimeout(() => {
+          if (!popupWin.isDestroyed()) popupWin.close();
+        }, 300);
+      }
+    });
+    popupWin.webContents.on("dom-ready", () => {
+      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
   });
   require$$1.app.on("web-contents-created", (_, webContents) => {
     configureSessionSecurity(webContents.session);
@@ -3136,8 +3199,12 @@ function initSessionSecurity() {
     });
     webContents.on("before-input-event", (event, input) => {
       if (input.type === "keyDown") {
-        const isReload = (input.control || input.meta) && input.key.toLowerCase() === "r" || input.key === "F5";
-        if (input.key === "F12" || input.alt && input.code === "Space" || isReload) {
+        const isMod = Boolean(input.control || input.meta);
+        const keyLower = input.key ? input.key.toLowerCase() : "";
+        const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
+        const isReload = isMod && keyLower === "r" || input.key === "F5";
+        const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
+        if (isAppShortcut) {
           event.preventDefault();
         }
         if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
@@ -3169,62 +3236,7 @@ function initSessionSecurity() {
         }
       }
     });
-    webContents.setWindowOpenHandler((details) => {
-      const decision = evaluateWindowOpenRequest(
-        details.url,
-        details.disposition,
-        details.features
-      );
-      if (decision.type === "SYSTEM_AUTH_RELAY") {
-        startAuthRelay(details.url).catch(() => {
-          require$$1.shell.openExternal(details.url);
-        });
-        return { action: "deny" };
-      }
-      if (decision.type === "ALLOW_OAUTH_POPUP") {
-        return {
-          action: "allow",
-          overrideBrowserWindowOptions: {
-            width: decision.width,
-            height: decision.height,
-            center: true,
-            titleBarStyle: "hidden",
-            titleBarOverlay: {
-              color: "#fafaf9",
-              symbolColor: "#121212",
-              height: 36
-            },
-            backgroundColor: "#FFFFFF",
-            show: true,
-            icon: require$$1$1.join(
-              __dirname,
-              process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
-            ),
-            userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
-            webPreferences: {
-              preload: void 0,
-              sandbox: true,
-              contextIsolation: true
-            }
-          }
-        };
-      }
-      if (decision.type === "NAVIGATE_CURRENT_PANE") {
-        webContents.loadURL(decision.url);
-        return { action: "deny" };
-      }
-      if (decision.type === "OPEN_IN_APP") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("open-in-new-pane", decision.url);
-        }
-        return { action: "deny" };
-      }
-      if (decision.type === "OPEN_SYSTEM_BROWSER") {
-        require$$1.shell.openExternal(decision.url);
-        return { action: "deny" };
-      }
-      return { action: "deny" };
-    });
+    handleWebContentsWindowOpen(webContents);
     webContents.on("render-process-gone", (_event, details) => {
       if (details.reason === "oom" || details.reason === "crashed") {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
@@ -3286,6 +3298,10 @@ function initSessionPersistenceHooks() {
       logger.info("System suspending - flushing session data to disk");
       await flushAllSessions();
     });
+    setInterval(() => {
+      flushAllSessions().catch(() => {
+      });
+    }, 6e4);
     monitorPartitionCookies("persist:main");
     const profiles = getProfiles();
     for (const p of profiles) {

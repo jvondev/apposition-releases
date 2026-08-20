@@ -1,5 +1,5 @@
 appId: com.jvondev.apposition.app
-productName: Apposition
+productName: Apposition App
 directories:
   buildResources: assets
   output: dist
@@ -12,49 +12,19 @@ npmArgs:
   - "--legacy-peer-deps"
 publish:
   - provider: github
+    # Replace this with your public repository info
     owner: jvondev
     repo: apposition-releases
     private: false
     releaseType: release
-
 mac:
-  category: public.app-category.productivity
   target:
-    - target: dmg
-      arch:
-        - x64
-        - arm64
-        - universal
-    - target: zip
-      arch:
-        - x64
-        - arm64
-        - universal
+    - dmg
+    - zip
   icon: assets/icon.png
-  identity: null
-  gatekeeperAssess: false
-  entitlements: build/entitlements.mac.plist
-  entitlementsInherit: build/entitlements.mac.inherit.plist
-  darkModeSupport: true
-  minimumSystemVersion: "11.0.0"
-
-dmg:
-  sign: false
-  writeUpdateInfo: true
-  contents:
-    - x: 130
-      y: 220
-    - x: 410
-      y: 220
-      type: link
-      path: /Applications
-
 win:
   target:
-    - target: nsis
-      arch:
-        - x64
-        - arm64
+    - nsis
   icon: assets/icon.ico
 
 nsis:
@@ -71,34 +41,6 @@ nsis:
   uninstallerIcon: assets/icon.ico
 
 linux:
-  category: Utility;Network;WebBrowser;
   target:
-    - target: AppImage
-      arch:
-        - x64
-        - arm64
-    - target: deb
-      arch:
-        - x64
-        - arm64
-    - target: rpm
-      arch:
-        - x64
-    - target: tar.gz
-      arch:
-        - x64
+    - AppImage
   icon: assets/icon.png
-  desktop:
-    StartupWMClass: apposition
-    MimeType: x-scheme-handler/apposition;
-
-deb:
-  depends:
-    - gconf2
-    - gconf-service
-    - libnotify4
-    - libappindicator1
-    - libxtst6
-    - libnss3
-    - libasound2
-    - libsecret-1-0

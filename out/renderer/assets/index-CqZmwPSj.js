@@ -2474,6 +2474,146 @@ function reduceNavigation(state = INITIAL_NAVIGATION_STATE, action) {
       return state;
   }
 }
+const MAX_WARM_LRU_TABS = 4;
+function createInitialTabPoolState() {
+  return {
+    tabPanes: {},
+    activeTabId: "",
+    lruTabIds: [],
+    audiblePanes: {},
+    callActivePanes: {}
+  };
+}
+function computeRenderedPaneIds(state, activePaneIds, criticalPaneIds = []) {
+  const combined = new Set(activePaneIds);
+  for (const [audibleId, isAudible] of Object.entries(state.audiblePanes)) {
+    if (isAudible) combined.add(audibleId);
+  }
+  for (const [callId, inCall] of Object.entries(state.callActivePanes)) {
+    if (inCall) combined.add(callId);
+  }
+  for (const paneId of criticalPaneIds) {
+    if (paneId) combined.add(paneId);
+  }
+  const warmTabs = state.lruTabIds.filter((tabId) => tabId !== state.activeTabId).slice(0, MAX_WARM_LRU_TABS);
+  for (const tabId of warmTabs) {
+    const panes = state.tabPanes[tabId];
+    if (panes) {
+      for (const paneId of Object.keys(panes)) {
+        combined.add(paneId);
+      }
+    }
+  }
+  return Array.from(combined).sort((a, b) => a.localeCompare(b));
+}
+function reducePoolState(state = createInitialTabPoolState(), action) {
+  switch (action.type) {
+    case "ACTIVATE_TAB": {
+      const { tabId } = action;
+      if (!tabId) return state;
+      const nextLru = [tabId, ...state.lruTabIds.filter((id) => id !== tabId)];
+      return {
+        ...state,
+        activeTabId: tabId,
+        lruTabIds: nextLru
+      };
+    }
+    case "REGISTER_TAB_PANES": {
+      const { tabId, panes } = action;
+      if (!tabId || !panes) return state;
+      const paneOnly = {};
+      for (const [id, node] of Object.entries(panes)) {
+        if (node && node.type === "pane") {
+          paneOnly[id] = node;
+        }
+      }
+      const nextLru = [tabId, ...state.lruTabIds.filter((id) => id !== tabId)];
+      return {
+        ...state,
+        tabPanes: {
+          ...state.tabPanes,
+          [tabId]: paneOnly
+        },
+        lruTabIds: nextLru
+      };
+    }
+    case "UNREGISTER_TAB": {
+      const { tabId } = action;
+      if (!tabId || !state.tabPanes[tabId]) {
+        return {
+          ...state,
+          lruTabIds: state.lruTabIds.filter((id) => id !== tabId)
+        };
+      }
+      const nextTabPanes = { ...state.tabPanes };
+      delete nextTabPanes[tabId];
+      return {
+        ...state,
+        tabPanes: nextTabPanes,
+        lruTabIds: state.lruTabIds.filter((id) => id !== tabId)
+      };
+    }
+    case "UNREGISTER_PANE": {
+      const { paneId } = action;
+      if (!paneId) return state;
+      let changed = false;
+      const nextTabPanes = {};
+      for (const [tabId, panes] of Object.entries(state.tabPanes)) {
+        if (panes && panes[paneId]) {
+          changed = true;
+          const copy = { ...panes };
+          delete copy[paneId];
+          nextTabPanes[tabId] = copy;
+        } else {
+          nextTabPanes[tabId] = panes;
+        }
+      }
+      const nextAudible = { ...state.audiblePanes };
+      if (nextAudible[paneId] !== void 0) {
+        delete nextAudible[paneId];
+        changed = true;
+      }
+      const nextCall = { ...state.callActivePanes };
+      if (nextCall[paneId] !== void 0) {
+        delete nextCall[paneId];
+        changed = true;
+      }
+      if (!changed) return state;
+      return {
+        ...state,
+        tabPanes: nextTabPanes,
+        audiblePanes: nextAudible,
+        callActivePanes: nextCall
+      };
+    }
+    case "SET_PANE_AUDIBLE": {
+      const { paneId, isAudible } = action;
+      if (!paneId) return state;
+      return {
+        ...state,
+        audiblePanes: {
+          ...state.audiblePanes,
+          [paneId]: Boolean(isAudible)
+        }
+      };
+    }
+    case "SET_PANE_CALL": {
+      const { paneId, isInCall } = action;
+      if (!paneId) return state;
+      return {
+        ...state,
+        callActivePanes: {
+          ...state.callActivePanes,
+          [paneId]: Boolean(isInCall)
+        }
+      };
+    }
+    case "CLEAR_POOL":
+      return createInitialTabPoolState();
+    default:
+      return state;
+  }
+}
 function forceDomFocus(elementId, maxAttempts = 20, interval = 50) {
   let attempts = 0;
   const attemptFocus = () => {
@@ -2496,13 +2636,97 @@ function forceDomFocus(elementId, maxAttempts = 20, interval = 50) {
   };
   attemptFocus();
 }
-function focusPane(paneId, node) {
-  if (!node || node.type !== "pane") return;
-  if (node.url || node.paneType === "terminal") {
-    window.api?.viewFocus?.(paneId);
-  } else {
-    forceDomFocus(`apposition-command-bar-${paneId}`, 30, 50);
+function findSpatialTargetPane(activeId, dir, treeOverride) {
+  const tree = {
+    rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
+    nodes: layoutStore.nodes
+  };
+  if (!tree.rootId || !tree.nodes[asPaneId(activeId)]) {
+    return null;
   }
+  const canvasRect = { x: 0, y: 0, width: 1e3, height: 1e3 };
+  const rects = computeLayoutGeometry(tree, canvasRect);
+  const aRect = rects[asPaneId(activeId)];
+  if (!aRect) return null;
+  let bestId = null;
+  let minDistance = Infinity;
+  for (const pid in rects) {
+    if (pid === activeId) continue;
+    const pRect = rects[pid];
+    if (!pRect || pRect.width === 0 || pRect.height === 0) continue;
+    let valid = false;
+    let dist = Infinity;
+    if (dir === "left" && pRect.x + pRect.width <= aRect.x + 5) {
+      valid = true;
+      dist = aRect.x - (pRect.x + pRect.width) + Math.abs(aRect.y - pRect.y) * 0.5;
+    } else if (dir === "right" && pRect.x >= aRect.x + aRect.width - 5) {
+      valid = true;
+      dist = pRect.x - (aRect.x + aRect.width) + Math.abs(aRect.y - pRect.y) * 0.5;
+    } else if (dir === "up" && pRect.y + pRect.height <= aRect.y + 5) {
+      valid = true;
+      dist = aRect.y - (pRect.y + pRect.height) + Math.abs(aRect.x - pRect.x) * 0.5;
+    } else if (dir === "down" && pRect.y >= aRect.y + aRect.height - 5) {
+      valid = true;
+      dist = pRect.y - (aRect.y + aRect.height) + Math.abs(aRect.x - pRect.x) * 0.5;
+    }
+    if (valid && dist < minDistance) {
+      minDistance = dist;
+      bestId = pid;
+    }
+  }
+  return bestId;
+}
+class PaneFocusManager {
+  static currentActivePaneId = "";
+  static getActivePaneId() {
+    return this.currentActivePaneId;
+  }
+  static setActivePaneId(paneId) {
+    this.currentActivePaneId = paneId;
+    window.activePaneIdForFocus = paneId;
+  }
+  /**
+   * Authoritative focus transfer: Synchronizes logical state, visual focus ring,
+   * and physical OS/Chromium WebContents focus.
+   */
+  static focusPane(paneId, setActivePaneSignal) {
+    if (!paneId) return;
+    this.setActivePaneId(paneId);
+    if (setActivePaneSignal) setActivePaneSignal(paneId);
+    const node = layoutStore.nodes[paneId];
+    if (!node || node.type !== "pane") return;
+    if (node.url || node.paneType === "terminal") {
+      try {
+        window.api?.viewFocus?.(paneId);
+        const webviewEl = document.getElementById(`webview-${paneId}`);
+        if (webviewEl && typeof webviewEl.focus === "function") {
+          webviewEl.focus();
+        }
+      } catch {
+      }
+    } else {
+      forceDomFocus(`apposition-command-bar-${paneId}`, 20, 40);
+    }
+    window.dispatchEvent(
+      new CustomEvent("app:pane-focus-changed", { detail: { paneId } })
+    );
+  }
+  /**
+   * High-precision 2D geometric spatial navigation.
+   */
+  static navigateSpatial(currentId, dir, _getParent, setActivePaneSignal) {
+    if (!currentId) return null;
+    const targetId = findSpatialTargetPane(currentId, dir);
+    if (!targetId) return null;
+    this.focusPane(targetId, setActivePaneSignal);
+    if (layoutStore.maximizedPaneId) {
+      setLayoutStore("maximizedPaneId", targetId);
+    }
+    return targetId;
+  }
+}
+function focusPane(paneId, _node) {
+  PaneFocusManager.focusPane(paneId);
 }
 class EffectRunner {
   static runLayoutEffect(effect, getNode2) {
@@ -2573,6 +2797,206 @@ class EffectRunner {
     return geometry;
   }
 }
+const COMMUNICATION_DOMAINS = [
+  "meet.google.com",
+  "zoom.us",
+  "teams.microsoft.com",
+  "discord.com",
+  "webex.com",
+  "slack.com",
+  "gather.town",
+  "huddle"
+];
+const [criticalPanesStore, setCriticalPanesStore] = createStore({});
+const audioSilenceTimers = /* @__PURE__ */ new Map();
+function isCommunicationUrl(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return COMMUNICATION_DOMAINS.some((domain) => lower.includes(domain));
+}
+function updatePaneAudio(paneId, isPlaying, node) {
+  if (!paneId) return;
+  const existingTimer = audioSilenceTimers.get(paneId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    audioSilenceTimers.delete(paneId);
+  }
+  if (isPlaying) {
+    setCriticalPanesStore(paneId, (prev) => ({
+      paneId,
+      reason: prev?.isInCall ? "LIVE_MEETING" : "AUDIO_STREAM",
+      node: node || prev?.node,
+      lastAudioAt: Date.now(),
+      isPlaying: true,
+      isInCall: prev?.isInCall || false
+    }));
+  } else {
+    const timer = window.setTimeout(() => {
+      audioSilenceTimers.delete(paneId);
+      setCriticalPanesStore(paneId, (prev) => {
+        if (!prev) return prev;
+        if (prev.isInCall || isCommunicationUrl(prev.node?.url)) {
+          return { ...prev, isPlaying: false, reason: "LIVE_MEETING" };
+        }
+        const next = { ...prev, isPlaying: false, reason: "NONE" };
+        return next;
+      });
+    }, 1e4);
+    audioSilenceTimers.set(paneId, timer);
+  }
+}
+function updatePaneCall(paneId, isInCall, node) {
+  if (!paneId) return;
+  setCriticalPanesStore(paneId, (prev) => ({
+    paneId,
+    reason: isInCall ? "LIVE_MEETING" : prev?.isPlaying ? "AUDIO_STREAM" : "NONE",
+    node: node || prev?.node,
+    isInCall,
+    isPlaying: prev?.isPlaying || false
+  }));
+}
+function unregisterCriticalPane(paneId) {
+  if (!paneId) return;
+  const timer = audioSilenceTimers.get(paneId);
+  if (timer) {
+    clearTimeout(timer);
+    audioSilenceTimers.delete(paneId);
+  }
+  setCriticalPanesStore((prev) => {
+    if (!prev[paneId]) return prev;
+    const next = { ...prev };
+    delete next[paneId];
+    return next;
+  });
+}
+function getAllCriticalPanes() {
+  return Object.values(criticalPanesStore).filter(
+    (info) => info && (info.reason !== "NONE" || info.isPlaying || info.isInCall)
+  );
+}
+const [tabPoolStore, setTabPoolStore] = createStore(
+  createInitialTabPoolState()
+);
+function dispatchPool(action) {
+  setTabPoolStore((current) => {
+    const next = reducePoolState(current, action);
+    return reconcile(next)(current);
+  });
+}
+function registerTabNodes(tabId, nodes) {
+  if (!tabId || !nodes) return;
+  dispatchPool({ type: "REGISTER_TAB_PANES", tabId, panes: nodes });
+}
+function setActivePoolTab(tabId) {
+  if (!tabId) return;
+  dispatchPool({ type: "ACTIVATE_TAB", tabId });
+}
+function unregisterTabFromPool(tabId) {
+  if (!tabId) return;
+  dispatchPool({ type: "UNREGISTER_TAB", tabId });
+}
+function unregisterPaneFromPool(paneId) {
+  if (!paneId) return;
+  dispatchPool({ type: "UNREGISTER_PANE", paneId });
+}
+function markPaneMediaActive(paneId, isPlaying) {
+  if (!paneId) return;
+  dispatchPool({ type: "SET_PANE_AUDIBLE", paneId, isAudible: isPlaying });
+}
+function markPaneCallActive(paneId, isInCall) {
+  if (!paneId) return;
+  dispatchPool({ type: "SET_PANE_CALL", paneId, isInCall });
+}
+function getPaneFromPool(paneId) {
+  for (const panes of Object.values(tabPoolStore.tabPanes)) {
+    if (panes && panes[paneId]) return panes[paneId];
+  }
+  return void 0;
+}
+function computeRenderedPoolPaneIds(activePaneIds) {
+  const criticalIds = getAllCriticalPanes().map((c) => c.paneId).filter(Boolean);
+  return computeRenderedPaneIds(tabPoolStore, activePaneIds, criticalIds);
+}
+const [mediaStateStore, setMediaStateStore] = createStore({});
+function setMediaTimestamp(paneId, url, currentTime, duration) {
+  if (!paneId) return;
+  setMediaStateStore(paneId, (prev) => ({
+    currentTime,
+    duration,
+    scrollY: prev?.scrollY || 0,
+    lastUpdated: Date.now(),
+    url: url || prev?.url
+  }));
+}
+function setPaneScroll(paneId, scrollY, url) {
+  if (!paneId) return;
+  setMediaStateStore(paneId, (prev) => ({
+    currentTime: prev?.currentTime || 0,
+    duration: prev?.duration || 0,
+    scrollY,
+    lastUpdated: Date.now(),
+    url: url || prev?.url
+  }));
+}
+function getPaneContinuityState(paneId) {
+  return mediaStateStore[paneId];
+}
+let isTrackerInitialized = false;
+function initMediaTimestampTracker() {
+  if (isTrackerInitialized || typeof window === "undefined") {
+    return () => {
+    };
+  }
+  isTrackerInitialized = true;
+  const handleMediaTimestamp = (e) => {
+    const detail = e.detail;
+    if (detail && detail.paneId && typeof detail.currentTime === "number") {
+      setMediaTimestamp(
+        detail.paneId,
+        detail.url || "",
+        detail.currentTime,
+        detail.duration || 0
+      );
+    }
+  };
+  const handleScrollPosition = (e) => {
+    const detail = e.detail;
+    if (detail && detail.paneId && typeof detail.scrollY === "number") {
+      setPaneScroll(detail.paneId, detail.scrollY, detail.url);
+    }
+  };
+  window.addEventListener("app:media-timestamp", handleMediaTimestamp);
+  window.addEventListener("app:scroll-position", handleScrollPosition);
+  return () => {
+    window.removeEventListener("app:media-timestamp", handleMediaTimestamp);
+    window.removeEventListener("app:scroll-position", handleScrollPosition);
+    isTrackerInitialized = false;
+  };
+}
+const [workspaceTabHostStore, setWorkspaceTabHostStore] = createStore({
+  persistedNodes: {},
+  activeWorkspaceId: ""
+});
+function registerWorkspaceNodes(wsId, nodes) {
+  if (!nodes) return;
+  for (const [id, node] of Object.entries(nodes)) {
+    if (node && node.type === "pane") {
+      setWorkspaceTabHostStore("persistedNodes", id, node);
+    }
+  }
+}
+function unregisterWorkspacePane(paneId) {
+  if (!paneId) return;
+  setWorkspaceTabHostStore("persistedNodes", (prev) => {
+    if (!prev[paneId]) return prev;
+    const next = { ...prev };
+    delete next[paneId];
+    return next;
+  });
+}
+function getHostPane(paneId) {
+  return workspaceTabHostStore.persistedNodes[paneId];
+}
 function useLayoutMutator(state, dependencies) {
   const {
     activeWorkspace,
@@ -2634,7 +3058,10 @@ function useLayoutMutator(state, dependencies) {
       if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
       setLayoutStore("nodes", reconcile(nextTree.nodes));
     });
+    registerTabNodes(activeTabId(), nextTree.nodes);
+    registerWorkspaceNodes(state.activeWorkspace?.(), nextTree.nodes);
     setActivePaneId(newPaneId);
+    PaneFocusManager.focusPane(newPaneId, setActivePaneId);
     saveLayout(true);
     EffectRunner.runLayoutEffects(effects, (id) => layoutStore.nodes[id]);
     if (initialUrl) {
@@ -2647,6 +3074,9 @@ function useLayoutMutator(state, dependencies) {
     }
   };
   const handleClose = async (paneId, killTerminal = true, preventTabDelete = false) => {
+    unregisterPaneFromPool(paneId);
+    unregisterCriticalPane(paneId);
+    unregisterWorkspacePane(paneId);
     EffectRunner.runLayoutEffect({ type: "DESTROY_NATIVE_VIEW", paneId: asPaneId(paneId) });
     const closingNode = layoutStore.nodes[paneId];
     if (closingNode?.paneType === "terminal" && killTerminal) {
@@ -2657,6 +3087,29 @@ function useLayoutMutator(state, dependencies) {
     if (layoutStore.rootId === paneId) {
       if (!activeTabId() || !activeWorkspace()) return;
       const currentTabs = tabs();
+      setClosedItemsStack((prev) => [
+        ...prev,
+        {
+          type: "tab",
+          workspaceId: activeWorkspace(),
+          tabId: activeTabId(),
+          layout: JSON.stringify({
+            nodes: { [paneId]: closingNode },
+            rootId: paneId,
+            activePaneId: paneId
+          }),
+          name: closingNode?.title || "New Tab"
+        }
+      ]);
+      window.dispatchEvent(
+        new CustomEvent("app:closed-item-toast", {
+          detail: {
+            title: closingNode?.title || (closingNode?.url ? "Page" : "Tab"),
+            url: closingNode?.url || "",
+            type: "tab"
+          }
+        })
+      );
       if (currentTabs.length <= 1) {
         setLayoutStore(
           "nodes",
@@ -2727,6 +3180,15 @@ function useLayoutMutator(state, dependencies) {
     if (activePaneId() === paneId) setActivePaneId(findFirstPane(siblingId));
     saveLayout(true);
     EffectRunner.runLayoutEffects(effects, (id) => layoutStore.nodes[id]);
+    window.dispatchEvent(
+      new CustomEvent("app:closed-item-toast", {
+        detail: {
+          title: closingNode?.title || (closingNode?.url ? "Page" : "Pane"),
+          url: closingNode?.url || "",
+          type: "pane"
+        }
+      })
+    );
   };
   const handleRatioChange = (splitId, ratio) => {
     const [nextTree] = reduceLayout(getCurrentTree(), {
@@ -2916,45 +3378,14 @@ function useLayoutNavigation(state, dependencies) {
   const { activePaneId, setActivePaneId, getParent } = state;
   const { saveLayout } = dependencies;
   const navigatePaneFocus = (dir) => {
-    let current = activePaneId();
-    const requiredPos = {
-      up: "b",
-      down: "a",
-      left: "b",
-      right: "a"
-    };
-    const targetDir = dir === "up" || dir === "down" ? "vertical" : "horizontal";
-    let parent = getParent(current);
-    let splitBoundary = null;
-    let entranceDir = "";
-    while (parent) {
-      const [node, pos] = parent;
-      if (node.direction === targetDir && pos === requiredPos[dir]) {
-        splitBoundary = node;
-        entranceDir = dir;
-        break;
-      }
-      current = node.id;
-      parent = getParent(current);
-    }
-    if (!splitBoundary) return;
-    let targetNodeId = requiredPos[dir] === "a" ? splitBoundary.b : splitBoundary.a;
-    while (true) {
-      const n = layoutStore.nodes[targetNodeId];
-      if (!n || n.type === "pane") {
-        setActivePaneId(targetNodeId);
-        if (layoutStore.maximizedPaneId)
-          setLayoutStore("maximizedPaneId", targetNodeId);
-        break;
-      }
-      if (n.type === "split") {
-        if (n.direction === "vertical") {
-          targetNodeId = entranceDir === "up" ? n.b : entranceDir === "down" ? n.a : n.a;
-        } else {
-          targetNodeId = entranceDir === "left" ? n.b : entranceDir === "right" ? n.a : n.a;
-        }
-      }
-    }
+    const current = activePaneId();
+    if (!current) return;
+    PaneFocusManager.navigateSpatial(
+      current,
+      dir,
+      getParent,
+      setActivePaneId
+    );
   };
   const swapPaneNode = (dir) => {
     let current = activePaneId();
@@ -3006,42 +3437,30 @@ function useWorkspaceLayout(state, dependencies) {
       const allWorkspaces = await window.api?.getWorkspaces() || [];
       const currentActiveWs = activeWorkspace();
       const currentActiveTab = activeTabId();
-      let activeWsTabsChanged = false;
       for (const ws of allWorkspaces) {
         const wsTabs = await window.api?.getTabs(ws.id) || [];
-        let deletedTabsCount = 0;
         for (const tab of wsTabs) {
           if (tab.id === currentActiveTab) continue;
           if (!tab.layout_state) continue;
           try {
             const stateJSON = JSON.parse(tab.layout_state);
             let shouldDelete = false;
-            if (!stateJSON.rootId || stateJSON.rootId === "" || !stateJSON.nodes || Object.keys(stateJSON.nodes).length === 0) {
+            if (!stateJSON.rootId || stateJSON.rootId === "") {
               shouldDelete = true;
+            } else if (stateJSON.nodes && Object.keys(stateJSON.nodes).length === 1) {
+              const node = stateJSON.nodes[stateJSON.rootId];
+              if (node && node.type === "pane" && (!node.url || node.url === "") && node.paneType !== "terminal") {
+                shouldDelete = true;
+              }
             }
             if (shouldDelete) {
               await window.api?.deleteTab(tab.id);
-              deletedTabsCount++;
             }
-          } catch (e) {
+          } catch {
           }
         }
-        if (wsTabs.length > 0 && wsTabs.length === deletedTabsCount && ws.id !== currentActiveWs) {
-          await window.api?.deleteWorkspace(ws.id);
-        } else if (ws.id === currentActiveWs && deletedTabsCount > 0) {
-          activeWsTabsChanged = true;
-        }
       }
-      if (activeWsTabsChanged) {
-        const newTabs = await window.api?.getTabs(currentActiveWs);
-        setTabs(newTabs || []);
-      }
-      if (state.setWorkspaces) {
-        const finalWorkspaces = await window.api?.getWorkspaces() || [];
-        state.setWorkspaces(finalWorkspaces);
-      }
-    } catch (e) {
-      console.error(e);
+    } catch {
     }
   };
   const reopenClosedTab = async () => {
@@ -3068,38 +3487,54 @@ function useWorkspaceLayout(state, dependencies) {
           loadNodesForTab(id, t);
         });
       }
-    } else if (last.type === "pane" && last.workspaceId === activeWorkspace() && last.tabId === activeTabId() && last.paneData && last.siblingId) {
+    } else if (last.type === "pane" && last.workspaceId === activeWorkspace() && last.tabId === activeTabId() && last.paneData) {
       let targetSiblingId = last.siblingId;
-      if (!layoutStore.nodes[targetSiblingId]) {
+      if (!targetSiblingId || !layoutStore.nodes[targetSiblingId]) {
         targetSiblingId = layoutStore.rootId;
       }
       const restoredPaneId = generateUniqueId("pane");
-      const newSplitId = generateUniqueId("split");
-      setLayoutStore("nodes", restoredPaneId, {
+      const restoredNode = {
         ...last.paneData,
         id: restoredPaneId
-      });
-      let aId = last.wasA ? restoredPaneId : targetSiblingId;
-      let bId = last.wasA ? targetSiblingId : restoredPaneId;
-      setLayoutStore("nodes", newSplitId, {
-        type: "split",
-        id: newSplitId,
-        direction: last.splitDir || "horizontal",
-        ratio: 0.5,
-        a: aId,
-        b: bId
-      });
-      const parent = getParent(targetSiblingId);
-      if (parent) {
-        setLayoutStore("nodes", parent[0].id, (node) => ({
-          ...node,
-          [parent[1]]: newSplitId
-        }));
-      } else if (layoutStore.rootId === targetSiblingId) {
-        setLayoutStore("rootId", newSplitId);
+      };
+      if (!targetSiblingId || !layoutStore.nodes[targetSiblingId] || layoutStore.rootId === "") {
+        setLayoutStore("nodes", reconcile({ [restoredPaneId]: restoredNode }));
+        setLayoutStore("rootId", restoredPaneId);
+      } else {
+        const newSplitId = generateUniqueId("split");
+        const aId = last.wasA ? restoredPaneId : targetSiblingId;
+        const bId = last.wasA ? targetSiblingId : restoredPaneId;
+        const nextNodes = {
+          ...layoutStore.nodes,
+          [restoredPaneId]: restoredNode,
+          [newSplitId]: {
+            type: "split",
+            id: newSplitId,
+            direction: last.splitDir || "horizontal",
+            ratio: 0.5,
+            a: aId,
+            b: bId
+          }
+        };
+        const parent = getParent(targetSiblingId);
+        if (parent) {
+          nextNodes[parent[0].id] = {
+            ...parent[0],
+            [parent[1]]: newSplitId
+          };
+        } else if (layoutStore.rootId === targetSiblingId) {
+          setLayoutStore("rootId", newSplitId);
+        }
+        setLayoutStore("nodes", reconcile(nextNodes));
       }
+      registerTabNodes(activeTabId(), layoutStore.nodes);
+      registerWorkspaceNodes(activeWorkspace(), layoutStore.nodes);
       state.setActivePaneId(restoredPaneId);
+      PaneFocusManager.focusPane(restoredPaneId, state.setActivePaneId);
       dependencies.saveLayout(true);
+      window.dispatchEvent(
+        new CustomEvent("pane-target-mounted", { detail: restoredPaneId })
+      );
     }
   };
   return {
@@ -3161,11 +3596,6 @@ function useWorkspaceNavigation(state, dependencies) {
     }
     const currentWs = activeWorkspace();
     const isWorkspaceSwitch = currentWs !== targetWsId;
-    try {
-      await window.api?.viewHibernateAllActive?.();
-    } catch (e) {
-      console.warn("Failed to hibernate panes for transition", e);
-    }
     setLayoutStore("isTransitioning", true);
     window.api?.viewHideAll?.();
     window.api?.focusMainWindow?.();
@@ -3215,11 +3645,6 @@ function useWorkspaceNavigation(state, dependencies) {
         direction = "backward";
       }
     }
-    try {
-      await window.api?.viewHibernateAllActive?.();
-    } catch (e) {
-      console.warn("Failed to hibernate panes for transition", e);
-    }
     setLayoutStore("isTransitioning", true);
     window.api?.viewHideAll?.();
     window.api?.focusMainWindow?.();
@@ -3244,11 +3669,6 @@ function useWorkspaceNavigation(state, dependencies) {
     focusPane(state.activePaneId(), layoutStore.nodes[state.activePaneId()]);
   };
   const switchWorkspace = async (wsId, direction) => {
-    try {
-      await window.api?.viewHibernateAllActive?.();
-    } catch (e) {
-      console.warn("Failed to hibernate panes for transition", e);
-    }
     setLayoutStore("isTransitioning", true);
     if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
     window.api?.viewHideAll?.();
@@ -3275,11 +3695,6 @@ function useWorkspaceNavigation(state, dependencies) {
     }
   };
   const switchTab = async (tabId, direction) => {
-    try {
-      await window.api?.viewHibernateAllActive?.();
-    } catch (e) {
-      console.warn("Failed to hibernate panes for transition", e);
-    }
     setLayoutStore("isTransitioning", true);
     if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
     window.api?.viewHideAll?.();
@@ -3473,7 +3888,15 @@ function createWorkspaceLoader(state, history) {
       const getTreeNodes = (id, acc) => {
         const n = layoutStore.nodes[id];
         if (!n) return acc;
-        acc[id] = n;
+        acc[id] = { ...n };
+        if (n.type === "pane") {
+          const cont = getPaneContinuityState(id);
+          if (cont) {
+            if (cont.currentTime > 0) acc[id].mediaTime = cont.currentTime;
+            if (cont.duration > 0) acc[id].mediaDuration = cont.duration;
+            if (cont.scrollY > 0) acc[id].scrollY = cont.scrollY;
+          }
+        }
         if (n.type === "split") {
           getTreeNodes(n.a, acc);
           getTreeNodes(n.b, acc);
@@ -3531,9 +3954,18 @@ function createWorkspaceLoader(state, history) {
               n.historyIndex = idx;
               n.canGoBack = Boolean(n.canGoBack || idx > 0);
               n.canGoForward = Boolean(n.canGoForward || idx >= 0 && idx < h.length - 1);
+              if (typeof n.mediaTime === "number" && n.mediaTime > 0) {
+                setMediaTimestamp(n.id, n.url || "", n.mediaTime, n.mediaDuration || 0);
+              }
+              if (typeof n.scrollY === "number" && n.scrollY > 0) {
+                setPaneScroll(n.id, n.scrollY, n.url);
+              }
             }
           }
           history.seedHistory(tabId, tab.layout_state);
+          registerTabNodes(tabId, parsedState.nodes);
+          registerWorkspaceNodes(state.activeWorkspace(), parsedState.nodes);
+          setActivePoolTab(tabId);
           setLayoutStore("nodes", reconcile(parsedState.nodes));
           setLayoutStore("rootId", parsedState.rootId);
           if (parsedState.activePaneId && parsedState.nodes[parsedState.activePaneId]) {
@@ -3575,6 +4007,9 @@ function createWorkspaceLoader(state, history) {
         profileId: defaultProfile
       }
     };
+    registerTabNodes(tabId, initialNodes);
+    registerWorkspaceNodes(state.activeWorkspace(), initialNodes);
+    setActivePoolTab(tabId);
     setLayoutStore("nodes", reconcile(initialNodes));
     setLayoutStore("rootId", initialId);
     window.activePaneIdForFocus = initialId;
@@ -4343,6 +4778,13 @@ const DEFAULT_SHORTCUTS = [
     category: "General"
   },
   {
+    id: "undo_closed",
+    key: "z",
+    mod: true,
+    label: "Undo Closed Item",
+    category: "General"
+  },
+  {
     id: "pin_tab",
     key: "p",
     mod: true,
@@ -4583,46 +5025,6 @@ function getShortcutDisplay(id) {
     else parts.push(s.code);
   }
   return parts.join(isMac ? "" : "+");
-}
-function findSpatialTargetPane(activeId, dir, treeOverride) {
-  const tree = {
-    rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
-    nodes: layoutStore.nodes
-  };
-  if (!tree.rootId || !tree.nodes[asPaneId(activeId)]) {
-    return null;
-  }
-  const canvasRect = { x: 0, y: 0, width: 1e3, height: 1e3 };
-  const rects = computeLayoutGeometry(tree, canvasRect);
-  const aRect = rects[asPaneId(activeId)];
-  if (!aRect) return null;
-  let bestId = null;
-  let minDistance = Infinity;
-  for (const pid in rects) {
-    if (pid === activeId) continue;
-    const pRect = rects[pid];
-    if (!pRect || pRect.width === 0 || pRect.height === 0) continue;
-    let valid = false;
-    let dist = Infinity;
-    if (dir === "left" && pRect.x + pRect.width <= aRect.x + 5) {
-      valid = true;
-      dist = aRect.x - (pRect.x + pRect.width) + Math.abs(aRect.y - pRect.y) * 0.5;
-    } else if (dir === "right" && pRect.x >= aRect.x + aRect.width - 5) {
-      valid = true;
-      dist = pRect.x - (aRect.x + aRect.width) + Math.abs(aRect.y - pRect.y) * 0.5;
-    } else if (dir === "up" && pRect.y + pRect.height <= aRect.y + 5) {
-      valid = true;
-      dist = aRect.y - (pRect.y + pRect.height) + Math.abs(aRect.x - pRect.x) * 0.5;
-    } else if (dir === "down" && pRect.y >= aRect.y + aRect.height - 5) {
-      valid = true;
-      dist = pRect.y - (aRect.y + aRect.height) + Math.abs(aRect.x - pRect.x) * 0.5;
-    }
-    if (valid && dist < minDistance) {
-      minDistance = dist;
-      bestId = pid;
-    }
-  }
-  return bestId;
 }
 const jump = (arr, currentId, dir) => {
   if (arr.length <= 1) return null;
@@ -5041,6 +5443,7 @@ function executeShortcutAction(action, e, isMac, ws, ui) {
       window.dispatchEvent(new CustomEvent("app:toggle-cheat-sheet"));
       break;
     case "reopen_tab":
+    case "undo_closed":
       if (e.repeat) return;
       e.preventDefault();
       if (ws.reopenClosedTab) ws.reopenClosedTab();
@@ -5199,7 +5602,7 @@ function useShortcutEngine(ws, ui) {
   });
 }
 const logo = "" + new URL("logo-yHKUUx0t.svg", import.meta.url).href;
-var _tmpl$$1b = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Docked Inset"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$S = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Floating Overlap"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$J = /* @__PURE__ */ template(`<div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$w = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1c = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Docked Inset"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Floating Overlap"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$H = /* @__PURE__ */ template(`<div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$v = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95"style=-webkit-app-region:no-drag>`);
 function AppUiHub(props) {
   const cycleMode = () => {
     const current = props.uiMode();
@@ -5223,7 +5626,7 @@ function AppUiHub(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$4$w(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$4$v(), _el$2 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
@@ -5235,21 +5638,21 @@ function AppUiHub(props) {
             return props.uiMode() === "inset";
           },
           get children() {
-            return _tmpl$$1b();
+            return _tmpl$$1c();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "overlap";
           },
           get children() {
-            return _tmpl$2$S();
+            return _tmpl$2$R();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "collapse";
           },
           get children() {
-            var _el$5 = _tmpl$3$J(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild;
+            var _el$5 = _tmpl$3$H(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild;
             setAttribute(_el$7, "src", logo);
             return _el$5;
           }
@@ -5289,7 +5692,7 @@ var defaultAttributes = {
   "stroke-linejoin": "round"
 };
 var defaultAttributes_default = defaultAttributes;
-var _tmpl$$1a = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<svg>`);
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 var mergeClasses = (...classes) => classes.filter((className2, index, array) => {
   return Boolean(className2) && className2.trim() !== "" && array.indexOf(className2) === index;
@@ -5297,7 +5700,7 @@ var mergeClasses = (...classes) => classes.filter((className2, index, array) => 
 var Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$1a();
+    var _el$ = _tmpl$$1b();
     spread(_el$, mergeProps(defaultAttributes_default, {
       get width() {
         return localProps.size ?? defaultAttributes_default.width;
@@ -7725,7 +8128,7 @@ function getSmartIconId(name = "") {
     return "moon";
   return "folder";
 }
-var _tmpl$$19 = /* @__PURE__ */ template(`<span>`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<span>`);
 function WorkspaceIcon(props) {
   const iconId = () => {
     if (props.icon && props.icon !== "auto") {
@@ -7738,7 +8141,7 @@ function WorkspaceIcon(props) {
     return item ? item.component : folder_default;
   };
   return (() => {
-    var _el$ = _tmpl$$19();
+    var _el$ = _tmpl$$1a();
     insert(_el$, () => {
       const Comp = IconComp();
       return createComponent(Comp, {
@@ -7754,14 +8157,14 @@ function WorkspaceIcon(props) {
     return _el$;
   })();
 }
-var _tmpl$$18 = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
+var _tmpl$$19 = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
 function TabIslandEyebrow(props) {
   return createComponent(Show, {
     get when() {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$18(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$$19(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, createComponent(WorkspaceIcon, {
         get icon() {
           return props.workspaceIcon;
@@ -13100,7 +13503,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$17 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$I = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$v = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$l = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$d = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$9 = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$2 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$18 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$Q = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$G = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$u = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$l = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$d = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$9 = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$2 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -13125,7 +13528,7 @@ function TabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$17();
+        var _el$ = _tmpl$$18();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
@@ -13157,7 +13560,7 @@ function TabPopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$4$v(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$4 = _tmpl$4$u(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
               insert(_el$8, createComponent(Show, {
                 get when() {
                   return props.isSplit;
@@ -13166,7 +13569,7 @@ function TabPopover(props) {
                   return _tmpl$9$2();
                 },
                 get children() {
-                  return _tmpl$2$R();
+                  return _tmpl$2$Q();
                 }
               }));
               insert(_el$5, createComponent(Show, {
@@ -13174,7 +13577,7 @@ function TabPopover(props) {
                   return !props.tab.custom_name;
                 },
                 get children() {
-                  return _tmpl$3$I();
+                  return _tmpl$3$G();
                 }
               }), null);
               _el$10.$$keydown = (e) => {
@@ -13274,7 +13677,7 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$16 = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$Q = /* @__PURE__ */ template(`<div>`), _tmpl$3$H = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$P = /* @__PURE__ */ template(`<div>`), _tmpl$3$F = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
 function Favicon(props) {
   const [hasError, setHasError] = createSignal(false);
   const [useFallback, setUseFallback] = createSignal(false);
@@ -13302,14 +13705,14 @@ function Favicon(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$2$Q();
+    var _el$ = _tmpl$2$P();
     insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!faviconUrl())() && !hasError();
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$3$H();
+          var _el$3 = _tmpl$3$F();
           createRenderEffect((_p$) => {
             var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
             _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
@@ -13323,7 +13726,7 @@ function Favicon(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$16();
+        var _el$2 = _tmpl$$17();
         _el$2.addEventListener("error", handleError2);
         createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
         return _el$2;
@@ -13343,7 +13746,7 @@ function Favicon(props) {
     return _el$;
   })();
 }
-var _tmpl$$15 = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$P = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$16 = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$O = /* @__PURE__ */ template(`<div>`);
 function TabFaviconStack(props) {
   const size = () => props.size || 14;
   const validUrls = () => props.urls.filter((u) => u && u.trim().length > 0 && u !== "about:blank");
@@ -13360,7 +13763,7 @@ function TabFaviconStack(props) {
       return validUrls().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$2$P();
+      var _el$ = _tmpl$2$O();
       insert(_el$, createComponent(For, {
         get each() {
           return displayUrls().slice(0, 3);
@@ -13368,7 +13771,7 @@ function TabFaviconStack(props) {
         children: (url, idx) => {
           const isFocused = () => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url)));
           return (() => {
-            var _el$4 = _tmpl$2$P();
+            var _el$4 = _tmpl$2$O();
             insert(_el$4, createComponent(Favicon, {
               url,
               get size() {
@@ -13393,7 +13796,7 @@ function TabFaviconStack(props) {
           return validUrls().length > 3;
         },
         get children() {
-          var _el$2 = _tmpl$$15();
+          var _el$2 = _tmpl$$16();
           _el$2.firstChild;
           insert(_el$2, () => validUrls().length - 3, null);
           createRenderEffect((_p$) => {
@@ -13413,6 +13816,13 @@ function TabFaviconStack(props) {
     }
   });
 }
+const EMPTY_TAB_LEAF_INFO = Object.freeze({
+  leafPaneIds: [],
+  leafUrls: [],
+  leafTitles: [],
+  paneCount: 0,
+  isSplit: false
+});
 function getLeafPanesFromNodes(rootId, nodes) {
   if (!rootId || !nodes || !nodes[rootId]) return [];
   const node = nodes[rootId];
@@ -13429,35 +13839,40 @@ function getLeafPanesFromNodes(rootId, nodes) {
   return [];
 }
 function extractTabLeafInfo(tabId, activeTabId, liveNodes, liveRootId, tabLayoutState) {
-  let leafPanes = [];
-  if (tabId === activeTabId && liveRootId && liveNodes) {
-    leafPanes = getLeafPanesFromNodes(liveRootId, liveNodes);
-  } else if (tabLayoutState) {
-    try {
-      const parsed = JSON.parse(tabLayoutState);
-      if (parsed && parsed.nodes && parsed.rootId) {
-        leafPanes = getLeafPanesFromNodes(parsed.rootId, parsed.nodes);
+  if (!tabId) return EMPTY_TAB_LEAF_INFO;
+  try {
+    let leafPanes = [];
+    if (tabId === activeTabId && liveRootId && liveNodes) {
+      leafPanes = getLeafPanesFromNodes(liveRootId, liveNodes);
+    } else if (tabLayoutState) {
+      try {
+        const parsed = typeof tabLayoutState === "string" ? JSON.parse(tabLayoutState) : tabLayoutState;
+        if (parsed && parsed.nodes && parsed.rootId) {
+          leafPanes = getLeafPanesFromNodes(parsed.rootId, parsed.nodes);
+        }
+      } catch {
       }
-    } catch {
     }
+    const validUrls = [];
+    const validTitles = [];
+    for (const pane of leafPanes) {
+      if (pane && pane.url && pane.url !== "about:blank") {
+        validUrls.push(pane.url);
+      }
+      if (pane && pane.title) {
+        validTitles.push(pane.title);
+      }
+    }
+    return {
+      leafPaneIds: leafPanes.map((p) => p.id),
+      leafUrls: validUrls,
+      leafTitles: validTitles,
+      paneCount: leafPanes.length,
+      isSplit: leafPanes.length > 1
+    };
+  } catch {
+    return EMPTY_TAB_LEAF_INFO;
   }
-  const validUrls = [];
-  const validTitles = [];
-  for (const pane of leafPanes) {
-    if (pane.url && pane.url !== "about:blank") {
-      validUrls.push(pane.url);
-    }
-    if (pane.title) {
-      validTitles.push(pane.title);
-    }
-  }
-  return {
-    leafPaneIds: leafPanes.map((p) => p.id),
-    leafUrls: validUrls,
-    leafTitles: validTitles,
-    paneCount: leafPanes.length,
-    isSplit: leafPanes.length > 1
-  };
 }
 const BRAND_MAP = {
   github: "GitHub",
@@ -13599,7 +14014,7 @@ function computeSmartTabName(customName, leafPanes) {
   const primaryName = formatSmartDomain(validPanes[0].url);
   return `${primaryName} + ${validPanes.length - 1}`;
 }
-var _tmpl$$14 = /* @__PURE__ */ template(`<span class="flex items-center gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$O = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$G = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+var _tmpl$$15 = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$N = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$E = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
 function TabItem(props) {
   const leafInfo = createMemo(() => extractTabLeafInfo(props.tab.id, props.activeTabId || (props.isActive ? props.tab.id : ""), layoutStore.nodes, layoutStore.rootId, props.tab.layout_state));
   const activeUrl = createMemo(() => {
@@ -13610,7 +14025,8 @@ function TabItem(props) {
     const ids = leafInfo().leafPaneIds;
     const pMap = props.playingTabIds;
     if (!pMap) return false;
-    return Boolean(pMap[props.tab.id] || props.isActive && props.activePaneId && pMap[props.activePaneId] || ids.some((id) => pMap[id]));
+    if (pMap[props.tab.id]) return true;
+    return ids.some((id) => Boolean(pMap[id]));
   });
   const smartName = createMemo(() => {
     const info = leafInfo();
@@ -13629,7 +14045,7 @@ function TabItem(props) {
     return name;
   });
   return (() => {
-    var _el$ = _tmpl$3$G(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$3$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
     addEventListener(_el$3, "click", props.onTabClick, true);
     insert(_el$3, createComponent(TabFaviconStack, {
@@ -13647,7 +14063,7 @@ function TabItem(props) {
         return isPlaying();
       },
       get children() {
-        var _el$5 = _tmpl$$14();
+        var _el$5 = _tmpl$$15();
         _el$5.$$click = (e) => {
           e.stopPropagation();
           const ids = leafInfo().leafPaneIds;
@@ -13708,7 +14124,7 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$6 = _tmpl$2$O();
+        var _el$6 = _tmpl$2$N();
         _el$6.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
@@ -13744,21 +14160,13 @@ function TabItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$13 = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$N = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$14 = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$M = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
   const [cascadePrompt, setCascadePrompt] = createSignal(null);
   const [playingTabIds, setPlayingTabIds] = createSignal({});
   onMount(() => {
-    window.__testMedia = (isPlaying = true, targetId) => {
-      const paneId = targetId || props.activePaneId || props.tabs[0]?.id;
-      console.log(`%c[Apposition Media Test]%c Setting paneId="${paneId}" isPlaying=${isPlaying}`, "color: #10b981; font-weight: bold", "color: inherit");
-      setPlayingTabIds((prev) => ({
-        ...prev,
-        [paneId]: isPlaying
-      }));
-    };
     const handleMediaUpdate = (data) => {
       if (data && data.paneId) {
         setPlayingTabIds((prev) => ({
@@ -13776,12 +14184,11 @@ function TabIsland(props) {
     onCleanup(() => {
       unsub?.();
       window.removeEventListener("app:media-status", onDomMedia);
-      delete window.__testMedia;
     });
   });
   const isCompact = () => props.tabs.length > 3;
   return (() => {
-    var _el$ = _tmpl$2$N(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$M(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
@@ -13867,6 +14274,7 @@ function TabIsland(props) {
             });
           },
           onDeleteTab: async () => {
+            unregisterTabFromPool(tab.id);
             await window.api?.deleteTab(tab.id);
             setConfigOpenId(null);
             props.onCloseTab?.(tab.id);
@@ -13894,7 +14302,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$13();
+        return _tmpl$$14();
       }
     }), _el$4);
     _el$5.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
@@ -13903,11 +14311,43 @@ function TabIsland(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$12 = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$13 = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
   const handleCloseTab = async (tabId) => {
-    await window.api?.deleteTab(tabId).catch(console.error);
     const currentTabs = props.ws.tabs();
+    const tabToClose = currentTabs.find((t) => t.id === tabId);
+    if (tabToClose) {
+      let tabUrl = "";
+      try {
+        if (tabToClose.layout_state) {
+          const parsed = JSON.parse(tabToClose.layout_state);
+          const rootPane = parsed.nodes?.[parsed.activePaneId || parsed.rootId];
+          if (rootPane?.url) tabUrl = rootPane.url;
+          for (const pid of Object.keys(parsed.nodes || {})) {
+            unregisterPaneFromPool(pid);
+            unregisterCriticalPane(pid);
+            unregisterWorkspacePane(pid);
+            window.api?.viewDestroy?.(pid);
+          }
+        }
+      } catch {
+      }
+      props.ws.setClosedItemsStack?.((prev) => [...prev, {
+        type: "tab",
+        workspaceId: props.ws.activeWorkspace(),
+        tabId,
+        layout: tabToClose.layout_state,
+        name: tabToClose.name
+      }]);
+      window.dispatchEvent(new CustomEvent("app:closed-item-toast", {
+        detail: {
+          title: tabToClose.name || "Tab",
+          url: tabUrl,
+          type: "tab"
+        }
+      }));
+    }
+    await window.api?.deleteTab(tabId).catch(console.error);
     const remaining = currentTabs.filter((t) => t.id !== tabId);
     props.ws.setTabs(remaining);
     if (props.ws.activeTabId() === tabId) {
@@ -13932,7 +14372,7 @@ function AppTopbar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$13(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -13965,7 +14405,7 @@ function AppTopbar(props) {
     }
   });
 }
-var _tmpl$$11 = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$M = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$F = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$12 = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$L = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$D = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -14045,7 +14485,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$11(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -14059,7 +14499,7 @@ function HistoryDropdown(props) {
           return props.items;
         },
         children: (item, idx) => (() => {
-          var _el$9 = _tmpl$3$F(), _el$0 = _el$9.firstChild;
+          var _el$9 = _tmpl$3$D(), _el$0 = _el$9.firstChild;
           _el$9.$$click = (e) => {
             e.stopPropagation();
             props.onSelect(item.url, item.index);
@@ -14083,7 +14523,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$M();
+              return _tmpl$2$L();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -14096,7 +14536,21 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$10 = /* @__PURE__ */ template(`<kbd class="px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none">`), _tmpl$2$L = /* @__PURE__ */ template(`<div><span>`), _tmpl$3$E = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
+var _tmpl$$11 = /* @__PURE__ */ template(`<kbd>`);
+function ShortcutBadge(props) {
+  return createComponent(Show, {
+    get when() {
+      return props.shortcut;
+    },
+    get children() {
+      var _el$ = _tmpl$$11();
+      insert(_el$, () => props.shortcut);
+      createRenderEffect(() => className(_el$, `px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none tracking-normal inline-flex items-center justify-center select-none ${props.class || ""}`));
+      return _el$;
+    }
+  });
+}
+var _tmpl$$10 = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$K = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -14144,7 +14598,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$3$E();
+    var _el$ = _tmpl$2$K();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -14158,16 +14612,11 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$2$L(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$10(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
-            insert(_el$2, createComponent(Show, {
-              get when() {
+            insert(_el$2, createComponent(ShortcutBadge, {
+              get shortcut() {
                 return props.shortcut;
-              },
-              get children() {
-                var _el$4 = _tmpl$$10();
-                insert(_el$4, () => props.shortcut);
-                return _el$4;
               }
             }), null);
             createRenderEffect((_p$) => {
@@ -14190,7 +14639,7 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$$ = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$K = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$D = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$u = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+var _tmpl$$$ = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$J = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$C = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$t = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
 function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
@@ -14295,7 +14744,7 @@ function ActivePaneNav(props) {
   };
   onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$4$u();
+    var _el$ = _tmpl$4$t();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -14330,7 +14779,7 @@ function ActivePaneNav(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$K();
+        var _el$3 = _tmpl$2$J();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -14357,7 +14806,7 @@ function ActivePaneNav(props) {
         return !props.node;
       },
       get children() {
-        var _el$4 = _tmpl$3$D();
+        var _el$4 = _tmpl$3$C();
         _el$4.$$click = handleReload;
         createRenderEffect((_p$) => {
           var _v$ = `flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0 ${isReloading() ? "animate-spin text-neutral-900" : ""}`, _v$2 = !props.node;
@@ -14587,24 +15036,24 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$_ = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$J = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$C = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$t = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$5 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
+var _tmpl$$_ = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$I = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$B = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$s = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$5 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
 const SlackIcon = (className2 = "w-6 h-6") => (() => {
   var _el$ = _tmpl$$_();
   setAttribute(_el$, "class", className2);
   return _el$;
 })();
 const GmailIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$2 = _tmpl$2$J();
+  var _el$2 = _tmpl$2$I();
   setAttribute(_el$2, "class", className2);
   return _el$2;
 })();
 const NotionIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$3 = _tmpl$3$C();
+  var _el$3 = _tmpl$3$B();
   setAttribute(_el$3, "class", className2);
   return _el$3;
 })();
 const FigmaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$4 = _tmpl$4$t();
+  var _el$4 = _tmpl$4$s();
   setAttribute(_el$4, "class", className2);
   return _el$4;
 })();
@@ -14954,7 +15403,7 @@ function useProfileApps(profileId) {
     handleDrop
   };
 }
-var _tmpl$$Z = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/60 p-1.5 max-h-[220px] overflow-y-auto z-50">`), _tmpl$2$I = /* @__PURE__ */ template(`<span class="text-[8px] text-neutral-400 font-medium truncate">`), _tmpl$3$B = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-400 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0">Launch`), _tmpl$4$s = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$j = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded bg-neutral-100 shrink-0">`);
+var _tmpl$$Z = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/60 p-1.5 max-h-[220px] overflow-y-auto z-50">`), _tmpl$2$H = /* @__PURE__ */ template(`<span class="text-[8px] text-neutral-400 font-medium truncate">`), _tmpl$3$A = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-400 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0">Launch`), _tmpl$4$r = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$j = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded bg-neutral-100 shrink-0">`);
 function CommandBarDropdown(props) {
   return createComponent(Show, {
     get when() {
@@ -14969,7 +15418,7 @@ function CommandBarDropdown(props) {
           return props.suggestions;
         },
         children: (item, idx) => (() => {
-          var _el$2 = _tmpl$4$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
+          var _el$2 = _tmpl$4$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
           _el$2.$$click = () => props.onExecute(item);
           insert(_el$3, createComponent(Show, {
             get when() {
@@ -15026,7 +15475,7 @@ function CommandBarDropdown(props) {
               return item.subtitle;
             },
             get children() {
-              var _el$6 = _tmpl$2$I();
+              var _el$6 = _tmpl$2$H();
               insert(_el$6, () => item.subtitle);
               return _el$6;
             }
@@ -15036,7 +15485,7 @@ function CommandBarDropdown(props) {
               return item.type === "app" || item.type === "shortcut";
             },
             get children() {
-              return _tmpl$3$B();
+              return _tmpl$3$A();
             }
           }), null);
           createRenderEffect((_$p) => classList(_el$2, {
@@ -15184,7 +15633,7 @@ function ActivePaneProgress(props) {
     }
   });
 }
-var _tmpl$$X = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$H = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$A = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$X = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$G = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$z = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function ActivePaneAudio(props) {
   const [isPlaying, setIsPlaying] = createSignal(false);
   const [isMuted, setIsMuted] = createSignal(false);
@@ -15207,14 +15656,14 @@ function ActivePaneAudio(props) {
       return isPlaying();
     },
     get children() {
-      var _el$ = _tmpl$2$H();
+      var _el$ = _tmpl$2$G();
       _el$.$$click = toggleMute;
       insert(_el$, createComponent(Show, {
         get when() {
           return !isMuted();
         },
         get fallback() {
-          return _tmpl$3$A();
+          return _tmpl$3$z();
         },
         get children() {
           return _tmpl$$X();
@@ -15234,7 +15683,7 @@ function ActivePaneAudio(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$W = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$G = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$5$i = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-green-600><polyline points="20 6 9 17 4 12">`), _tmpl$6$b = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none"></div><input type=text placeholder="Search or enter address (Alt+D)...">`), _tmpl$8$4 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+var _tmpl$$W = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$F = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$y = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$5$i = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-green-600><polyline points="20 6 9 17 4 12">`), _tmpl$6$b = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none"></div><input type=text placeholder="Search or enter address (Alt+D)...">`), _tmpl$8$4 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
 function ActivePaneOmnibox(props) {
   let inputRef;
   let suggestionsContainerRef;
@@ -15376,7 +15825,7 @@ function ActivePaneOmnibox(props) {
         return inputType() === "localhost";
       },
       get children() {
-        return _tmpl$2$G();
+        return _tmpl$2$F();
       }
     }), null);
     insert(_el$3, createComponent(Show, {
@@ -15384,7 +15833,7 @@ function ActivePaneOmnibox(props) {
         return inputType() === "url";
       },
       get children() {
-        return _tmpl$3$z();
+        return _tmpl$3$y();
       }
     }), null);
     _el$7.$$keydown = handleKeyDown;
@@ -15405,7 +15854,7 @@ function ActivePaneOmnibox(props) {
       },
       get children() {
         return [(() => {
-          var _el$8 = _tmpl$4$r(), _el$9 = _el$8.firstChild;
+          var _el$8 = _tmpl$4$q(), _el$9 = _el$8.firstChild;
           insert(_el$9, displayLabel);
           return _el$8;
         })(), createComponent(ActivePaneAudio, {
@@ -15476,7 +15925,7 @@ function ActivePaneOmnibox(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$V = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+var _tmpl$$V = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
 function SplitMenu(props) {
   let triggerRef;
   const [coords, setCoords] = createSignal({
@@ -15509,7 +15958,7 @@ function SplitMenu(props) {
     props.setShowSplitMenu(false);
   };
   return (() => {
-    var _el$ = _tmpl$4$q(), _el$3 = _el$.firstChild;
+    var _el$ = _tmpl$4$p(), _el$3 = _el$.firstChild;
     var _ref$ = triggerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
     insert(_el$, createComponent(ActionTooltip, {
@@ -15539,14 +15988,14 @@ function SplitMenu(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$F();
+              var _el$4 = _tmpl$2$E();
               _el$4.$$click = (e) => {
                 e.stopPropagation();
                 props.setShowSplitMenu(false);
               };
               return _el$4;
             })(), (() => {
-              var _el$5 = _tmpl$3$y(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling;
+              var _el$5 = _tmpl$3$x(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling;
               _el$5.$$pointerdown = (e) => e.stopPropagation();
               _el$0.$$click = (e) => handleSplitClick("left", e);
               _el$1.$$click = (e) => handleSplitClick("right", e);
@@ -15569,7 +16018,7 @@ function SplitMenu(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$U = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$x = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$h = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
+var _tmpl$$U = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$w = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$o = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$h = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
 const SUPPORTED_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -15646,7 +16095,7 @@ function ConnectedAccountsList(props) {
   };
   const displayedProviders = () => showAll() ? SUPPORTED_PROVIDERS : SUPPORTED_PROVIDERS.slice(0, 4);
   return (() => {
-    var _el$ = _tmpl$2$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$2$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     insert(_el$3, createComponent(For, {
       get each() {
         return displayedProviders();
@@ -15654,7 +16103,7 @@ function ConnectedAccountsList(props) {
       children: (provider) => {
         const identity = () => getIdentities()[provider.id];
         return (() => {
-          var _el$5 = _tmpl$4$p(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+          var _el$5 = _tmpl$4$o(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
           _el$8.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
@@ -15672,7 +16121,7 @@ function ConnectedAccountsList(props) {
               })();
             },
             get children() {
-              var _el$10 = _tmpl$3$x();
+              var _el$10 = _tmpl$3$w();
               _el$10.$$click = () => handleDisconnect(provider.id);
               return _el$10;
             }
@@ -15708,7 +16157,7 @@ function ConnectedAccountsList(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$T = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$w = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$o = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+var _tmpl$$T = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$v = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$n = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
 const COLORS = [
   "#6d7f94",
   // Slate Grey
@@ -15744,7 +16193,7 @@ function ProfileForm(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$2$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    var _el$ = _tmpl$2$C(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
     _el$4.$$input = (e) => setName(e.currentTarget.value);
     insert(_el$, createComponent(ConnectedAccountsList, {
       get profileId() {
@@ -15755,7 +16204,7 @@ function ProfileForm(props) {
       }
     }), _el$5);
     insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$23 = _tmpl$3$w();
+      var _el$23 = _tmpl$3$v();
       _el$23.$$click = () => setColor(c);
       setStyleProperty(_el$23, "background-color", c);
       createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer ${color() === c ? "ring-2 ring-offset-1 ring-neutral-900 scale-105" : ""}`));
@@ -15781,7 +16230,7 @@ function ProfileForm(props) {
     insert(_el$19, (() => {
       var _c$ = memo(() => !!props.onDelete);
       return () => _c$() && (() => {
-        var _el$24 = _tmpl$4$o();
+        var _el$24 = _tmpl$4$n();
         addEventListener(_el$24, "click", props.onDelete, true);
         return _el$24;
       })();
@@ -15794,7 +16243,7 @@ function ProfileForm(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$C = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$n = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$g = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
+var _tmpl$$S = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$B = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$u = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$g = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
 function ProfileMenuList(props) {
   let listRef;
   const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
@@ -15862,7 +16311,7 @@ function ProfileMenuList(props) {
             return profile.is_ephemeral;
           },
           get children() {
-            return _tmpl$2$C();
+            return _tmpl$2$B();
           }
         }), null);
         insert(_el$6, createComponent(Show, {
@@ -15870,7 +16319,7 @@ function ProfileMenuList(props) {
             return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
           },
           get children() {
-            return _tmpl$3$v();
+            return _tmpl$3$u();
           }
         }), _el$11);
         insert(_el$11, createComponent(Show, {
@@ -15878,7 +16327,7 @@ function ProfileMenuList(props) {
             return props.onSplitWithProfile;
           },
           get children() {
-            var _el$12 = _tmpl$4$n();
+            var _el$12 = _tmpl$4$m();
             _el$12.$$click = (e) => {
               e.stopPropagation();
               props.onSplitWithProfile?.(profile.id);
@@ -15964,7 +16413,7 @@ function useProfileMenuController(nodeId, onUpdatePane) {
     handleDeleteProfile
   };
 }
-var _tmpl$$R = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$B = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$m = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$f = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div>`), _tmpl$7$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+var _tmpl$$R = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$A = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$l = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$f = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div>`), _tmpl$7$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
 function ProfileMenu$1(props) {
   let btnRef;
   const [anchorPos, setAnchorPos] = createSignal(null);
@@ -16029,7 +16478,7 @@ function ProfileMenu$1(props) {
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$B();
+          var _el$3 = _tmpl$2$A();
           insert(_el$3, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((p2) => p2.id === ctrl.editingProfileId());
@@ -16116,7 +16565,7 @@ function ProfileMenu$1(props) {
       },
       get children() {
         return [(() => {
-          var _el$5 = _tmpl$3$u(), _el$6 = _el$5.firstChild;
+          var _el$5 = _tmpl$3$t(), _el$6 = _el$5.firstChild;
           _el$5.$$click = (e) => {
             e.stopPropagation();
             const rect = e.currentTarget.getBoundingClientRect();
@@ -16141,7 +16590,7 @@ function ProfileMenu$1(props) {
           });
           return _el$5;
         })(), (() => {
-          var _el$7 = _tmpl$4$m(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
+          var _el$7 = _tmpl$4$l(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
           _el$1.nextSibling;
           insert(_el$8, () => currentProfile().name, _el$1);
           return _el$7;
@@ -16397,7 +16846,7 @@ function WorkspaceItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$M = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$t = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$l = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$8 = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$3 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+var _tmpl$$M = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$z = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$8 = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$3 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
 const RECENT_KEY = "apposition:recent_workspace_icons";
 function IconPickerPopover(props) {
   let popoverRef;
@@ -16487,7 +16936,7 @@ function IconPickerPopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$l(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        var _el$2 = _tmpl$4$k(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -16505,7 +16954,7 @@ function IconPickerPopover(props) {
             return search();
           },
           get children() {
-            var _el$7 = _tmpl$2$A();
+            var _el$7 = _tmpl$2$z();
             _el$7.$$click = () => setSearch("");
             insert(_el$7, createComponent(x_default, {
               size: 12
@@ -16522,7 +16971,7 @@ function IconPickerPopover(props) {
             return memo(() => recentIcons().length > 0)() && !search();
           },
           get children() {
-            var _el$0 = _tmpl$3$t();
+            var _el$0 = _tmpl$3$s();
             insert(_el$0, createComponent(clock_default, {
               size: 11,
               "class": "text-neutral-400 ml-1 mr-0.5 shrink-0"
@@ -16631,7 +17080,7 @@ function IconPickerPopover(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$z = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$d = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$L = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$j = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$d = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function WorkspacePopover(props) {
   let popoverRef;
@@ -16688,7 +17137,7 @@ function WorkspacePopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$z(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+              var _el$4 = _tmpl$2$y(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
               _el$7.$$click = (e) => {
                 e.stopPropagation();
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -16718,7 +17167,7 @@ function WorkspacePopover(props) {
               createRenderEffect(() => _el$8.value = props.ws.name);
               return _el$4;
             })(), (() => {
-              var _el$9 = _tmpl$3$s(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$9 = _tmpl$3$r(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$10) : flipThumbRef = _el$10;
               insert(_el$1, createComponent(For, {
@@ -16774,7 +17223,7 @@ function WorkspacePopover(props) {
               }), null);
               return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$4$k(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$4$j(), _el$12 = _el$11.firstChild;
               _el$12.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -16818,7 +17267,7 @@ function WorkspacePopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$K = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+var _tmpl$$K = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$x = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
 function WorkspaceCreateFlyout(props) {
   const [name, setName] = createSignal("");
   const [selectedIcon, setSelectedIcon] = createSignal(null);
@@ -16853,7 +17302,7 @@ function WorkspaceCreateFlyout(props) {
             };
             return _el$;
           })(), (() => {
-            var _el$2 = _tmpl$2$y(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+            var _el$2 = _tmpl$2$x(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
             _el$2.$$click = (e) => e.stopPropagation();
             _el$4.$$click = (e) => {
               e.stopPropagation();
@@ -16917,7 +17366,7 @@ function WorkspaceCreateFlyout(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$J = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$x = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$j = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$J = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$w = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$q = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$i = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function WorkspaceDock(props) {
   const [isCreatingHover, setIsCreatingHover] = createSignal(false);
   const [configOpenId, setConfigOpenId] = createSignal(null);
@@ -16928,7 +17377,7 @@ function WorkspaceDock(props) {
   onMount(() => {
   });
   return (() => {
-    var _el$ = _tmpl$3$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
+    var _el$ = _tmpl$3$q(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
     insert(_el$4, createComponent(For, {
       get each() {
         return props.workspaces;
@@ -16968,7 +17417,7 @@ function WorkspaceDock(props) {
       },
       get fallback() {
         return (() => {
-          var _el$0 = _tmpl$4$j();
+          var _el$0 = _tmpl$4$i();
           _el$0.$$click = (e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setCreatePos({
@@ -16989,7 +17438,7 @@ function WorkspaceDock(props) {
         return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
       },
       get children() {
-        return _tmpl$2$x();
+        return _tmpl$2$w();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -17156,14 +17605,14 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$H = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$i = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$H = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$v = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$p = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$h = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$4$i();
+      var _el$ = _tmpl$4$h();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
       insert(_el$, createComponent(ActionTooltip, {
         label: "Minimize",
@@ -17176,7 +17625,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Maximize",
         get children() {
-          var _el$3 = _tmpl$2$w();
+          var _el$3 = _tmpl$2$v();
           _el$3.$$click = () => window.api?.maximizeWindow();
           return _el$3;
         }
@@ -17184,7 +17633,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Close",
         get children() {
-          var _el$4 = _tmpl$3$q();
+          var _el$4 = _tmpl$3$p();
           _el$4.$$click = () => window.api?.closeWindow();
           return _el$4;
         }
@@ -17194,7 +17643,7 @@ function AppWindowControls(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$p = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$c = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+var _tmpl$$G = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$u = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$o = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$c = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
 function AppEdgeZones(props) {
   return createComponent(Show, {
     get when() {
@@ -17206,15 +17655,15 @@ function AppEdgeZones(props) {
         _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$v();
+        var _el$2 = _tmpl$2$u();
         _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
         return _el$2;
       })(), (() => {
-        var _el$3 = _tmpl$3$p();
+        var _el$3 = _tmpl$3$o();
         _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
         return _el$3;
       })(), (() => {
-        var _el$4 = _tmpl$4$h();
+        var _el$4 = _tmpl$4$g();
         _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
         return _el$4;
       })(), (() => {
@@ -17303,7 +17752,7 @@ function useFeaturebase() {
   };
   return { openFeedback, openUpdates, hasUnread };
 }
-var _tmpl$$F = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$u = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$o = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$g = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$b = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+var _tmpl$$F = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$t = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$n = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$f = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$b = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportCluster(props) {
   const {
     hasUnread
@@ -17407,7 +17856,7 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$7 = _tmpl$2$u();
+          var _el$7 = _tmpl$2$t();
           _el$7.$$click = handleOpenSettings;
           return _el$7;
         }
@@ -17416,7 +17865,7 @@ function SupportCluster(props) {
         label: "Release Notes",
         placement: "right",
         get children() {
-          var _el$9 = _tmpl$4$g();
+          var _el$9 = _tmpl$4$f();
           _el$9.firstChild;
           _el$9.$$click = handleOpenUpdates;
           insert(_el$9, createComponent(Show, {
@@ -17424,7 +17873,7 @@ function SupportCluster(props) {
               return hasUnread();
             },
             get children() {
-              return _tmpl$3$o();
+              return _tmpl$3$n();
             }
           }), null);
           return _el$9;
@@ -17444,7 +17893,7 @@ function SupportCluster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$E = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$n = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$f = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$a = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$E = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$s = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$e = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$a = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActionClusterSplitBar(props) {
   return (() => {
     var _el$ = _tmpl$5$a();
@@ -17473,7 +17922,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$3 = _tmpl$2$t();
+        var _el$3 = _tmpl$2$s();
         _el$3.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$3.addEventListener("mouseenter", () => props.onSplitHover?.("right"));
         _el$3.$$click = (e) => props.onSplit("right", e);
@@ -17487,7 +17936,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$3$n();
+        var _el$4 = _tmpl$3$m();
         _el$4.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$4.addEventListener("mouseenter", () => props.onSplitHover?.("top"));
         _el$4.$$click = (e) => props.onSplit("top", e);
@@ -17501,7 +17950,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$5 = _tmpl$4$f();
+        var _el$5 = _tmpl$4$e();
         _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
         _el$5.$$click = (e) => props.onSplit("bottom", e);
@@ -17512,11 +17961,11 @@ function ActionClusterSplitBar(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$D = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$s = /* @__PURE__ */ template(`<button>`), _tmpl$3$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$e = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$9 = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$D = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$r = /* @__PURE__ */ template(`<button>`), _tmpl$3$l = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$d = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$9 = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function ActionClusterVerticalDock(props) {
   const isMaximized = () => !!layoutStore.maximizedPaneId;
   return (() => {
-    var _el$ = _tmpl$4$e(), _el$5 = _el$.firstChild;
+    var _el$ = _tmpl$4$d(), _el$5 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.dockRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -17529,7 +17978,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$2 = _tmpl$2$s();
+        var _el$2 = _tmpl$2$r();
         addEventListener(_el$2, "click", props.onToggleMaximize, true);
         insert(_el$2, createComponent(Show, {
           get when() {
@@ -17553,7 +18002,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$4 = _tmpl$3$m();
+        var _el$4 = _tmpl$3$l();
         addEventListener(_el$4, "click", props.onCreateTab, true);
         return _el$4;
       }
@@ -17581,7 +18030,7 @@ function ActionClusterVerticalDock(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$C = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$r = /* @__PURE__ */ template(`<button class="group/btn relative w-[24px] h-[24px] rounded-md hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95 active:shadow-double-bezel-active"style=-webkit-app-region:no-drag><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12>`), _tmpl$3$l = /* @__PURE__ */ template(`<div id=action-cluster class="absolute bottom-2 right-2 z-[60] w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-md flex items-center justify-center hover:bg-neutral-50 transition-colors pointer-events-auto select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$C = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$q = /* @__PURE__ */ template(`<button class="group/btn relative w-[24px] h-[24px] rounded-md hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95 active:shadow-double-bezel-active"style=-webkit-app-region:no-drag><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12>`), _tmpl$3$k = /* @__PURE__ */ template(`<div id=action-cluster class="absolute bottom-2 right-2 z-[60] w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-md flex items-center justify-center hover:bg-neutral-50 transition-colors pointer-events-auto select-none"style=-webkit-app-region:no-drag>`);
 function ActionCluster(props) {
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
   const [isSpinning, setIsSpinning] = createSignal(false);
@@ -17677,7 +18126,7 @@ function ActionCluster(props) {
           return props.ws.handleUpdatePane;
         }
       }), (() => {
-        var _el$2 = _tmpl$3$l();
+        var _el$2 = _tmpl$3$k();
         _el$2.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
         var _ref$ = props.hubRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : props.hubRef = _el$2;
@@ -17685,7 +18134,7 @@ function ActionCluster(props) {
           label: "Quick Actions",
           placement: "top",
           get children() {
-            var _el$3 = _tmpl$2$r(), _el$4 = _el$3.firstChild;
+            var _el$3 = _tmpl$2$q(), _el$4 = _el$3.firstChild;
             _el$3.addEventListener("auxclick", (e) => {
               if (e.button === 1) {
                 e.stopPropagation();
@@ -17776,7 +18225,7 @@ function DoubleBezel(rawProps) {
     return _el$;
   })();
 }
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$q = /* @__PURE__ */ template(`<input type=text class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+var _tmpl$$A = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$p = /* @__PURE__ */ template(`<input type=text class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$j = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
 function CommandBar(props) {
   const [isFocused, setIsFocused] = createSignal(false);
   let inputEl;
@@ -17813,7 +18262,7 @@ function CommandBar(props) {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$4$d(), _el$5 = _el$4.firstChild;
+            var _el$4 = _tmpl$4$c(), _el$5 = _el$4.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = !!isFocused(), _v$5 = !isFocused();
               _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
@@ -17832,7 +18281,7 @@ function CommandBar(props) {
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$2$q();
+        var _el$2 = _tmpl$2$p();
         _el$2.addEventListener("blur", handleBlur);
         _el$2.addEventListener("focus", handleFocus);
         addEventListener(_el$2, "keydown", props.onKeyDown, true);
@@ -17863,7 +18312,7 @@ function CommandBar(props) {
           return props.rightElement;
         },
         get children() {
-          var _el$3 = _tmpl$3$k();
+          var _el$3 = _tmpl$3$j();
           insert(_el$3, () => props.rightElement);
           return _el$3;
         }
@@ -17873,7 +18322,7 @@ function CommandBar(props) {
 }
 delegateEvents(["input", "keydown"]);
 delegateEvents(["click"]);
-var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$p = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$j = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$8 = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$o = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$i = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$8 = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
 function CommandPalette(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -17936,7 +18385,7 @@ function CommandPalette(props) {
       return isOpen();
     },
     get children() {
-      var _el$ = _tmpl$4$c();
+      var _el$ = _tmpl$4$b();
       _el$.$$click = () => setIsOpen(false);
       insert(_el$, createComponent(DoubleBezel, {
         size: "lg",
@@ -17958,13 +18407,13 @@ function CommandPalette(props) {
             createRenderEffect(() => _el$4.value = query());
             return _el$2;
           })(), (() => {
-            var _el$5 = _tmpl$3$j(), _el$8 = _el$5.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
+            var _el$5 = _tmpl$3$i(), _el$8 = _el$5.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
             insert(_el$5, createComponent(Show, {
               get when() {
                 return matchingWorkspaces().length > 0;
               },
               get children() {
-                var _el$6 = _tmpl$2$p();
+                var _el$6 = _tmpl$2$o();
                 _el$6.firstChild;
                 insert(_el$6, createComponent(For, {
                   get each() {
@@ -18244,7 +18693,7 @@ function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximized
   traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
   return result;
 }
-var _tmpl$$x = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$o = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$i = /* @__PURE__ */ template(`<button>`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$4 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$2 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$x = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$n = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$h = /* @__PURE__ */ template(`<button>`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$4 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$2 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function PaneIsland(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -18301,7 +18750,7 @@ function PaneIsland(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$7 = _tmpl$3$i();
+            var _el$7 = _tmpl$3$h();
             _el$7.$$click = (e) => {
               e.stopPropagation();
               setLayoutStore("maximizedPaneId", isMaximized() ? null : props.node.id);
@@ -18315,7 +18764,7 @@ function PaneIsland(props) {
                 return _tmpl$7$2();
               },
               get children() {
-                return _tmpl$2$o();
+                return _tmpl$2$n();
               }
             }));
             createRenderEffect(() => className(_el$7, `w-7 h-7 rounded-[10px] flex items-center justify-center transition-all active:scale-95 shrink-0 ${isMaximized() ? "bg-neutral-900 text-white shadow-sm" : "text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -18326,7 +18775,7 @@ function PaneIsland(props) {
           label: "Drag to Move",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$b();
+            var _el$0 = _tmpl$4$a();
             _el$0.$$pointerdown = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -18372,7 +18821,7 @@ function PaneIsland(props) {
   });
 }
 delegateEvents(["pointerdown", "click"]);
-var _tmpl$$w = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$w = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$m = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$g = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$9 = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function PaneNode(props) {
   const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
   const isTarget = () => props.dragTarget?.id === props.node.id;
@@ -18402,7 +18851,8 @@ function PaneNode(props) {
       "box-shadow": `0 0 0 1.5px ${col}b0, 0 0 0 3px ${col}18, 0 4px 16px -2px ${col}1e, inset 0 1px 0 rgba(255,255,255,0.9), inset 0 0 0 1px rgba(0,0,0,0.04)`
     };
   };
-  onMount(() => {
+  createEffect(() => {
+    [props.node.id, props.isOnlyPane, padding()];
     if (!isPreviewGhost()) {
       window.dispatchEvent(new CustomEvent("pane-target-mounted", {
         detail: props.node.id
@@ -18415,14 +18865,21 @@ function PaneNode(props) {
     },
     get fallback() {
       return (() => {
-        var _el$13 = _tmpl$4$a(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
+        var _el$13 = _tmpl$4$9(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
         insert(_el$15, () => props.node.title || "Split Preview");
         return _el$13;
       })();
     },
     get children() {
-      var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
-      _el$.$$click = () => props.onActivePaneChange(props.node.id);
+      var _el$ = _tmpl$3$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
+      _el$.$$click = () => {
+        props.onActivePaneChange(props.node.id);
+        PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
+      };
+      _el$.$$mousedown = () => {
+        props.onActivePaneChange(props.node.id);
+        PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
+      };
       insert(_el$3, createComponent(Show, {
         get when() {
           return memo(() => !!isTarget())() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "top");
@@ -18438,7 +18895,7 @@ function PaneNode(props) {
           return memo(() => !!isTarget())() && props.dragTarget?.direction === "replace";
         },
         get children() {
-          return _tmpl$2$n();
+          return _tmpl$2$m();
         }
       }), null);
       insert(_el$3, createComponent(Show, {
@@ -18510,8 +18967,8 @@ function PaneNode(props) {
     }
   });
 }
-delegateEvents(["click"]);
-var _tmpl$$v = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$m = /* @__PURE__ */ template(`<div>`);
+delegateEvents(["mousedown", "click"]);
+var _tmpl$$v = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$l = /* @__PURE__ */ template(`<div>`);
 function LayoutNode(props) {
   const node = () => (props.nodes || layoutStore.nodes)[props.nodeId];
   return createComponent(Show, {
@@ -18560,7 +19017,7 @@ function LayoutNode(props) {
       });
     },
     get children() {
-      var _el$ = _tmpl$2$m();
+      var _el$ = _tmpl$2$l();
       insert(_el$, createComponent(Show, {
         get when() {
           return props.activeDragId !== node().a;
@@ -18685,118 +19142,125 @@ function AbsolutePane(props) {
   const [hasPosition, setHasPosition] = createSignal(false);
   const [isEntering, setIsEntering] = createSignal(true);
   const [isFlashing, setIsFlashing] = createSignal(false);
-  onMount(() => {
-    let ro = null;
-    const updatePosition = () => {
-      if (props.isDragging) return;
-      const target2 = document.getElementById(props.targetId);
-      const container2 = document.getElementById("main-canvas");
-      if (!target2 || !container2) {
-        if (!hasPosition()) {
-          setStyle((s) => ({
-            ...s,
-            opacity: "0"
-          }));
-          if (props.paneId) {
-            window.api?.viewSetBounds?.(props.paneId, {
-              x: -1e4,
-              y: -1e4,
-              width: 0,
-              height: 0
-            });
-          }
-        }
-        return;
-      }
-      const rect = target2.getBoundingClientRect();
-      const containerRect = container2.getBoundingClientRect();
-      const isMaximized = layoutStore.maximizedPaneId === props.paneId;
-      if (layoutStore.maximizedPaneId && !isMaximized) {
-        setStyle((s) => ({
-          ...s,
-          opacity: "0"
-        }));
-        if (props.paneId) {
-          window.api?.viewSetBounds?.(props.paneId, {
-            x: -1e4,
-            y: -1e4,
-            width: 0,
-            height: 0
-          });
-        }
-        return;
-      }
-      if (rect.width === 0 && rect.height === 0) {
-        return;
-      }
-      const scaleX = container2.offsetWidth > 0 ? containerRect.width / container2.offsetWidth : 1;
-      const scaleY = container2.offsetHeight > 0 ? containerRect.height / container2.offsetHeight : 1;
-      const relX = isMaximized ? 12 : Math.round((rect.left - containerRect.left) / scaleX);
-      const relY = isMaximized ? 12 : Math.round((rect.top - containerRect.top) / scaleY);
-      const finalWidth = isMaximized ? Math.round(container2.offsetWidth - 24) : Math.round(rect.width / scaleX);
-      const finalHeight = isMaximized ? Math.round(container2.offsetHeight - 24) : Math.round(rect.height / scaleY);
+  let ro = null;
+  let currentObservedTarget = null;
+  let rafId = null;
+  const updatePosition = () => {
+    if (props.isDragging) return;
+    const target = document.getElementById(props.targetId);
+    const container = document.getElementById("main-canvas");
+    if (target && ro && currentObservedTarget !== target) {
+      if (currentObservedTarget) ro.unobserve(currentObservedTarget);
+      currentObservedTarget = target;
+      ro.observe(target);
+    }
+    if (!target || !container) {
+      currentObservedTarget = null;
       setStyle({
-        top: `${relY}px`,
-        left: `${relX}px`,
-        width: `${finalWidth}px`,
-        height: `${finalHeight}px`,
-        opacity: "1"
+        top: "-99999px",
+        left: "-99999px",
+        width: "0px",
+        height: "0px",
+        opacity: "0"
       });
-      if (!hasPosition()) {
-        setHasPosition(true);
-        if (props.isActive) {
-          setIsFlashing(true);
-          setTimeout(() => setIsFlashing(false), 350);
-        }
-        setTimeout(() => setIsEntering(false), 350);
+      if (props.paneId) {
+        window.api?.viewSetBounds?.(props.paneId, {
+          x: -1e4,
+          y: -1e4,
+          width: 0,
+          height: 0
+        });
       }
-    };
-    let rafId = null;
-    const scheduleUpdate = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        updatePosition();
-      });
-    };
+      return;
+    }
+    const rect = target.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const isMaximized = layoutStore.maximizedPaneId === props.paneId;
+    if (layoutStore.maximizedPaneId && !isMaximized) {
+      setStyle((s) => ({
+        ...s,
+        opacity: "0"
+      }));
+      if (props.paneId) {
+        window.api?.viewSetBounds?.(props.paneId, {
+          x: -1e4,
+          y: -1e4,
+          width: 0,
+          height: 0
+        });
+      }
+      return;
+    }
+    if (rect.width === 0 && rect.height === 0) {
+      scheduleUpdate();
+      return;
+    }
+    const scaleX = container.offsetWidth > 0 ? containerRect.width / container.offsetWidth : 1;
+    const scaleY = container.offsetHeight > 0 ? containerRect.height / container.offsetHeight : 1;
+    const relX = isMaximized ? 12 : Math.round((rect.left - containerRect.left) / scaleX);
+    const relY = isMaximized ? 12 : Math.round((rect.top - containerRect.top) / scaleY);
+    const finalWidth = isMaximized ? Math.round(container.offsetWidth - 24) : Math.round(rect.width / scaleX);
+    const finalHeight = isMaximized ? Math.round(container.offsetHeight - 24) : Math.round(rect.height / scaleY);
+    setStyle({
+      top: `${relY}px`,
+      left: `${relX}px`,
+      width: `${finalWidth}px`,
+      height: `${finalHeight}px`,
+      opacity: "1"
+    });
+    if (!hasPosition()) {
+      setHasPosition(true);
+      if (props.isActive) {
+        setIsFlashing(true);
+        setTimeout(() => setIsFlashing(false), 350);
+      }
+      setTimeout(() => setIsEntering(false), 350);
+    }
+  };
+  const scheduleUpdate = () => {
+    if (rafId !== null) return;
+    rafId = requestAnimationFrame(() => {
+      rafId = null;
+      updatePosition();
+    });
+  };
+  createEffect(() => {
+    [props.isActive, props.targetId, props.paneId, layoutStore.rootId, layoutStore.maximizedPaneId, layoutStore.splitPreview, props.paneId ? layoutStore.nodes[props.paneId] : null, Object.keys(layoutStore.nodes).length];
+    updatePosition();
+    scheduleUpdate();
+  });
+  onMount(() => {
     ro = new ResizeObserver(scheduleUpdate);
     const target = document.getElementById(props.targetId);
     if (target) {
+      currentObservedTarget = target;
       ro.observe(target);
     }
     const container = document.getElementById("main-canvas");
-    if (container) {
-      ro.observe(container);
-    }
+    if (container) ro.observe(container);
     updatePosition();
     window.addEventListener("resize", scheduleUpdate);
     const onTargetMounted = (e) => {
       if (`pane-container-${e.detail}` === props.targetId) {
-        const t = document.getElementById(props.targetId);
-        if (t && ro) {
-          ro.observe(t);
-        }
         updatePosition();
+        scheduleUpdate();
       }
     };
     const onLayoutSync = () => {
       updatePosition();
+      scheduleUpdate();
       if (props.isActive) {
         setIsFlashing(true);
         setTimeout(() => setIsFlashing(false), 400);
       }
     };
     window.addEventListener("pane-target-mounted", onTargetMounted);
-    window.addEventListener("app:dragend", updatePosition);
+    window.addEventListener("app:dragend", scheduleUpdate);
     window.addEventListener("app:layout-sync", onLayoutSync);
-    createEffect(() => {
-      layoutStore.maximizedPaneId;
-      requestAnimationFrame(updatePosition);
-    });
     onCleanup(() => {
       if (rafId !== null) cancelAnimationFrame(rafId);
       window.removeEventListener("pane-target-mounted", onTargetMounted);
-      window.removeEventListener("app:dragend", updatePosition);
+      window.removeEventListener("app:dragend", scheduleUpdate);
       window.removeEventListener("app:layout-sync", onLayoutSync);
       window.removeEventListener("resize", scheduleUpdate);
       if (ro) ro.disconnect();
@@ -18808,7 +19272,7 @@ function AbsolutePane(props) {
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
     insert(_el$2, () => props.children);
     createRenderEffect((_p$) => {
-      var _v$ = `absolute z-0 absolute-pane-container overflow-hidden p-0 bg-transparent rounded-[12px] will-change-[top,left,width,height] ${props.isGlobalDragging ? "pointer-events-none" : "pointer-events-auto"} ${props.isDragging ? "transition-transform duration-75" : hasPosition() && !isEntering() ? "transition-[top,left,width,height] duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]" : "transition-none"} ${isEntering() ? "animate-in fade-in zoom-in-[0.97] duration-300 ease-out" : ""}`, _v$2 = layoutStore.maximizedPaneId === props.paneId ? {
+      var _v$ = `absolute z-0 absolute-pane-container overflow-hidden p-0 bg-transparent rounded-[12px] will-change-[top,left,width,height] ${props.isGlobalDragging ? "pointer-events-none" : "pointer-events-auto"} ${props.isDragging ? "transition-transform duration-75" : hasPosition() && !isEntering() ? "transition-[top,left,width,height] duration-350 ease-[cubic-bezier(0.16,1,0.3,1)]" : "transition-none"} ${isEntering() ? "animate-in fade-in zoom-in-[0.97] duration-250 ease-out" : ""}`, _v$2 = layoutStore.maximizedPaneId === props.paneId ? {
         ...style$1(),
         "z-index": 9990,
         opacity: props.isReplaceTarget ? "0" : "1"
@@ -19050,7 +19514,7 @@ function AddCustomAppModal(props) {
   });
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$r = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
+var _tmpl$$r = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$k = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
 function PinnedShortcuts(props) {
   return (() => {
     var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
@@ -19059,7 +19523,7 @@ function PinnedShortcuts(props) {
         return props.profileApps;
       },
       children: (app, idx) => (() => {
-        var _el$4 = _tmpl$2$l(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$k(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         _el$4.addEventListener("drop", (e) => props.onDrop(idx(), e));
         addEventListener(_el$4, "dragover", props.onDragOver);
         _el$4.addEventListener("dragstart", (e) => props.onDragStart(idx(), e));
@@ -19085,11 +19549,11 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$q = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$k = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$g = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
+var _tmpl$$q = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$j = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$f = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === props.currentProfileId);
   return (() => {
-    var _el$ = _tmpl$2$k(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$j(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
       e.stopPropagation();
       props.onToggle();
@@ -19110,7 +19574,7 @@ function ProfileMenu(props) {
             }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
           },
           children: (profile) => (() => {
-            var _el$4 = _tmpl$3$g(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+            var _el$4 = _tmpl$3$f(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
             _el$4.$$click = () => {
               props.onSelect(profile.id === "main" ? void 0 : profile.id);
             };
@@ -19158,13 +19622,14 @@ var _tmpl$$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full
           .default-panel-header h1 { font-size: 0.95rem !important; }
           .default-panel-shortcuts { flex-wrap: wrap !important; justify-content: center !important; gap: 0.25rem !important; }
         }
-      `), _tmpl$2$j = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
+      `), _tmpl$2$i = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
 function DefaultPanel(props) {
   const ctrl = useDefaultPanelController(props);
   return (() => {
     var _el$ = _tmpl$$p();
     _el$.firstChild;
     _el$.$$click = (e) => {
+      PaneFocusManager.focusPane(props.id);
       const target = e.target;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA") return;
       if (target.closest("button") || target.closest(".profile-menu-container")) return;
@@ -19175,13 +19640,19 @@ function DefaultPanel(props) {
         });
       }
     };
+    _el$.$$mousedown = () => {
+      PaneFocusManager.focusPane(props.id);
+    };
+    _el$.$$focusin = () => {
+      PaneFocusManager.focusPane(props.id);
+    };
     insert(_el$, createComponent(Show, {
       get when() {
         return ctrl.activeView() === "notes";
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$j(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
+          var _el$3 = _tmpl$2$i(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
           insert(_el$7, () => props.activeWorkspaceName);
           insert(_el$8, createComponent(CommandBar, {
             get id() {
@@ -19310,11 +19781,11 @@ function DefaultPanel(props) {
     return _el$;
   })();
 }
-delegateEvents(["click"]);
-var _tmpl$$o = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+delegateEvents(["focusin", "mousedown", "click"]);
+var _tmpl$$o = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$h = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
-    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
     var _ref$ = props.gateContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.gateContainerRef = _el$;
     var _ref$2 = props.topGateRef;
@@ -19337,11 +19808,11 @@ function GateAnimation(props) {
     return _el$;
   })();
 }
-var _tmpl$$n = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$h = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$f = /* @__PURE__ */ template(`<div class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
+var _tmpl$$n = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$g = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$e = /* @__PURE__ */ template(`<div class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
 function MenuItem(props) {
   const IconComp = props.icon;
   return (() => {
-    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     addEventListener(_el$, "click", props.onClick, true);
     insert(_el$2, createComponent(IconComp, {
       "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
@@ -19408,7 +19879,7 @@ function PaneContextMenu(props) {
   };
   return createComponent(Portal, {
     get children() {
-      var _el$5 = _tmpl$3$f(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.nextSibling;
+      var _el$5 = _tmpl$3$e(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.nextSibling;
       _el$5.$$contextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -19709,117 +20180,15 @@ function DemoIframe(props) {
     return _el$;
   })();
 }
-var _tmpl$$k = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 z-10 pointer-events-none">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/30 backdrop-blur-sm z-20 pointer-events-none"><div class="px-4 py-2 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl">Restoring…`), _tmpl$3$e = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-900 z-[5] pointer-events-none">`), _tmpl$4$9 = /* @__PURE__ */ template(`<div class="absolute inset-0 flex items-center justify-center bg-white/10 backdrop-blur-sm z-10 cursor-pointer transition-all duration-700"><div class="px-5 py-2.5 bg-neutral-900/90 text-white text-[11px] font-semibold tracking-widest uppercase rounded-full shadow-2xl hover:scale-105 active:scale-95 transition-all duration-300">Click to Wake`);
-function PaneSleepOverlay(props) {
-  return [createComponent(Show, {
-    get when() {
-      return memo(() => !!props.isHibernated)() && props.canDeepHibernate;
-    },
-    get children() {
-      return [_tmpl$$k(), createComponent(Show, {
-        get when() {
-          return props.isRestoring;
-        },
-        get children() {
-          return _tmpl$2$g();
-        }
-      })];
-    }
-  }), createComponent(Show, {
-    get when() {
-      return memo(() => !!(props.isHibernated && !props.canDeepHibernate))() && !props.isBlank;
-    },
-    get children() {
-      return [_tmpl$3$e(), (() => {
-        var _el$4 = _tmpl$4$9();
-        addEventListener(_el$4, "mouseenter", props.onWake);
-        addEventListener(_el$4, "click", props.onWake, true);
-        return _el$4;
-      })()];
-    }
-  })];
-}
-delegateEvents(["click"]);
-var _tmpl$$j = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100 flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto"><div class="text-sm font-semibold text-neutral-800 mb-1">Session Suspended</div><div class="text-xs text-neutral-500 mb-4 max-w-xs">The webview process stopped unexpectedly.</div><button class="px-4 py-2 bg-neutral-900 text-white text-xs font-medium rounded-lg shadow-sm hover:bg-neutral-800 active:scale-95 transition-all">Reload Session`);
+var _tmpl$$k = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
 function PaneCrashedOverlay(props) {
   return (() => {
-    var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
-    addEventListener(_el$4, "click", props.onReload, true);
+    var _el$ = _tmpl$$k(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
+    addEventListener(_el$7, "click", props.onReload, true);
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-function usePaneHibernation(paneId, isActivePane, currentType, currentUrl, isBlank) {
-  const [isHibernated, setIsHibernated] = createSignal(false);
-  const [frozenFrame, setFrozenFrame] = createSignal("");
-  const [isRestoring, setIsRestoring] = createSignal(false);
-  const canDeepHibernate = () => currentType() === "web" && !!currentUrl() && !isBlank();
-  createEffect(() => {
-    if (!isHibernated()) {
-      if (frozenFrame() && canDeepHibernate()) {
-        setIsRestoring(true);
-        window.api?.viewRespawn?.(paneId).then(() => {
-          window.dispatchEvent(
-            new CustomEvent("pane-target-mounted", { detail: paneId })
-          );
-        });
-      } else {
-        window.api?.viewWake?.(paneId);
-      }
-      return;
-    }
-    if (canDeepHibernate()) {
-      window.api?.viewHibernate?.(paneId).then((dataUrl) => {
-        if (isHibernated()) setFrozenFrame(dataUrl);
-      });
-    } else {
-      if (window.api?.viewCapture) {
-        window.api.viewCapture(paneId).then((dataUrl) => {
-          if (isHibernated()) {
-            setFrozenFrame(dataUrl);
-            window.api?.viewSleep?.(paneId);
-          }
-        });
-      } else {
-        window.api?.viewSleep?.(paneId);
-      }
-    }
-  });
-  onMount(() => {
-    const onRestored = (e) => {
-      const detail = e.detail;
-      if (detail === paneId) {
-        setIsRestoring(false);
-        setFrozenFrame("");
-      }
-    };
-    window.addEventListener("pane.restored", onRestored);
-    const onHibernatePane = (e) => {
-      if (e.detail === paneId || e.detail === "background" && !isActivePane()) {
-        setIsHibernated(true);
-      } else if (e.detail === "all") {
-        setIsHibernated(true);
-      }
-    };
-    window.addEventListener("app:hibernate-pane", onHibernatePane);
-    onCleanup(() => {
-      window.removeEventListener("pane.restored", onRestored);
-      window.removeEventListener("app:hibernate-pane", onHibernatePane);
-    });
-  });
-  const wake = () => setIsHibernated(false);
-  const onPaneActivity = () => {
-    if (isHibernated()) wake();
-  };
-  return {
-    isHibernated,
-    frozenFrame,
-    isRestoring,
-    canDeepHibernate,
-    wake,
-    onPaneActivity
-  };
-}
 function usePaneContextMenu(paneId, _getPaneRef) {
   const [contextMenu, setContextMenu] = createSignal(null);
   onMount(() => {
@@ -19997,6 +20366,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       }
     };
     const handleFocus = () => {
+      PaneFocusManager.setActivePaneId(paneId);
       window.dispatchEvent(
         new CustomEvent("app:webview-focused", { detail: paneId })
       );
@@ -20089,6 +20459,23 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
     const emitMedia = (isPlaying) => window.dispatchEvent(
       new CustomEvent("app:media-status", { detail: { paneId, isPlaying } })
     );
+    const handleIpcMessage = (e) => {
+      const channel = e.channel;
+      const args = e.args || [];
+      if (channel === "pane.media-timestamp" && args[0]) {
+        window.dispatchEvent(
+          new CustomEvent("app:media-timestamp", {
+            detail: { paneId, ...args[0] }
+          })
+        );
+      } else if (channel === "pane.scroll-position" && args[0]) {
+        window.dispatchEvent(
+          new CustomEvent("app:scroll-position", {
+            detail: { paneId, ...args[0] }
+          })
+        );
+      }
+    };
     const events = [
       ["did-navigate", handleNavigate],
       ["did-navigate-in-page", handleNavigate],
@@ -20101,6 +20488,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       ["dom-ready", handleDomReady],
       ["did-first-visually-non-empty-paint", handleFirstPaint],
       ["new-window", handleNewWindow],
+      ["ipc-message", handleIpcMessage],
       ["media-started-playing", () => emitMedia(true)],
       ["media-paused", () => emitMedia(false)]
     ];
@@ -20215,7 +20603,7 @@ function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebvi
     });
   });
 }
-var _tmpl$$i = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$2$f = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$3$d = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=yes"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
+var _tmpl$$j = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$2$f = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$3$d = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
 const gateTriggeredSet = /* @__PURE__ */ new Set();
 function Pane(props) {
   const [currentUrl, setCurrentUrl] = createSignal(props.url);
@@ -20252,13 +20640,6 @@ function Pane(props) {
     }
   });
   const {
-    isHibernated,
-    isRestoring,
-    canDeepHibernate,
-    wake,
-    onPaneActivity
-  } = usePaneHibernation(props.id, () => props.isActivePane, currentType, currentUrl, isBlank);
-  const {
     isInitialGate,
     gateLabel,
     gateDomain,
@@ -20283,6 +20664,7 @@ function Pane(props) {
     e.preventDefault();
     e.stopPropagation();
     props.onActive?.();
+    PaneFocusManager.focusPane(props.id);
     setContextMenu({
       x: e.clientX,
       y: e.clientY,
@@ -20290,25 +20672,26 @@ function Pane(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.$$contextmenu = handleContextMenu;
     _el$.$$click = () => {
-      wake();
       props.onActive?.();
+      PaneFocusManager.focusPane(props.id);
     };
     _el$.$$mousedown = () => {
-      wake();
       props.onActive?.();
+      PaneFocusManager.focusPane(props.id);
     };
     _el$.$$focusin = () => {
-      onPaneActivity();
       props.onActive?.();
+      PaneFocusManager.focusPane(props.id);
     };
     _el$.addEventListener("mouseenter", (e) => {
-      wake();
-      handlePointerActivity(e, onPaneActivity);
+      handlePointerActivity(e, () => {
+      });
     });
-    _el$.$$mousemove = (e) => handlePointerActivity(e, onPaneActivity);
+    _el$.$$mousemove = (e) => handlePointerActivity(e, () => {
+    });
     var _ref$ = paneRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
     insert(_el$3, createComponent(Show, {
@@ -20338,19 +20721,17 @@ function Pane(props) {
                 use(setupWebview, _el$5);
                 setAttribute(_el$5, "partition", partitionVal);
                 createRenderEffect((_p$) => {
-                  var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = isHibernated() ? "none" : "flex", _v$7 = window.api?.panePreloadUrl;
+                  var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = window.api?.panePreloadUrl;
                   _v$3 !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$3);
                   _v$4 !== _p$.t && setAttribute(_el$5, "src", _p$.t = _v$4);
                   _v$5 !== _p$.a && setAttribute(_el$5, "useragent", _p$.a = _v$5);
-                  _v$6 !== _p$.o && setStyleProperty(_el$5, "display", _p$.o = _v$6);
-                  _v$7 !== _p$.i && setAttribute(_el$5, "preload", _p$.i = _v$7);
+                  _v$6 !== _p$.o && setAttribute(_el$5, "preload", _p$.o = _v$6);
                   return _p$;
                 }, {
                   e: void 0,
                   t: void 0,
                   a: void 0,
-                  o: void 0,
-                  i: void 0
+                  o: void 0
                 });
                 return _el$5;
               })()
@@ -20431,21 +20812,6 @@ function Pane(props) {
         });
       }
     }), null);
-    insert(_el$2, createComponent(PaneSleepOverlay, {
-      get isHibernated() {
-        return isHibernated();
-      },
-      get canDeepHibernate() {
-        return canDeepHibernate();
-      },
-      get isRestoring() {
-        return isRestoring();
-      },
-      get isBlank() {
-        return isBlank();
-      },
-      onWake: wake
-    }), null);
     insert(_el$2, createComponent(Show, {
       get when() {
         return isCrashed();
@@ -20497,7 +20863,7 @@ function Pane(props) {
   })();
 }
 delegateEvents(["mousemove", "focusin", "mousedown", "click", "contextmenu"]);
-var _tmpl$$h = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$i = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function DropSnapPreview(props) {
   const isSplitTarget = () => {
     if (!props.target) return false;
@@ -20546,7 +20912,7 @@ function DropSnapPreview(props) {
       return memo(() => !!isSplitTarget())() && props.target;
     },
     get children() {
-      var _el$ = _tmpl$$h(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$i(), _el$2 = _el$.firstChild;
       insert(_el$2, () => props.target.direction === "left" && "Dock Left", null);
       insert(_el$2, () => props.target.direction === "right" && "Dock Right", null);
       insert(_el$2, () => props.target.direction === "top" && "Dock Top", null);
@@ -20556,9 +20922,41 @@ function DropSnapPreview(props) {
     }
   });
 }
-var _tmpl$$g = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`), _tmpl$2$e = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors">Reset & Reload Workspace`);
+var _tmpl$$h = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`), _tmpl$2$e = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors">Reset & Reload Workspace`);
 function AppMainCanvas(props) {
   const displayTree = createMemo(() => getComputedPreviewTree());
+  onMount(() => {
+    const unsubTimestamp = initMediaTimestampTracker();
+    const handleMedia = (e) => {
+      const {
+        paneId,
+        isPlaying,
+        isAudible
+      } = e.detail || {};
+      if (paneId) {
+        const audible = isAudible !== void 0 ? Boolean(isAudible) : Boolean(isPlaying);
+        markPaneMediaActive(paneId, audible);
+        updatePaneAudio(paneId, audible, layoutStore.nodes[paneId] || getPaneFromPool(paneId));
+      }
+    };
+    const handleCall = (e) => {
+      const {
+        paneId,
+        isInCall
+      } = e.detail || {};
+      if (paneId) {
+        markPaneCallActive(paneId, Boolean(isInCall));
+        updatePaneCall(paneId, Boolean(isInCall), layoutStore.nodes[paneId] || getPaneFromPool(paneId));
+      }
+    };
+    window.addEventListener("app:media-status", handleMedia);
+    window.addEventListener("app:call-active", handleCall);
+    onCleanup(() => {
+      unsubTimestamp();
+      window.removeEventListener("app:media-status", handleMedia);
+      window.removeEventListener("app:call-active", handleCall);
+    });
+  });
   const activePaneIds = createMemo(() => {
     const ids = [];
     const visited = /* @__PURE__ */ new Set();
@@ -20567,9 +20965,8 @@ function AppMainCanvas(props) {
       visited.add(id);
       const node = layoutStore.nodes[id];
       if (!node) return;
-      if (node.type === "pane" && node.id !== SPLIT_PREVIEW_GHOST_ID) {
-        ids.push(node.id);
-      } else if (node.type === "split") {
+      if (node.type === "pane" && node.id !== SPLIT_PREVIEW_GHOST_ID) ids.push(node.id);
+      else if (node.type === "split") {
         if (node.a) traverse(node.a);
         if (node.b) traverse(node.b);
       }
@@ -20577,13 +20974,12 @@ function AppMainCanvas(props) {
     if (layoutStore.rootId) traverse(layoutStore.rootId);
     if (ids.length === 0 && Object.keys(layoutStore.nodes).length > 0) {
       for (const [nodeId, n] of Object.entries(layoutStore.nodes)) {
-        if (n && n.type === "pane" && nodeId !== SPLIT_PREVIEW_GHOST_ID) {
-          ids.push(nodeId);
-        }
+        if (n && n.type === "pane" && nodeId !== SPLIT_PREVIEW_GHOST_ID) ids.push(nodeId);
       }
     }
     return ids.sort((a, b) => a.localeCompare(b));
   });
+  const renderedPaneIds = createMemo(() => computeRenderedPoolPaneIds(activePaneIds()));
   const handleResetLayout = (reset) => {
     const defaultPaneId = `pane_${Date.now()}`;
     setLayoutStore("nodes", reconcile({
@@ -20627,10 +21023,8 @@ function AppMainCanvas(props) {
         return props.hoverZone !== "none";
       },
       get children() {
-        var _el$4 = _tmpl$$g();
-        _el$4.addEventListener("pointerenter", () => {
-          window.dispatchEvent(new CustomEvent("app:zone-leave"));
-        });
+        var _el$4 = _tmpl$$h();
+        _el$4.addEventListener("pointerenter", () => window.dispatchEvent(new CustomEvent("app:zone-leave")));
         createRenderEffect((_p$) => {
           var _v$ = isEdgeHovered("top") ? "80px" : "0px", _v$2 = isEdgeHovered("left") ? "80px" : "0px", _v$3 = isEdgeHovered("right") ? "80px" : "0px", _v$4 = isEdgeHovered("bottom") ? "80px" : "0px";
           _v$ !== _p$.e && setStyleProperty(_el$4, "top", _p$.e = _v$);
@@ -20649,10 +21043,10 @@ function AppMainCanvas(props) {
     }), _el$5);
     insert(_el$5, createComponent(For, {
       get each() {
-        return activePaneIds();
+        return renderedPaneIds();
       },
       children: (paneId) => {
-        const pane = () => layoutStore.nodes[paneId] || {};
+        const pane = () => layoutStore.nodes[paneId] || getPaneFromPool(paneId) || getHostPane(paneId) || criticalPanesStore[paneId]?.node || {};
         return createComponent(AbsolutePane, {
           get targetId() {
             return `pane-container-${pane().id}`;
@@ -20692,10 +21086,18 @@ function AppMainCanvas(props) {
               get profileId() {
                 return pane().profileId || props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.default_profile_id || "main";
               },
-              onClose: () => props.ws.handleClose(pane().id),
+              onClose: () => {
+                unregisterPaneFromPool(pane().id);
+                unregisterCriticalPane(pane().id);
+                unregisterWorkspacePane(pane().id);
+                props.ws.handleClose(pane().id);
+              },
               onSplit: (dir) => props.ws.handleSplit(pane().id, dir),
               onUpdate: (data) => props.ws.handleUpdatePane(pane().id, data),
-              onActive: () => props.ws.setActivePaneId(pane().id),
+              onActive: () => {
+                props.ws.setActivePaneId(pane().id);
+                PaneFocusManager.focusPane(pane().id, props.ws.setActivePaneId);
+              },
               onApplyTemplate: (template2) => props.ws.applyLayoutTemplate(pane().id, template2),
               get activeWorkspaceName() {
                 return props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.name || "";
@@ -20760,24 +21162,12 @@ function AppMainCanvas(props) {
         });
       }
     }));
-    createRenderEffect((_p$) => {
-      var _v$5 = `${SPATIAL_TOKENS.baseMargin}px`, _v$6 = `${SPATIAL_TOKENS.baseMargin}px`, _v$7 = `${SPATIAL_TOKENS.baseMargin}px`, _v$8 = `${SPATIAL_TOKENS.baseMargin}px`;
-      _v$5 !== _p$.e && setStyleProperty(_el$, "padding-top", _p$.e = _v$5);
-      _v$6 !== _p$.t && setStyleProperty(_el$, "padding-left", _p$.t = _v$6);
-      _v$7 !== _p$.a && setStyleProperty(_el$, "padding-right", _p$.a = _v$7);
-      _v$8 !== _p$.o && setStyleProperty(_el$, "padding-bottom", _p$.o = _v$8);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0,
-      a: void 0,
-      o: void 0
-    });
+    createRenderEffect((_$p) => setStyleProperty(_el$, "padding", `${SPATIAL_TOKENS.baseMargin}px`));
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$f = /* @__PURE__ */ template(`<div class="fixed left-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-left-2 duration-150 whitespace-nowrap select-none">Previous Tab`), _tmpl$2$d = /* @__PURE__ */ template(`<div>`), _tmpl$3$b = /* @__PURE__ */ template(`<div class="fixed right-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-right-2 duration-150 whitespace-nowrap select-none">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div class="fixed top-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-top-2 duration-150 whitespace-nowrap select-none">Previous Workspace`), _tmpl$5$6 = /* @__PURE__ */ template(`<div class="fixed bottom-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-150 whitespace-nowrap select-none">Next Workspace`);
+var _tmpl$$g = /* @__PURE__ */ template(`<div class="fixed left-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-left-2 duration-150 whitespace-nowrap select-none">Previous Tab`), _tmpl$2$d = /* @__PURE__ */ template(`<div>`), _tmpl$3$b = /* @__PURE__ */ template(`<div class="fixed right-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-right-2 duration-150 whitespace-nowrap select-none">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div class="fixed top-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-top-2 duration-150 whitespace-nowrap select-none">Previous Workspace`), _tmpl$5$6 = /* @__PURE__ */ template(`<div class="fixed bottom-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-150 whitespace-nowrap select-none">Next Workspace`);
 function EdgeDragZones(props) {
   const showLeft = () => {
     const ts = props.ws.tabs();
@@ -20820,7 +21210,7 @@ function EdgeDragZones(props) {
               return props.hoverDir === "left";
             },
             get children() {
-              return _tmpl$$f();
+              return _tmpl$$g();
             }
           }));
           createRenderEffect(() => className(_el$, `${baseZone} inset-y-12 left-1.5 w-3 rounded-full ${props.hoverDir === "left" ? activeStyle : idleStyle}`));
@@ -20883,7 +21273,7 @@ function EdgeDragZones(props) {
     }
   });
 }
-var _tmpl$$e = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$c = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$a = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+var _tmpl$$f = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$c = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$a = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-white/50 border border-black/[0.04] rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "";
@@ -20907,7 +21297,7 @@ function AccountTab(props) {
         return _tmpl$8$1();
       },
       get children() {
-        var _el$4 = _tmpl$$e();
+        var _el$4 = _tmpl$$f();
         createRenderEffect(() => setAttribute(_el$4, "src", layoutStore.licenseState?.customer?.avatar_url));
         return _el$4;
       }
@@ -21011,10 +21401,10 @@ function AccountTab(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$d = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-4">Default Profiles</p><div class="bg-white/50 border border-black/[0.04] rounded-[16px] overflow-hidden divide-y divide-black/[0.04]">`), _tmpl$2$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-4 hover:bg-neutral-50 transition-colors"><div class="flex items-center gap-3"><div class="relative shrink-0 flex items-center justify-center w-8 h-8 rounded-md bg-neutral-100 border border-neutral-200 text-neutral-600"></div><div class="text-sm font-medium text-neutral-900"></div></div><select class="text-sm border border-neutral-200 rounded-lg py-2 px-3 bg-white text-neutral-700 focus:outline-none focus:border-neutral-900 focus:ring-1 focus:ring-neutral-900 cursor-pointer shadow-sm hover:border-neutral-300 transition-colors"><option value=main>Main (Default)`), _tmpl$3$9 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$$e = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-4">Default Profiles</p><div class="bg-white/50 border border-black/[0.04] rounded-[16px] overflow-hidden divide-y divide-black/[0.04]">`), _tmpl$2$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-4 hover:bg-neutral-50 transition-colors"><div class="flex items-center gap-3"><div class="relative shrink-0 flex items-center justify-center w-8 h-8 rounded-md bg-neutral-100 border border-neutral-200 text-neutral-600"></div><div class="text-sm font-medium text-neutral-900"></div></div><select class="text-sm border border-neutral-200 rounded-lg py-2 px-3 bg-white text-neutral-700 focus:outline-none focus:border-neutral-900 focus:ring-1 focus:ring-neutral-900 cursor-pointer shadow-sm hover:border-neutral-300 transition-colors"><option value=main>Main (Default)`), _tmpl$3$9 = /* @__PURE__ */ template(`<option>`);
 function WorkspacesTab(props) {
   return (() => {
-    var _el$ = _tmpl$$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     insert(_el$3, createComponent(For, {
       get each() {
         return props.ws.workspaces();
@@ -21067,7 +21457,7 @@ function WorkspacesTab(props) {
     return _el$;
   })();
 }
-var _tmpl$$c = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Launchpad Shortcuts</h4><p class="text-[10px] text-neutral-500">Default bookmarks opened within this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-800 shadow-xs"placeholder="Website URL (e.g. app.slack.com)"><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg px-3.5 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-xs">Add</button></div><div class="border border-neutral-200/80 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="p-3 text-center text-xs text-neutral-400 italic">No shortcuts configured.`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[9px] text-neutral-400 font-mono truncate"></span></div></div><div class="flex items-center gap-1"><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▲</button><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▼</button><button class="p-1 hover:bg-red-50 text-neutral-400 hover:text-red-600 rounded cursor-pointer">✕`);
+var _tmpl$$d = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Launchpad Shortcuts</h4><p class="text-[10px] text-neutral-500">Default bookmarks opened within this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-800 shadow-xs"placeholder="Website URL (e.g. app.slack.com)"><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg px-3.5 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-xs">Add</button></div><div class="border border-neutral-200/80 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="p-3 text-center text-xs text-neutral-400 italic">No shortcuts configured.`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[9px] text-neutral-400 font-mono truncate"></span></div></div><div class="flex items-center gap-1"><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▲</button><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▼</button><button class="p-1 hover:bg-red-50 text-neutral-400 hover:text-red-600 rounded cursor-pointer">✕`);
 function ProfileShortcutsManager(props) {
   const [apps, setApps] = createSignal([]);
   const [newUrl, setNewUrl] = createSignal("");
@@ -21138,7 +21528,7 @@ function ProfileShortcutsManager(props) {
     saveApps(list);
   };
   return (() => {
-    var _el$ = _tmpl$$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling;
+    var _el$ = _tmpl$$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling;
     _el$4.$$input = (e) => setNewUrl(e.currentTarget.value);
     _el$5.$$click = handleAdd;
     insert(_el$6, createComponent(Show, {
@@ -21184,7 +21574,7 @@ function ProfileShortcutsManager(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$b = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-500 bg-neutral-100 border border-neutral-200">DEFAULT`), _tmpl$2$9 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-600 bg-neutral-100 border border-neutral-200">RAM-ONLY`), _tmpl$3$7 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono text-neutral-500 bg-neutral-50 border border-neutral-200 truncate max-w-[130px]">Proxy: `), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-9 h-9 rounded-xl text-white text-xs font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-2"><span class="text-sm font-semibold text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-medium text-neutral-700 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/80 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/60 shadow-xs">Configure</button></div><div class="flex items-center gap-1.5 pt-2 border-t border-neutral-100 flex-wrap"><span class="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider shrink-0 mr-1.5">SSO:`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white border border-neutral-300 shadow-xs ring-1 ring-black/5"><div class="relative flex items-center justify-center"><img class="w-3.5 h-3.5 object-contain"><div class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-white"></div></div><span class="font-mono text-[10px] text-neutral-800 font-medium truncate max-w-[140px]">`), _tmpl$6$2 = /* @__PURE__ */ template(`<button type=button class="relative group/pbtn flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-50 hover:bg-white border border-neutral-200/60 hover:border-neutral-300 transition-all cursor-pointer shadow-2xs active:scale-95"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40 group-hover/pbtn:grayscale-0 group-hover/pbtn:opacity-100 transition-all">`);
+var _tmpl$$c = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-500 bg-neutral-100 border border-neutral-200">DEFAULT`), _tmpl$2$9 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-600 bg-neutral-100 border border-neutral-200">RAM-ONLY`), _tmpl$3$7 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono text-neutral-500 bg-neutral-50 border border-neutral-200 truncate max-w-[130px]">Proxy: `), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-9 h-9 rounded-xl text-white text-xs font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-2"><span class="text-sm font-semibold text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-medium text-neutral-700 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/80 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/60 shadow-xs">Configure</button></div><div class="flex items-center gap-1.5 pt-2 border-t border-neutral-100 flex-wrap"><span class="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider shrink-0 mr-1.5">SSO:`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white border border-neutral-300 shadow-xs ring-1 ring-black/5"><div class="relative flex items-center justify-center"><img class="w-3.5 h-3.5 object-contain"><div class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-white"></div></div><span class="font-mono text-[10px] text-neutral-800 font-medium truncate max-w-[140px]">`), _tmpl$6$2 = /* @__PURE__ */ template(`<button type=button class="relative group/pbtn flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-50 hover:bg-white border border-neutral-200/60 hover:border-neutral-300 transition-all cursor-pointer shadow-2xs active:scale-95"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40 group-hover/pbtn:grayscale-0 group-hover/pbtn:opacity-100 transition-all">`);
 const IDENTITY_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -21259,7 +21649,7 @@ function ProfileCard(props) {
         return isDefault();
       },
       get children() {
-        return _tmpl$$b();
+        return _tmpl$$c();
       }
     }), null);
     insert(_el$6, createComponent(Show, {
@@ -21337,7 +21727,7 @@ function ProfileCard(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$a = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><div class=space-y-0.5><h3 class="text-sm font-bold text-neutral-900 tracking-tight">Profiles</h3><p class="text-xs text-neutral-500">Isolated sessions with independent logins, cookies, and cache.</p></div><button class="flex items-center gap-1.5 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 text-white px-3.5 py-2 rounded-xl transition-colors shadow-xs shrink-0 cursor-pointer"><span>+</span><span>New Profile`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class=p-6>`), _tmpl$4$5 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2 mb-4"><button class="text-xs text-neutral-500 hover:text-neutral-900 transition-colors flex items-center gap-1 cursor-pointer font-medium"><span>←</span> Back to Profiles</button></div><h3 class="text-sm font-bold text-neutral-900 mb-4">`);
+var _tmpl$$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><div class=space-y-0.5><h3 class="text-sm font-bold text-neutral-900 tracking-tight">Profiles</h3><p class="text-xs text-neutral-500">Isolated sessions with independent logins, cookies, and cache.</p></div><button class="flex items-center gap-1.5 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 text-white px-3.5 py-2 rounded-xl transition-colors shadow-xs shrink-0 cursor-pointer"><span>+</span><span>New Profile`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class=p-6>`), _tmpl$4$5 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2 mb-4"><button class="text-xs text-neutral-500 hover:text-neutral-900 transition-colors flex items-center gap-1 cursor-pointer font-medium"><span>←</span> Back to Profiles</button></div><h3 class="text-sm font-bold text-neutral-900 mb-4">`);
 function ProfilesTab(props) {
   return (() => {
     var _el$ = _tmpl$3$6();
@@ -21396,7 +21786,7 @@ function ProfilesTab(props) {
       },
       get children() {
         return [(() => {
-          var _el$2 = _tmpl$$a(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+          var _el$2 = _tmpl$$b(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
           _el$4.$$click = () => {
             if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
               props.onClose();
@@ -21426,7 +21816,7 @@ function ProfilesTab(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$9 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-1 text-[10px] font-medium">+`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-2 py-1 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[11px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex items-center">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div data-shortcut-recorder=true tabindex=0>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-medium text-neutral-900 animate-pulse">Press any key... (Esc to cancel)`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><div class="flex items-center justify-between mb-4"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Keyboard Shortcuts</p><button class="text-xs font-medium text-neutral-500 hover:text-red-600 transition-colors px-2 py-1 rounded hover:bg-red-50">Reset Defaults</button></div><div class="space-y-6 pb-6">`), _tmpl$7 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-3 px-1"></h3><div class="bg-white border border-neutral-200 rounded-xl overflow-hidden divide-y divide-neutral-100 shadow-sm">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-3 hover:bg-neutral-50 transition-colors"><span class="text-sm text-neutral-700">`);
+var _tmpl$$a = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-1 text-[10px] font-medium">+`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-2 py-1 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[11px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex items-center">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div data-shortcut-recorder=true tabindex=0>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-medium text-neutral-900 animate-pulse">Press any key... (Esc to cancel)`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="max-w-xl mx-auto"><div class="flex items-center justify-between mb-4"><p class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Keyboard Shortcuts</p><button class="text-xs font-medium text-neutral-500 hover:text-red-600 transition-colors px-2 py-1 rounded hover:bg-red-50">Reset Defaults</button></div><div class="space-y-6 pb-6">`), _tmpl$7 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider mb-3 px-1"></h3><div class="bg-white border border-neutral-200 rounded-xl overflow-hidden divide-y divide-neutral-100 shadow-sm">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-3 hover:bg-neutral-50 transition-colors"><span class="text-sm text-neutral-700">`);
 function ShortcutRecorder(props) {
   const [isRecording, setIsRecording] = createSignal(false);
   const handleKeyDown = (e) => {
@@ -21471,7 +21861,7 @@ function ShortcutRecorder(props) {
           return i < parts.length - 1;
         },
         get children() {
-          return _tmpl$$9();
+          return _tmpl$$a();
         }
       }), null);
       return _el$;
@@ -21533,7 +21923,7 @@ function ShortcutsTab() {
   })();
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$8 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[600px] h-[480px] bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-5 py-4 border-b border-black/[0.04] bg-transparent"><div class="flex items-center gap-6"><h2 class="text-sm font-semibold text-neutral-800">Settings</h2><div class="flex items-center gap-1 bg-neutral-100/80 p-1 rounded-[14px]"></div></div></div><div class="flex-1 overflow-y-auto bg-transparent p-6 relative z-10">`), _tmpl$3$4 = /* @__PURE__ */ template(`<button>`);
+var _tmpl$$9 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[600px] h-[480px] bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-5 py-4 border-b border-black/[0.04] bg-transparent"><div class="flex items-center gap-6"><h2 class="text-sm font-semibold text-neutral-800">Settings</h2><div class="flex items-center gap-1 bg-neutral-100/80 p-1 rounded-[14px]"></div></div></div><div class="flex-1 overflow-y-auto bg-transparent p-6 relative z-10">`), _tmpl$3$4 = /* @__PURE__ */ template(`<button>`);
 function SettingsPopover(props) {
   const [activeTab, setActiveTab] = createSignal(layoutStore.settingsActiveTab || "account");
   const [editingProfileId, setEditingProfileId] = createSignal(null);
@@ -21591,7 +21981,7 @@ function SettingsPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$8();
+        var _el$ = _tmpl$$9();
         _el$.$$mousedown = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -21673,7 +22063,7 @@ function SettingsPopover(props) {
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$7 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[400px] h-[560px] bg-white ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-5 py-4 border-b border-black/[0.04] bg-neutral-50 shrink-0"><h2 class="text-sm font-semibold text-neutral-800">Latest Updates</h2><button class="text-neutral-400 hover:text-neutral-700 transition-colors relative z-10"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-hidden relative bg-[#fafaf9] flex items-center justify-center z-10"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-neutral-400 absolute"></div><iframe src=https://apposition.app/changelog class="absolute inset-0 w-full h-full border-none z-10"title="Apposition Release Notes">`);
+var _tmpl$$8 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[400px] h-[560px] bg-white ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-5 py-4 border-b border-black/[0.04] bg-neutral-50 shrink-0"><h2 class="text-sm font-semibold text-neutral-800">Latest Updates</h2><button class="text-neutral-400 hover:text-neutral-700 transition-colors relative z-10"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-hidden relative bg-[#fafaf9] flex items-center justify-center z-10"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-neutral-400 absolute"></div><iframe src=https://apposition.app/changelog class="absolute inset-0 w-full h-full border-none z-10"title="Apposition Release Notes">`);
 function ChangelogPopover(props) {
   let popoverRef;
   onMount(() => {
@@ -21703,7 +22093,7 @@ function ChangelogPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$7();
+        var _el$ = _tmpl$$8();
         _el$.$$mousedown = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -21722,7 +22112,7 @@ function ChangelogPopover(props) {
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$6 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$3 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$3 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
+var _tmpl$$7 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$3 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$3 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
 function CheatSheetModal() {
   const [isOpen, setIsOpen] = createSignal(false);
   const toggle = () => setIsOpen(!isOpen());
@@ -21755,7 +22145,7 @@ function CheatSheetModal() {
           return i < parts.length - 1;
         },
         get children() {
-          return _tmpl$$6();
+          return _tmpl$$7();
         }
       }), null);
       return _el$;
@@ -21796,7 +22186,7 @@ function CheatSheetModal() {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$5 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div>`);
+var _tmpl$$6 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div>`);
 function ModalShell(props) {
   onMount(() => {
     const onKeyDown = (e) => {
@@ -21812,7 +22202,7 @@ function ModalShell(props) {
       return props.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$$5(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$6(), _el$2 = _el$.firstChild;
       _el$.$$click = (e) => {
         if (e.target === e.currentTarget) props.onClose();
       };
@@ -21823,7 +22213,7 @@ function ModalShell(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$4 = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
+var _tmpl$$5 = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
 function ConfirmationModal(props) {
   return createComponent(ModalShell, {
     get isOpen() {
@@ -21835,7 +22225,7 @@ function ConfirmationModal(props) {
     maxWidthClass: "max-w-sm",
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$4(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+        var _el$ = _tmpl$$5(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
         insert(_el$2, () => props.title);
         insert(_el$3, () => props.description);
         return _el$;
@@ -21935,7 +22325,7 @@ function usePaywallController() {
     close
   };
 }
-var _tmpl$$3 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$2 = /* @__PURE__ */ template(`<svg class="animate-spin h-3.5 w-3.5"xmlns=http://www.w3.org/2000/svg fill=none viewBox="0 0 24 24"><circle class=opacity-25 cx=12 cy=12 r=10 stroke=currentColor stroke-width=4></circle><path class=opacity-75 fill=currentColor d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">`), _tmpl$3$2 = /* @__PURE__ */ template(`<span class="text-[11px] text-red-500 font-medium px-0.5">`), _tmpl$4$2 = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5 mt-2"><div class="flex flex-col gap-1.5"><div class="flex gap-2"><input type=text placeholder="Paste license key..."class="flex-1 px-3 py-1.5 text-[12px] bg-white border border-neutral-200/80 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:border-neutral-900 transition-all placeholder-neutral-400 text-neutral-800 shadow-sm"><button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white rounded-[8px] text-[12px] font-medium transition-all shadow-sm flex items-center justify-center min-w-[70px]"></button></div></div><div class=mt-1><button type=button class="w-full py-1.5 bg-white hover:bg-neutral-50 border border-neutral-200/80 text-neutral-800 font-medium rounded-[8px] text-[12px] transition-all shadow-sm flex items-center justify-center gap-1.5"><svg xmlns=http://www.w3.org/2000/svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path></svg>View Premium Plans`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[320px] bg-white ring-1 ring-black/[0.06] border border-neutral-200/60 rounded-[16px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] p-4 animate-in fade-in zoom-in-[0.98] duration-200 pointer-events-auto"><button class="absolute top-3.5 right-3.5 text-neutral-400 hover:text-neutral-700 transition-colors p-1 rounded-md hover:bg-neutral-100"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button><div class="flex flex-col gap-3"><div><div class="inline-block px-2 py-0.5 bg-neutral-100 rounded-md border border-neutral-200/60 mb-2"><span class="text-[10px] font-semibold tracking-widest text-neutral-500 uppercase">Pro Feature</span></div><h3 class="text-[14px] font-semibold text-neutral-900 leading-tight">Unlock full access</h3></div><p class="text-[12px] text-neutral-500 leading-relaxed"> Upgrade to Premium to unlock unlimited access with our <strong class="text-neutral-800 font-medium">Monthly or Lifetime</strong> plans.`), _tmpl$6 = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-4 text-center animate-in zoom-in-95 duration-200"><div class="w-10 h-10 bg-green-50 rounded-full flex items-center justify-center text-green-500 mb-2 border border-green-200/50"><svg xmlns=http://www.w3.org/2000/svg width=20 height=20 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="20 6 9 17 4 12"></polyline></svg></div><p class="text-[12px] font-semibold text-green-700">Premium Activated!</p><p class="text-[11px] text-neutral-500 mt-0.5">Thank you for your support.`);
+var _tmpl$$4 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2$2 = /* @__PURE__ */ template(`<svg class="animate-spin h-3.5 w-3.5"xmlns=http://www.w3.org/2000/svg fill=none viewBox="0 0 24 24"><circle class=opacity-25 cx=12 cy=12 r=10 stroke=currentColor stroke-width=4></circle><path class=opacity-75 fill=currentColor d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">`), _tmpl$3$2 = /* @__PURE__ */ template(`<span class="text-[11px] text-red-500 font-medium px-0.5">`), _tmpl$4$2 = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5 mt-2"><div class="flex flex-col gap-1.5"><div class="flex gap-2"><input type=text placeholder="Paste license key..."class="flex-1 px-3 py-1.5 text-[12px] bg-white border border-neutral-200/80 rounded-[8px] focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:border-neutral-900 transition-all placeholder-neutral-400 text-neutral-800 shadow-sm"><button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 disabled:cursor-not-allowed text-white rounded-[8px] text-[12px] font-medium transition-all shadow-sm flex items-center justify-center min-w-[70px]"></button></div></div><div class=mt-1><button type=button class="w-full py-1.5 bg-white hover:bg-neutral-50 border border-neutral-200/80 text-neutral-800 font-medium rounded-[8px] text-[12px] transition-all shadow-sm flex items-center justify-center gap-1.5"><svg xmlns=http://www.w3.org/2000/svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"></path></svg>View Premium Plans`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="fixed z-[99999] w-[320px] bg-white ring-1 ring-black/[0.06] border border-neutral-200/60 rounded-[16px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] p-4 animate-in fade-in zoom-in-[0.98] duration-200 pointer-events-auto"><button class="absolute top-3.5 right-3.5 text-neutral-400 hover:text-neutral-700 transition-colors p-1 rounded-md hover:bg-neutral-100"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button><div class="flex flex-col gap-3"><div><div class="inline-block px-2 py-0.5 bg-neutral-100 rounded-md border border-neutral-200/60 mb-2"><span class="text-[10px] font-semibold tracking-widest text-neutral-500 uppercase">Pro Feature</span></div><h3 class="text-[14px] font-semibold text-neutral-900 leading-tight">Unlock full access</h3></div><p class="text-[12px] text-neutral-500 leading-relaxed"> Upgrade to Premium to unlock unlimited access with our <strong class="text-neutral-800 font-medium">Monthly or Lifetime</strong> plans.`), _tmpl$6 = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-4 text-center animate-in zoom-in-95 duration-200"><div class="w-10 h-10 bg-green-50 rounded-full flex items-center justify-center text-green-500 mb-2 border border-green-200/50"><svg xmlns=http://www.w3.org/2000/svg width=20 height=20 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="20 6 9 17 4 12"></polyline></svg></div><p class="text-[12px] font-semibold text-green-700">Premium Activated!</p><p class="text-[11px] text-neutral-500 mt-0.5">Thank you for your support.`);
 function PaywallPopover() {
   const ctrl = usePaywallController();
   return createComponent(Show, {
@@ -21946,7 +22336,7 @@ function PaywallPopover() {
       return createComponent(Portal, {
         get children() {
           return [(() => {
-            var _el$ = _tmpl$$3();
+            var _el$ = _tmpl$$4();
             _el$.$$mousedown = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -22135,7 +22525,7 @@ function useMilestoneController(workspaceCount, ws) {
     dismissToast
   };
 }
-var _tmpl$$2 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$1 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div style=-webkit-app-region:no-drag>`);
+var _tmpl$$3 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$1 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div style=-webkit-app-region:no-drag>`);
 function MilestoneToaster(props) {
   const ctrl = useMilestoneController(props.workspaceCount, props.ws);
   return createComponent(Show, {
@@ -22152,7 +22542,7 @@ function MilestoneToaster(props) {
         },
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$2(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$3(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$4.$$click = () => ctrl.dismissToast("feedback_dismiss");
             return _el$2;
           })(), (() => {
@@ -22242,6 +22632,86 @@ function AppModals(props) {
     }
   })];
 }
+var _tmpl$$2 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] pointer-events-auto select-none animate-in slide-in-from-bottom-3 fade-in duration-200"><div class="h-11 flex items-center gap-2.5 px-3 bg-white dark:bg-[#181818] text-neutral-800 dark:text-neutral-100 rounded-[12px] border border-neutral-200/90 dark:border-neutral-800 shadow-[inset_0_1px_0_rgba(255,255,255,1),0_10px_32px_-4px_rgba(0,0,0,0.12)] text-[12.5px] font-sans tracking-tight"><div class="w-6 h-6 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800/80 rounded-[6px] border border-neutral-200/60 dark:border-neutral-700/60 shrink-0"></div><span class="max-w-[220px] truncate text-neutral-700 dark:text-neutral-200 font-medium">Closed <strong class="font-semibold text-neutral-900 dark:text-white"></strong></span><div class="w-[1px] h-4 bg-neutral-200 dark:bg-neutral-700 mx-0.5"></div><button class="h-7 px-2.5 bg-neutral-100 hover:bg-neutral-200/70 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-100 rounded-[7px] border border-neutral-300/60 dark:border-neutral-600/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] text-[11.5px] font-medium flex items-center gap-1.5 transition-all active:scale-95">Undo</button><button class="w-6 h-6 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-[6px] transition-colors -mr-1"aria-label=Dismiss><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`);
+function ClosedItemToast(props) {
+  const [activeToast, setActiveToast] = createSignal(null);
+  let dismissTimeout = null;
+  const showToast = (title, url, type) => {
+    if (dismissTimeout) clearTimeout(dismissTimeout);
+    setActiveToast({
+      id: Date.now().toString(36),
+      title: title || (type === "tab" ? "Tab" : "Pane"),
+      url,
+      type
+    });
+    dismissTimeout = window.setTimeout(() => {
+      setActiveToast(null);
+    }, 5e3);
+  };
+  const handleUndo = () => {
+    if (dismissTimeout) clearTimeout(dismissTimeout);
+    setActiveToast(null);
+    props.onUndo();
+  };
+  const handleDismiss = () => {
+    if (dismissTimeout) clearTimeout(dismissTimeout);
+    setActiveToast(null);
+  };
+  onMount(() => {
+    const onToastEvent = (e) => {
+      const detail = e.detail;
+      if (detail) {
+        showToast(detail.title || "", detail.url || "", detail.type || "pane");
+      }
+    };
+    const onKeyDown = (e) => {
+      const isMac2 = typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+      const isMod = isMac2 ? e.metaKey : e.ctrlKey;
+      if (isMod && e.shiftKey && e.key.toLowerCase() === "t") {
+        if (activeToast()) {
+          e.preventDefault();
+          handleUndo();
+        }
+      }
+    };
+    window.addEventListener("app:closed-item-toast", onToastEvent);
+    window.addEventListener("keydown", onKeyDown, true);
+    onCleanup(() => {
+      if (dismissTimeout) clearTimeout(dismissTimeout);
+      window.removeEventListener("app:closed-item-toast", onToastEvent);
+      window.removeEventListener("keydown", onKeyDown, true);
+    });
+  });
+  const isMac = () => typeof navigator !== "undefined" && navigator.platform.toUpperCase().indexOf("MAC") >= 0;
+  return createComponent(Show, {
+    get when() {
+      return activeToast();
+    },
+    children: (toast) => (() => {
+      var _el$ = _tmpl$$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling, _el$8 = _el$7.nextSibling;
+      _el$8.firstChild;
+      var _el$0 = _el$8.nextSibling;
+      insert(_el$3, createComponent(Favicon, {
+        get url() {
+          return toast().url || "";
+        },
+        size: 15,
+        "class": "rounded-[3px]"
+      }));
+      insert(_el$6, () => toast().title);
+      _el$8.$$click = handleUndo;
+      insert(_el$8, createComponent(ShortcutBadge, {
+        get shortcut() {
+          return isMac() ? "⌘⇧T" : "Ctrl+Shift+T";
+        },
+        "class": "ml-0.5"
+      }), null);
+      _el$0.$$click = handleDismiss;
+      return _el$;
+    })()
+  });
+}
+delegateEvents(["click"]);
 function useAppGestures(switchWorkspace, switchTab, workspaces, tabs, activeWorkspace, activeTabId) {
   let accumY = 0;
   let accumX = 0;
@@ -22948,6 +23418,11 @@ function App() {
         }), null);
         insert(_el$2, () => toast()?.message, null);
         return _el$2;
+      }
+    }), null);
+    insert(_el$, createComponent(ClosedItemToast, {
+      get onUndo() {
+        return ws.reopenClosedTab;
       }
     }), null);
     return _el$;

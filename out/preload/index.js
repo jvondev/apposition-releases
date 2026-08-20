@@ -582,7 +582,21 @@ const api = {
   commitTearWindow: client.tearing.commit,
   // Webview Lifecycle & DOM Helpers
   ...webviewHelpers,
-  viewDestroy: (_paneId) => {
+  viewDestroy: (paneId) => {
+    const el = getWebview(paneId);
+    if (el) {
+      try {
+        if (typeof el.executeJavaScript === "function") {
+          el.executeJavaScript(
+            "try { document.querySelectorAll('video, audio').forEach(m => { m.pause(); m.muted = true; m.src = ''; m.load(); }); } catch(e) {}"
+          ).catch(() => {
+          });
+        }
+        if (typeof el.stop === "function") el.stop();
+        if (typeof el.loadURL === "function") el.loadURL("about:blank");
+      } catch {
+      }
+    }
   },
   viewSetBounds: (_paneId, _bounds) => {
   },
@@ -594,14 +608,10 @@ const api = {
   },
   viewWake: (_paneId, _bounds) => {
   },
-  viewCapture: () => Promise.resolve(
-    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E"
-  ),
+  viewCapture: () => Promise.resolve(""),
   viewCaptureAllActive: () => Promise.resolve({}),
   viewHibernateAllActive: () => Promise.resolve({}),
-  viewHibernate: () => Promise.resolve(
-    "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E"
-  ),
+  viewHibernate: () => Promise.resolve(""),
   viewRespawn: () => Promise.resolve(""),
   viewReload: (paneId, hard = false) => {
     const el = getWebview(paneId);
