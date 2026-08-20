@@ -1071,6 +1071,10 @@ function applyBrowserSwitches(app) {
   if (process.platform === "darwin") {
     app.commandLine.appendSwitch("disable-skia-graphite");
   }
+  if (process.platform === "linux") {
+    app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+    app.commandLine.appendSwitch("enable-features", "WaylandWindowDecorations");
+  }
   app.commandLine.appendSwitch(
     "disable-features",
     "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
@@ -2935,8 +2939,9 @@ function createWindow() {
     show: false,
     frame: false,
     titleBarStyle: "hidden",
+    trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: "#F7F7F5",
-    icon: require$$1$1.join(
+    icon: process.platform === "darwin" ? void 0 : require$$1$1.join(
       __dirname,
       process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
     ),

@@ -18156,27 +18156,23 @@ delegateEvents(["pointerdown", "click", "dblclick"]);
 var _tmpl$$B = /* @__PURE__ */ template(`<div><div>`);
 const STYLE_MAP = {
   md: {
-    outer: "rounded-lg p-1",
-    inner: "rounded"
-  },
-  // 8px - 4px = 4px
-  lg: {
-    outer: "rounded-xl p-1",
+    outer: "rounded-xl p-[3px]",
     inner: "rounded-lg"
   },
-  // 12px - 4px = 8px
+  lg: {
+    outer: "rounded-2xl p-1",
+    inner: "rounded-xl"
+  },
   xl: {
-    outer: "rounded-2xl p-1.5",
-    inner: "rounded-[10px]"
+    outer: "rounded-3xl p-1.5",
+    inner: "rounded-2xl"
   },
-  // 16px - 6px = 10px
   "2xl": {
-    outer: "rounded-[2rem] p-2",
-    inner: "rounded-[24px]"
+    outer: "rounded-3xl p-1.5",
+    inner: "rounded-2xl"
   },
-  // 32px - 8px = 24px
   full: {
-    outer: "rounded-full p-1.5",
+    outer: "rounded-full p-1",
     inner: "rounded-full"
   },
   "left-pill": {
@@ -18202,6 +18198,7 @@ function DoubleBezel(rawProps) {
   const isLightOnDark = local.variant === "light-on-dark";
   const isDark = local.variant === "dark";
   const outerBg = isLightOnDark ? local.elevation === "active" ? "bg-white/30" : "bg-white/20" : isDark ? local.elevation === "active" ? "bg-white/20" : "bg-white/10" : local.elevation === "active" ? "bg-neutral-200" : "bg-neutral-100";
+  const outerBorder = isLightOnDark ? "border border-white/20" : isDark ? "border border-white/10" : "border border-neutral-200/80";
   const innerBg = isDark ? "bg-neutral-900" : "bg-white";
   const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
   const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
@@ -18209,7 +18206,7 @@ function DoubleBezel(rawProps) {
     var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild;
     spread(_el$, mergeProps({
       get ["class"]() {
-        return `${outerBg} flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
+        return `${outerBg} ${outerBorder} overflow-hidden flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
       }
     }, rest), false, true);
     insert(_el$2, () => local.children);
