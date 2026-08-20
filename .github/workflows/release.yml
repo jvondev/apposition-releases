@@ -87,7 +87,7 @@ jobs:
         run: |
           RAW_TAG="${{ github.ref_name }}"
           VERSION="${RAW_TAG#v}"
-          echo "VERSION=${VERSION}" >> $GITHUB_OUTPUT
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Release version: ${VERSION}"
 
       - name: Compute Asset Hashes
@@ -95,30 +95,28 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           REPO="${{ github.repository }}"
-          
-          # Wait 10s for assets to become publicly available
           sleep 10
-          
           DMG_URL="https://github.com/${REPO}/releases/download/v${VERSION}/Apposition.App-${VERSION}-universal.dmg"
           curl -sL "$DMG_URL" -o app.dmg
           DMG_SHA=$(sha256sum app.dmg | awk '{print $1}')
-          echo "DMG_SHA=${DMG_SHA}" >> $GITHUB_OUTPUT
+          echo "DMG_SHA=${DMG_SHA}" >> "$GITHUB_OUTPUT"
           echo "Universal DMG SHA256: ${DMG_SHA}"
 
       - name: Update Homebrew Cask
         run: |
           VERSION="${{ steps.version.outputs.VERSION }}"
           DMG_SHA="${{ steps.hashes.outputs.DMG_SHA }}"
+          REPO="${{ github.repository }}"
           
-          cat << 'EOF' > Casks/apposition.rb
+          cat << EOF > Casks/apposition.rb
 cask "apposition" do
-  version "__VERSION__"
-  sha256 "__DMG_SHA__"
+  version "${VERSION}"
+  sha256 "${DMG_SHA}"
 
-  url "https://github.com/${{ github.repository }}/releases/download/v#{version}/Apposition.App-#{version}-universal.dmg"
+  url "https://github.com/${REPO}/releases/download/v#{version}/Apposition.App-#{version}-universal.dmg"
   name "Apposition"
   desc "A smart digital workspace to organize web apps, accounts, and tasks in one place"
-  homepage "https://github.com/${{ github.repository }}"
+  homepage "https://github.com/${REPO}"
 
   auto_updates true
 
@@ -132,8 +130,6 @@ cask "apposition" do
   ]
 end
 EOF
-          sed -i "s|__VERSION__|${VERSION}|g" Casks/apposition.rb
-          sed -i "s|__DMG_SHA__|${DMG_SHA}|g" Casks/apposition.rb
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -143,12 +139,10 @@ EOF
 
       - name: Publish to WinGet Community Repository
         uses: vedantmgoyal2009/winget-releaser@v2
-        if: env.WINGET_TOKEN != ''
-        env:
-          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN || secrets.GITHUB_TOKEN }}
+        continue-on-error: true
         with:
           identifier: jvondev.apposition
           version: ${{ steps.version.outputs.VERSION }}
           installer-url: https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/Apposition.App.Setup.${{ steps.version.outputs.VERSION }}.exe
           installer-type: nullsoft
-          token: ${{ secrets.WINGET_TOKEN || secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
