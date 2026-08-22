@@ -17,6 +17,7 @@ const require$$0$2 = require("events");
 const require$$1$4 = require("tty");
 const require$$2 = require("url");
 const require$$14 = require("zlib");
+const Sentry = require("@sentry/electron/main");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -34,6 +35,7 @@ function _interopNamespaceDefault(e) {
   return Object.freeze(n);
 }
 const require$$1__namespace = /* @__PURE__ */ _interopNamespaceDefault(require$$1$1);
+const Sentry__namespace = /* @__PURE__ */ _interopNamespaceDefault(Sentry);
 const isDevMode$2 = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
 const dbFileName = isDevMode$2 ? "apposition_state_dev.db" : "apposition_state.db";
 const dbPath = require$$1$1.join(require$$1.app.getPath("userData"), dbFileName);
@@ -385,9 +387,9 @@ const SECRET_PATTERNS = [
     /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
     "[UUID-KEY-REDACTED]"
   ],
-  [/Bearer\s+[a-zA-Z0-9._~+/-]+=*/gi, "Bearer [REDACTED]"],
+  [/Bearer\s+[a-zA-Z0-9._~+\\/-]+=*/gi, "Bearer [REDACTED]"],
   [/password["']?\s*[:=]\s*["'][^"']+["']/gi, 'password: "[REDACTED]"'],
-  [/token["']?\s*[:=]\s*["'][a-zA-Z0-9._~+/-]{16,}["']/gi, 'token: "[REDACTED]"']
+  [/token["']?\s*[:=]\s*["'][a-zA-Z0-9._~+\\/-]{16,}["']/gi, 'token: "[REDACTED]"']
 ];
 class NoiseFilter {
   guestBuckets = /* @__PURE__ */ new Map();
@@ -815,8 +817,8 @@ class Logger {
 const logger = new Logger("MAIN");
 const createLogger = (domain, opts) => new Logger(domain, opts);
 function printStartupBanner(version = "1.1.3", logFile = "apposition.log") {
-  const isDev = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
-  if (!isDev) return;
+  const isDev2 = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
+  if (!isDev2) return;
   console.log("");
   console.log("  \x1B[1m\x1B[37mApposition " + version + " (Development Environment)\x1B[0m");
   console.log("  \x1B[90mDatabase: Connected · Log File: " + logFile + " · Noise Filter: Active\x1B[0m");
@@ -912,7 +914,8 @@ function initInteractiveTerminal(logFilePath = "apposition.log", toggleGuestCall
   } catch {
   }
 }
-const ANTI_DETECTION_SCRIPT = `(function() {
+const ANTI_DETECTION_SCRIPT = String.raw`(function() {
+
   try {
     Object.defineProperty(navigator, 'webdriver', { get: () => false });
   } catch {}
@@ -942,10 +945,10 @@ const ANTI_DETECTION_SCRIPT = `(function() {
     const ua = navigator.userAgent || '';
     if (ua.includes('Electron') || ua.includes('Apposition')) {
       const cleanUa = ua
-        .replace(/s+Electron/S+/gi, '')
-        .replace(/s+Appositionw*/S+/gi, '')
-        .replace(/()s+)S+s+(Chrome/)/, '$1$2')
-        .replace(/s{2,}/g, ' ')
+        .replace(/\s+Electron\/\S+/gi, '')
+        .replace(/\s+Apposition\w*\/\S+/gi, '')
+        .replace(/(\)\s+)\S+\s+(Chrome\/)/, '$1$2')
+        .replace(/\s{2,}/g, ' ')
         .trim();
       try {
         Object.defineProperty(navigator, 'userAgent', {
@@ -956,7 +959,7 @@ const ANTI_DETECTION_SCRIPT = `(function() {
       } catch {}
       try {
         Object.defineProperty(navigator, 'appVersion', {
-          get: () => cleanUa.replace(/^Mozilla//, ''),
+          get: () => cleanUa.replace(/^Mozilla\//, ''),
           configurable: true,
           enumerable: true
         });
@@ -990,7 +993,7 @@ const ANTI_DETECTION_SCRIPT = `(function() {
     const isMac = ua.includes('Macintosh') || ua.includes('Mac OS X');
     const isLinux = ua.includes('Linux');
     const platform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
-    const chromeMatch = ua.match(/Chrome/([d.]+)/);
+    const chromeMatch = ua.match(/Chrome\/([\d.]+)/);
     const majorVersion = chromeMatch ? chromeMatch[1].split('.')[0] : '144';
     const brands = [
       { brand: 'Google Chrome', version: majorVersion },
@@ -19398,8 +19401,76 @@ function initDevCommandBridge(isDevMode2) {
     setInterval(checkCommand, 1e3);
   }
 }
+const SENSITIVE_QUERY_REGEX = /(token|auth|key|secret|password|session|code|client_secret)=([^&\s]+)/gi;
+const BEARER_REGEX = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
+const USER_PATH_REGEX = /(?:[a-zA-Z]:)?(?:[\\/])Users(?:[\\/])[^\\/\s"':]+/gi;
+const UNIX_USER_PATH_REGEX = /(?:\/home|\/Users)\/[^\\/\s"':]+/gi;
+const REPO_ROOT_REGEX = /[a-zA-Z]:[\\/][^\\/]+[\\/]apposition/gi;
+function sanitizeStringForOpsec(input) {
+  if (!input || typeof input !== "string") return "";
+  return input.replace(SENSITIVE_QUERY_REGEX, "$1=[REDACTED]").replace(BEARER_REGEX, "Bearer [REDACTED]").replace(USER_PATH_REGEX, "[USER_DIR]").replace(UNIX_USER_PATH_REGEX, "[USER_DIR]").replace(REPO_ROOT_REGEX, "[APP_ROOT]");
+}
+function sanitizeSentryEvent(event) {
+  if (!event) return event;
+  if (event.exception?.values) {
+    for (const val of event.exception.values) {
+      if (val.value) val.value = sanitizeStringForOpsec(val.value);
+      if (val.stacktrace?.frames) {
+        for (const frame of val.stacktrace.frames) {
+          if (frame.filename) frame.filename = sanitizeStringForOpsec(frame.filename);
+        }
+      }
+    }
+  }
+  if (event.breadcrumbs) {
+    for (const b of event.breadcrumbs) {
+      if (b.message) b.message = sanitizeStringForOpsec(b.message);
+      if (b.data && typeof b.data === "object") {
+        try {
+          const stringified = sanitizeStringForOpsec(JSON.stringify(b.data));
+          b.data = JSON.parse(stringified);
+        } catch {
+        }
+      }
+    }
+  }
+  return event;
+}
+const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
+let isDev = true;
+function initMainSentry(isDevMode2) {
+  isDev = isDevMode2;
+  if (isDevMode2) {
+    return;
+  }
+  try {
+    Sentry__namespace.init({
+      dsn: SENTRY_DSN,
+      release: `apposition@${require$$1.app.getVersion()}`,
+      environment: "production",
+      enabled: !isDevMode2,
+      sampleRate: 1,
+      beforeSend(event) {
+        if (isDevMode2) return null;
+        return sanitizeSentryEvent(event);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize Sentry in main process", err);
+  }
+}
+function captureMainException(err, context) {
+  if (isDev) return;
+  try {
+    Sentry__namespace.captureException(err, {
+      extra: context
+    });
+  } catch {
+  }
+}
 applyBrowserSwitches(require$$1.app);
 const isDevMode = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+initMainSentry(isDevMode);
 if (isDevMode) {
   require$$1.app.setName("Apposition Dev");
   try {
@@ -19417,16 +19488,18 @@ if (!gotTheLock) {
   logger.setFileSink(logFile);
   runtimeState.init(require$$1$1.join(require$$1.app.getPath("userData"), ".apposition-runtime.json"));
   if (isDevMode) {
-    printStartupBanner("1.1.3", logFile);
+    printStartupBanner(require$$1.app.getVersion(), logFile);
     initInteractiveTerminal(logFile);
   }
   process.on("uncaughtException", (err) => {
     runtimeState.incrementError();
     logger.fatal("Uncaught Exception in Main Process", err?.stack || err);
+    captureMainException(err);
   });
   process.on("unhandledRejection", (reason) => {
     runtimeState.incrementError();
     logger.error("Unhandled Rejection in Main Process", reason);
+    captureMainException(reason);
   });
   require$$1.app.on("second-instance", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
