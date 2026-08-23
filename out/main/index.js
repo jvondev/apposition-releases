@@ -1857,10 +1857,14 @@ const DEFAULT_CHROME_VERSION = "144.0.7550.80";
 const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
 const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
 function cleanUserAgent(ua) {
-  if (!ua || typeof ua !== "string" || !ua.trim()) {
+  if (!ua) {
     return DEFAULT_DESKTOP_UA;
   }
-  const cleaned = ua.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
+  const raw = Array.isArray(ua) ? ua[0] : ua;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
   return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
 }
 function isGoogleAuthUrl(url) {
@@ -1887,6 +1891,7 @@ function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = 
   };
 }
 function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
+  if (!headers || typeof headers !== "object") return {};
   const result = { ...headers };
   if (targetUrl && isGoogleAuthUrl(targetUrl)) {
     const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
@@ -3099,10 +3104,49 @@ function handleWebContentsWindowOpen(webContents) {
     return { action: "deny" };
   });
 }
+function handleBeforeInputEvent(webContents, event, input) {
+  if (input.type !== "keyDown") return;
+  const isMod = Boolean(input.control || input.meta);
+  const keyLower = input.key ? input.key.toLowerCase() : "";
+  const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
+  const isReload = isMod && keyLower === "r" || input.key === "F5";
+  const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
+  if (isAppShortcut) {
+    event.preventDefault();
+  }
+  if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
+    if (input.shift) {
+      webContents.reloadIgnoringCache();
+    } else {
+      webContents.reload();
+    }
+    if (!global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
+    }
+    return;
+  }
+  const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
+  const payload = {
+    webContentsId: webContents.id,
+    key: input.key,
+    code: input.code,
+    control: input.control,
+    meta: input.meta,
+    shift: input.shift,
+    alt: input.alt,
+    isAutoRepeat: input.isAutoRepeat,
+    isInputFocused: false,
+    eventId: sharedId
+  };
+  if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+    global.mainWindow.webContents.send("forwarded-key", payload);
+  }
+}
 const patchedSessions = /* @__PURE__ */ new WeakSet();
 function configureSessionSecurity(session) {
-  if (!session || patchedSessions.has(session)) return;
+  if (!session || patchedSessions.has(session) || session.__securityHeadersBound) return;
   patchedSessions.add(session);
+  session.__securityHeadersBound = true;
   const chromeVersion = process.versions.chrome || "144.0.7550.80";
   const clientHints = generateClientHints(chromeVersion, "Windows");
   session.setUserAgent(DEFAULT_DESKTOP_UA);
@@ -3133,12 +3177,24 @@ function configureSessionSecurity(session) {
   session.webRequest.onBeforeSendHeaders(
     { urls: ["https://*/*", "http://*/*"] },
     (details, callback) => {
-      const sanitized = sanitizeRequestHeaders(
-        details.requestHeaders,
-        clientHints,
-        details.url
-      );
-      callback({ requestHeaders: sanitized });
+      if (details.method === "OPTIONS") {
+        callback({ cancel: false });
+        return;
+      }
+      if (!details.url || !details.url.startsWith("http://") && !details.url.startsWith("https://")) {
+        callback({ cancel: false });
+        return;
+      }
+      try {
+        const sanitized = sanitizeRequestHeaders(
+          details.requestHeaders || {},
+          clientHints,
+          details.url
+        );
+        callback({ requestHeaders: sanitized });
+      } catch {
+        callback({ requestHeaders: details.requestHeaders || {} });
+      }
     }
   );
 }
@@ -3151,9 +3207,7 @@ function initSessionSecurity() {
   });
   require$$1.app.on("browser-window-created", (_, popupWin) => {
     const isAppWindow = popupWin === global.mainWindow || popupWin === global.overlayWindow || popupWin.__isMainWindow || popupWin.__isTearWindow;
-    if (isAppWindow) {
-      return;
-    }
+    if (isAppWindow) return;
     popupWin.webContents.on("will-navigate", (_e, navUrl) => {
       if (isGoogleAuthUrl(navUrl)) {
         popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
@@ -3206,49 +3260,17 @@ function initSessionSecurity() {
       }
     });
     webContents.on("before-input-event", (event, input) => {
-      if (input.type === "keyDown") {
-        const isMod = Boolean(input.control || input.meta);
-        const keyLower = input.key ? input.key.toLowerCase() : "";
-        const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
-        const isReload = isMod && keyLower === "r" || input.key === "F5";
-        const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
-        if (isAppShortcut) {
-          event.preventDefault();
-        }
-        if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
-          if (input.shift) {
-            webContents.reloadIgnoringCache();
-          } else {
-            webContents.reload();
-          }
-          if (!global.mainWindow.isDestroyed()) {
-            global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
-          }
-          return;
-        }
-        const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-        const payload = {
-          webContentsId: webContents.id,
-          key: input.key,
-          code: input.code,
-          control: input.control,
-          meta: input.meta,
-          shift: input.shift,
-          alt: input.alt,
-          isAutoRepeat: input.isAutoRepeat,
-          isInputFocused: false,
-          eventId: sharedId
-        };
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("forwarded-key", payload);
-        }
-      }
+      handleBeforeInputEvent(webContents, event, input);
     });
     handleWebContentsWindowOpen(webContents);
     webContents.on("render-process-gone", (_event, details) => {
-      if (details.reason === "oom" || details.reason === "crashed") {
+      if (details.reason === "oom" || details.reason === "crashed" || details.reason === "killed") {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("pane.crashed", webContents.id);
+          global.mainWindow.webContents.send("pane.crashed", {
+            webContentsId: webContents.id,
+            reason: details.reason,
+            exitCode: details.exitCode
+          });
         }
       }
     });
