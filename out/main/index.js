@@ -1069,7 +1069,8 @@ function applyBrowserSwitches(app) {
   app.commandLine.appendSwitch("disable-background-timer-throttling");
   app.commandLine.appendSwitch("disable-renderer-backgrounding");
   app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-  app.commandLine.appendSwitch("max-active-webgl-contexts", "128");
+  app.commandLine.appendSwitch("max-active-webgl-contexts", "32");
+  app.commandLine.appendSwitch("js-flags", "--max-old-space-size=4096");
   app.commandLine.appendSwitch("hide-scrollbars");
   if (process.platform === "darwin") {
     app.commandLine.appendSwitch("disable-skia-graphite");
@@ -3342,29 +3343,8 @@ function initSessionPersistenceHooks() {
     logger.warn("PowerMonitor / Cookie monitor hook unavailable", e);
   }
 }
-const BLOCKED_PATTERNS = [
-  "*://*.google-analytics.com/*",
-  "*://*.googletagmanager.com/gtm.js*",
-  "*://*.facebook.net/*/fbevents.js*",
-  "*://*.doubleclick.net/*",
-  "*://*.hotjar.com/*",
-  "*://*.clarity.ms/*",
-  "*://*.scorecardresearch.com/*",
-  "*://*.outbrain.com/*",
-  "*://*.taboola.com/*"
-];
 function initNetworkOptimizer() {
   const defaultSession = require$$1.session.defaultSession;
-  defaultSession.webRequest.onBeforeRequest(
-    { urls: BLOCKED_PATTERNS },
-    (details, callback) => {
-      if (details.resourceType === "mainFrame") {
-        callback({ cancel: false });
-        return;
-      }
-      callback({ cancel: true });
-    }
-  );
   require$$1.ipcMain.on("net.prefetch", (_, rawUrl) => {
     if (!rawUrl) return;
     try {
