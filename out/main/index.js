@@ -1952,9 +1952,14 @@ function openGoogleAuthModal(options) {
       ),
       webPreferences: {
         partition,
-        preload: void 0,
+        // EXPERIMENT (uncommitted): document-start passkey suppression.
+        // contextIsolation disabled so the guard runs in the page's MAIN
+        // world - the only way it is visible to Google's own scripts.
+        // The preload contains nothing but the probe patch: no require,
+        // no bridges, so exposure equals a page-level <script>.
+        preload: require$$1$1.join(__dirname, "../preload/authGuard.js"),
         sandbox: true,
-        contextIsolation: true
+        contextIsolation: false
       }
     });
     activeAuthWindow = authWin;
@@ -2212,11 +2217,28 @@ function configureSessionProxy(ses, proxyServer, profileId) {
     console.error(`Failed to configure proxy for profile ${profileId}:`, err);
   });
 }
+const AUTH_SURFACE_URL = "https://accounts.google.com";
+async function purgeGoogleAuthCookies(profileId) {
+  try {
+    const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
+    const ses = require$$1.session.fromPartition(partition);
+    const stale = await ses.cookies.get({ url: AUTH_SURFACE_URL });
+    await Promise.all(
+      stale.map(
+        (c) => typeof c.domain === "string" ? ses.cookies.remove(
+          `https://${c.domain.replace(/^\./, "")}`,
+          c.name
+        ) : Promise.resolve()
+      )
+    );
+  } catch {
+  }
+}
 function getTargetWindow() {
   const win = global.mainWindow || global.overlayWindow;
   return win && !win.isDestroyed() ? win : null;
 }
-function bindViewEvents(paneId, view) {
+function bindViewEvents(paneId, view, profileId) {
   if (view.webContents.__eventsBound) {
     return;
   }
@@ -2312,7 +2334,21 @@ function bindViewEvents(paneId, view) {
       win.webContents.send("view.fail-load", { paneId, errorCode, errorDescription, validatedURL });
     }
   });
-  view.webContents.on("did-navigate", (_e, url) => sendNav(url));
+  view.webContents.on("will-navigate", (event, url) => {
+    if (!isGoogleAuthUrl(url)) return;
+    event.preventDefault();
+    purgeGoogleAuthCookies(profileId).then(() => {
+      view.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      return view.webContents.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
+    }).catch(() => {
+    });
+  });
+  view.webContents.on("did-navigate", (_e, url) => {
+    if (!isGoogleAuthUrl(url) && view.webContents.getUserAgent() === FIREFOX_AUTH_UA) {
+      view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
+    }
+    sendNav(url);
+  });
   view.webContents.on("did-navigate-in-page", (_e, url) => sendNav(url));
   view.webContents.on("page-title-updated", () => sendNav(view.webContents.getURL()));
   view.webContents.on("page-favicon-updated", (_e, favicons) => {
@@ -2442,7 +2478,7 @@ function configureViewAndSession(paneId, view, profileId) {
       }
     });
   }
-  bindViewEvents(paneId, view);
+  bindViewEvents(paneId, view, profileId);
 }
 function createOrUpdateView(paneId, url, profileId = "main") {
   const existing = viewRegistry.getView(paneId);
@@ -3081,9 +3117,11 @@ function handleWebContentsWindowOpen(webContents) {
           ),
           userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
           webPreferences: {
-            preload: void 0,
+            // EXPERIMENT (uncommitted): document-start passkey suppression,
+            // same main-world preload rationale as googleAuthModal.ts.
+            preload: require$$1$1.join(__dirname, "../preload/authGuard.js"),
             sandbox: true,
-            contextIsolation: true
+            contextIsolation: false
           }
         }
       };
