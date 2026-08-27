@@ -6,13 +6,13 @@
 !macroend
 
 !macro customInit
-  nsProcess::_KillProcess "Apposition.exe"
-  nsProcess::_KillProcess "Apposition App.exe"
-  nsProcess::_KillProcess "Apposition Dev.exe"
+  nsExec::Exec 'taskkill /F /IM Apposition.exe /T'
+  nsExec::Exec 'taskkill /F /IM "Apposition Dev.exe" /T'
+  nsExec::Exec 'taskkill /F /IM "Apposition App.exe" /T'
 !macroend
 
 !macro customUnInit
-  nsProcess::_KillProcess "Apposition.exe"
-  nsProcess::_KillProcess "Apposition App.exe"
-  nsProcess::_KillProcess "Apposition Dev.exe"
+  nsExec::Exec 'taskkill /F /IM Apposition.exe /T'
+  nsExec::Exec 'taskkill /F /IM "Apposition Dev.exe" /T'
+  nsExec::Exec 'taskkill /F /IM "Apposition App.exe" /T'
 !macroend

@@ -58,9 +58,10 @@ win:
   icon: assets/icon.ico
 
 nsis:
-  oneClick: true
+  oneClick: false
+  allowToChangeInstallationDirectory: true
   perMachine: false
-  allowElevation: false
+  allowElevation: true
   deleteAppDataOnUninstall: false
   runAfterFinish: true
   createDesktopShortcut: always
