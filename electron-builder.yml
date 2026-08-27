@@ -61,7 +61,7 @@ nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   perMachine: false
-  allowElevation: true
+  allowElevation: false
   deleteAppDataOnUninstall: false
   runAfterFinish: true
   createDesktopShortcut: always

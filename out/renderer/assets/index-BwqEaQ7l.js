@@ -4009,7 +4009,7 @@ function createWorkspaceLoader(state, history) {
     }
   };
   const loadNodesForTab = async (tabId, preloadedTabs, initialUrl) => {
-    if (tabId !== state.activeTabId()) return;
+    if (!tabId) return;
     const tabList = preloadedTabs || state.tabs();
     const tab = tabList.find((t) => t.id === tabId);
     if (!tab) return;
@@ -17936,7 +17936,7 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$O = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$n = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$O = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$n = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
