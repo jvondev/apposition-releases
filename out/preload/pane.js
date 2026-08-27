@@ -225,15 +225,32 @@ try {
   );
   initMediaContinuity();
   initScrollContinuity();
-  electron.webFrame.insertCSS(`
-    html, body {
-      -webkit-font-smoothing: antialiased !important;
+  try {
+    class ProxiedNotification extends EventTarget {
+      static permission = "granted";
+      static requestPermission(callback) {
+        if (callback) callback("granted");
+        return Promise.resolve("granted");
+      }
+      title;
+      body;
+      icon;
+      constructor(title, options = {}) {
+        super();
+        this.title = title;
+        this.body = options.body || "";
+        this.icon = options.icon || "";
+        electron.ipcRenderer.send("pane.notification-posted", {
+          title,
+          body: options.body || "",
+          icon: options.icon || ""
+        });
+      }
+      close() {
+      }
     }
-    ::-webkit-scrollbar {
-      display: none !important;
-      width: 0 !important;
-      height: 0 !important;
-    }
-  `);
+    window.Notification = ProxiedNotification;
+  } catch {
+  }
 } catch {
 }

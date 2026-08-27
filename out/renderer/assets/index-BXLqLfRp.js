@@ -1840,6 +1840,11 @@ function asPaneId(id) {
 function asSplitId(id) {
   return id;
 }
+const IPC_CHANNELS = {
+  VIEW: {
+    REGISTER_WEB_CONTENTS: "view.registerWebContents"
+  }
+};
 function findParent(nodes, childId) {
   for (const node2 of Object.values(nodes)) {
     if (node2 && node2.type === "split") {
@@ -2676,6 +2681,9 @@ function forceDomFocus(elementId, maxAttempts = 20, interval = 50) {
         attempts++;
         setTimeout(attemptFocus, interval);
       }
+      return;
+    }
+    if (document.activeElement === input) {
       return;
     }
     window.api?.focusOverlayWindow?.();
@@ -3861,6 +3869,14 @@ function setNativeFavicon(rawUrlOrDomain, faviconUrl) {
     nativeFaviconCache.set(domain, faviconUrl);
   }
 }
+const ROOT_DOMAIN_MAP = {
+  "mail.google.com": "gmail.com",
+  "web.whatsapp.com": "whatsapp.com",
+  "web.telegram.org": "telegram.org",
+  "app.slack.com": "slack.com",
+  "discord.com": "discord.com",
+  "linear.app": "linear.app"
+};
 function extractDomain(rawUrl) {
   if (!rawUrl || rawUrl === "about:blank") return "";
   const cached = domainCache.get(rawUrl);
@@ -3873,6 +3889,9 @@ function extractDomain(rawUrl) {
     domain = parsed.hostname.replace(/^www\./, "").toLowerCase();
   } catch {
     domain = rawUrl.split("/")[0].replace(/^www\./, "").toLowerCase();
+  }
+  if (ROOT_DOMAIN_MAP[domain]) {
+    domain = ROOT_DOMAIN_MAP[domain];
   }
   if (domainCache.size > 500) domainCache.clear();
   domainCache.set(rawUrl, domain);
@@ -4171,19 +4190,21 @@ function useWorkspaceManager() {
         });
       }
     }).catch(console.error);
-    window.api?.onNavigated?.((_e, data) => {
-      if (layoutStore.nodes[data.paneId]) {
-        setLayoutStore("nodes", data.paneId, (node2) => ({
+    window.api?.onNavigated?.((data) => {
+      const payload = data?.paneId ? data : data?.detail || data;
+      if (payload?.paneId && layoutStore.nodes[payload.paneId]) {
+        setLayoutStore("nodes", payload.paneId, (node2) => ({
           ...node2,
-          url: data.url,
-          ...data.title ? { title: data.title } : {}
+          url: payload.url || node2.url,
+          ...payload.title ? { title: payload.title } : {}
         }));
         saveLayout(false);
       }
     });
-    window.api?.onFaviconUpdated?.((_e, data) => {
-      if (data?.url && data?.favicon) {
-        setNativeFavicon(data.url, data.favicon);
+    window.api?.onFaviconUpdated?.((data) => {
+      const payload = data?.url ? data : data?.detail || data;
+      if (payload?.url && payload?.favicon) {
+        setNativeFavicon(payload.url, payload.favicon);
       }
     });
   });
@@ -4977,16 +4998,15 @@ const DEFAULT_SHORTCUTS = [
   },
   {
     id: "cheat_sheet",
-    key: "?",
-    shift: true,
+    key: "/",
+    mod: true,
     label: "Show Keyboard Shortcuts",
     category: "General"
   },
   {
     id: "cheat_sheet_alt",
-    key: "/",
-    mod: true,
-    label: "Show Keyboard Shortcuts (Alt)",
+    key: "f1",
+    label: "Show Keyboard Shortcuts (F1)",
     category: "General"
   },
   {
@@ -5596,8 +5616,45 @@ class WebContentsRegistry {
   getWebContentsId(paneId) {
     return this.paneToWc.get(paneId);
   }
+  getPaneIds() {
+    return [...this.paneToWc.keys()];
+  }
 }
 const webContentsRegistry = new WebContentsRegistry();
+if (typeof window !== "undefined") {
+  const ipc = window.electron?.ipcRenderer;
+  if (ipc) {
+    const readPayload = (a, b) => {
+      if (a && typeof a === "object") {
+        const obj = a;
+        const paneId = obj.paneId;
+        const wcId = obj.wcId;
+        if (typeof paneId === "string" && typeof wcId === "number") {
+          return { paneId, wcId };
+        }
+        return null;
+      }
+      if (typeof a === "string" && typeof b === "number") {
+        return { paneId: a, wcId: b };
+      }
+      return null;
+    };
+    ipc.on(
+      IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS,
+      (_e, a, b) => {
+        const payload = readPayload(a, b);
+        if (payload) {
+          webContentsRegistry.register(payload.wcId, payload.paneId);
+        }
+      }
+    );
+  }
+  window.addEventListener("unload", () => {
+    for (const paneId of webContentsRegistry.getPaneIds()) {
+      webContentsRegistry.unregisterPane(paneId);
+    }
+  });
+}
 function useShortcutEngine(ws, ui) {
   const handleKeyDown = (e) => {
     window.__currentSharedEventId = e.__sharedEventId;
@@ -5618,13 +5675,13 @@ function useShortcutEngine(ws, ui) {
     if (isRecordingShortcut) return;
     const path = e.composedPath();
     const activeEl = document.activeElement;
-    const isLocalInput = document.hasFocus() && (path.some(
+    const isLocalInput = path.some(
       (node2) => node2 instanceof HTMLElement && (node2.tagName === "INPUT" || node2.tagName === "TEXTAREA" || node2.isContentEditable)
-    ) || activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable));
+    ) || activeEl && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA" || activeEl.isContentEditable) || target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
     const isWebviewInput = e.__isPaneInputFocused === true;
-    const isInput = isLocalInput || isWebviewInput;
-    const isMac = navigator.userAgent.toLowerCase().includes("mac");
-    const mod = isMac ? e.metaKey : e.ctrlKey;
+    const isInput = Boolean(isLocalInput || isWebviewInput);
+    const isMac2 = navigator.userAgent.toLowerCase().includes("mac");
+    const mod = isMac2 ? e.metaKey : e.ctrlKey;
     const key = e.key.toLowerCase();
     if (isInput) {
       const isFunctionKey = key.startsWith("f") && key.length <= 3;
@@ -5632,7 +5689,7 @@ function useShortcutEngine(ws, ui) {
       if (!e.altKey && !mod && !isFunctionKey && !isEscape) return;
       if (mod && ["a", "c", "v", "x", "z", "y"].includes(key)) return;
     }
-    const action = matchShortcut(e, isMac);
+    const action = matchShortcut(e, isMac2);
     if (!action) return;
     const now = Date.now();
     const lastAction = window._lastShortcutAction;
@@ -5643,7 +5700,7 @@ function useShortcutEngine(ws, ui) {
     }
     window._lastShortcutAction = action;
     window._lastShortcutTime = now;
-    executeShortcutAction(action, e, isMac, ws, ui);
+    executeShortcutAction(action, e, isMac2, ws, ui);
   };
   useShortcutForwarder(handleKeyDown);
   const unsubscribeDevTools = window.api?.onDevToolsClosed?.(
@@ -5653,9 +5710,45 @@ function useShortcutEngine(ws, ui) {
   onCleanup(() => {
     if (unsubscribeDevTools) unsubscribeDevTools();
   });
+  const isMac = navigator.userAgent.toLowerCase().includes("mac");
+  const unsubAccel = window.api?.onAccelerator?.((acc) => {
+    if (!acc) return;
+    const action = matchAccelerator(acc, isMac);
+    if (action) {
+      const now = Date.now();
+      const lastAction = window._lastShortcutAction;
+      const lastTime = window._lastShortcutTime || 0;
+      if (lastAction === action && now - lastTime < 100) return;
+      window._lastShortcutAction = action;
+      window._lastShortcutTime = now;
+      const stub = {
+        preventDefault() {
+        },
+        repeat: false
+      };
+      executeShortcutAction(action, stub, isMac, ws, ui);
+    }
+  });
+  if (unsubAccel) {
+    onCleanup(unsubAccel);
+  }
+}
+function matchAccelerator(acc, isMac) {
+  const parts = acc.split("+").map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const key = parts[parts.length - 1].toLowerCase();
+  const mods = parts.slice(0, -1).map((m) => m.toLowerCase());
+  const ctrl = mods.includes("ctrl") || mods.includes("control") || mods.includes("commandorcontrol") || mods.includes("cmdorctrl");
+  const meta = mods.includes("cmd") || mods.includes("command") || mods.includes("commandorcontrol") || mods.includes("cmdorctrl");
+  const shift = mods.includes("shift");
+  const alt = mods.includes("alt");
+  return matchShortcut(
+    { key, code: "", ctrlKey: ctrl, metaKey: meta, shiftKey: shift, altKey: alt },
+    isMac
+  );
 }
 const logo = "" + new URL("logo-yHKUUx0t.svg", import.meta.url).href;
-var _tmpl$$1c = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Docked Inset"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$S = /* @__PURE__ */ template(`<div class="flex items-center justify-center text-neutral-800"title="Floating Overlap"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$I = /* @__PURE__ */ template(`<div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800"><svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$v = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1k = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$Y = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$L = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$B = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain dark:invert"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
     const current = props.uiMode();
@@ -5679,35 +5772,34 @@ function AppUiHub(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$4$v(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$4$B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
     _el$2.$$click = cycleMode;
-    insert(_el$2, createComponent(Switch, {
+    setAttribute(_el$5, "src", logo);
+    insert(_el$6, createComponent(Switch, {
       get children() {
         return [createComponent(Match, {
           get when() {
             return props.uiMode() === "inset";
           },
           get children() {
-            return _tmpl$$1c();
+            return _tmpl$$1k();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "overlap";
           },
           get children() {
-            return _tmpl$2$S();
+            return _tmpl$2$Y();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "collapse";
           },
           get children() {
-            var _el$5 = _tmpl$3$I(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild;
-            setAttribute(_el$7, "src", logo);
-            return _el$5;
+            return _tmpl$3$L();
           }
         })];
       }
@@ -5745,7 +5837,7 @@ var defaultAttributes = {
   "stroke-linejoin": "round"
 };
 var defaultAttributes_default = defaultAttributes;
-var _tmpl$$1b = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1j = /* @__PURE__ */ template(`<svg>`);
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 var mergeClasses = (...classes) => classes.filter((className2, index, array) => {
   return Boolean(className2) && className2.trim() !== "" && array.indexOf(className2) === index;
@@ -5753,7 +5845,7 @@ var mergeClasses = (...classes) => classes.filter((className2, index, array) => 
 var Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$1b();
+    var _el$ = _tmpl$$1j();
     spread(_el$, mergeProps(defaultAttributes_default, {
       get width() {
         return localProps.size ?? defaultAttributes_default.width;
@@ -5785,7 +5877,7 @@ var Icon = (props) => {
   })();
 };
 var Icon_default = Icon;
-var iconNode$1R = [["rect", {
+var iconNode$1Z = [["rect", {
   width: "20",
   height: "5",
   x: "2",
@@ -5801,10 +5893,10 @@ var iconNode$1R = [["rect", {
 }]];
 var Archive = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Archive",
-  iconNode: iconNode$1R
+  iconNode: iconNode$1Z
 }));
 var archive_default = Archive;
-var iconNode$1Q = [["path", {
+var iconNode$1Y = [["path", {
   d: "M10.268 21a2 2 0 0 0 3.464 0",
   key: "vwvbt9"
 }], ["path", {
@@ -5813,10 +5905,10 @@ var iconNode$1Q = [["path", {
 }]];
 var Bell = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Bell",
-  iconNode: iconNode$1Q
+  iconNode: iconNode$1Y
 }));
 var bell_default = Bell;
-var iconNode$1P = [["circle", {
+var iconNode$1X = [["circle", {
   cx: "18.5",
   cy: "17.5",
   r: "3.5",
@@ -5837,10 +5929,10 @@ var iconNode$1P = [["circle", {
 }]];
 var Bike = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Bike",
-  iconNode: iconNode$1P
+  iconNode: iconNode$1X
 }));
 var bike_default = Bike;
-var iconNode$1O = [["path", {
+var iconNode$1W = [["path", {
   d: "M12 7v14",
   key: "1akyts"
 }], ["path", {
@@ -5849,19 +5941,19 @@ var iconNode$1O = [["path", {
 }]];
 var BookOpen = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "BookOpen",
-  iconNode: iconNode$1O
+  iconNode: iconNode$1W
 }));
 var book_open_default = BookOpen;
-var iconNode$1N = [["path", {
+var iconNode$1V = [["path", {
   d: "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z",
   key: "1fy3hk"
 }]];
 var Bookmark = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Bookmark",
-  iconNode: iconNode$1N
+  iconNode: iconNode$1V
 }));
 var bookmark_default = Bookmark;
-var iconNode$1M = [["path", {
+var iconNode$1U = [["path", {
   d: "M12 8V4H8",
   key: "hb8ula"
 }], ["rect", {
@@ -5886,10 +5978,10 @@ var iconNode$1M = [["path", {
 }]];
 var Bot = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Bot",
-  iconNode: iconNode$1M
+  iconNode: iconNode$1U
 }));
 var bot_default = Bot;
-var iconNode$1L = [["path", {
+var iconNode$1T = [["path", {
   d: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z",
   key: "hh9hay"
 }], ["path", {
@@ -5901,10 +5993,10 @@ var iconNode$1L = [["path", {
 }]];
 var Box = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Box",
-  iconNode: iconNode$1L
+  iconNode: iconNode$1T
 }));
 var box_default = Box;
-var iconNode$1K = [["path", {
+var iconNode$1S = [["path", {
   d: "M16 3h3v18h-3",
   key: "1yor1f"
 }], ["path", {
@@ -5913,10 +6005,10 @@ var iconNode$1K = [["path", {
 }]];
 var Brackets = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Brackets",
-  iconNode: iconNode$1K
+  iconNode: iconNode$1S
 }));
 var brackets_default = Brackets;
-var iconNode$1J = [["path", {
+var iconNode$1R = [["path", {
   d: "M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16",
   key: "jecpp"
 }], ["rect", {
@@ -5929,10 +6021,10 @@ var iconNode$1J = [["path", {
 }]];
 var Briefcase = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Briefcase",
-  iconNode: iconNode$1J
+  iconNode: iconNode$1R
 }));
 var briefcase_default = Briefcase;
-var iconNode$1I = [["path", {
+var iconNode$1Q = [["path", {
   d: "m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08",
   key: "1styjt"
 }], ["path", {
@@ -5941,10 +6033,10 @@ var iconNode$1I = [["path", {
 }]];
 var Brush = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Brush",
-  iconNode: iconNode$1I
+  iconNode: iconNode$1Q
 }));
 var brush_default = Brush;
-var iconNode$1H = [["path", {
+var iconNode$1P = [["path", {
   d: "m8 2 1.88 1.88",
   key: "fmnt4t"
 }], ["path", {
@@ -5980,10 +6072,10 @@ var iconNode$1H = [["path", {
 }]];
 var Bug = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Bug",
-  iconNode: iconNode$1H
+  iconNode: iconNode$1P
 }));
 var bug_default = Bug;
-var iconNode$1G = [["path", {
+var iconNode$1O = [["path", {
   d: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z",
   key: "1b4qmf"
 }], ["path", {
@@ -6007,10 +6099,10 @@ var iconNode$1G = [["path", {
 }]];
 var Building2 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Building2",
-  iconNode: iconNode$1G
+  iconNode: iconNode$1O
 }));
 var building_2_default = Building2;
-var iconNode$1F = [["rect", {
+var iconNode$1N = [["rect", {
   width: "16",
   height: "20",
   x: "4",
@@ -6053,10 +6145,10 @@ var iconNode$1F = [["rect", {
 }]];
 var Calculator = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Calculator",
-  iconNode: iconNode$1F
+  iconNode: iconNode$1N
 }));
 var calculator_default = Calculator;
-var iconNode$1E = [["path", {
+var iconNode$1M = [["path", {
   d: "M8 2v4",
   key: "1cmpym"
 }], ["path", {
@@ -6075,10 +6167,10 @@ var iconNode$1E = [["path", {
 }]];
 var Calendar = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Calendar",
-  iconNode: iconNode$1E
+  iconNode: iconNode$1M
 }));
 var calendar_default = Calendar;
-var iconNode$1D = [["path", {
+var iconNode$1L = [["path", {
   d: "M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z",
   key: "1tc9qg"
 }], ["circle", {
@@ -6089,10 +6181,10 @@ var iconNode$1D = [["path", {
 }]];
 var Camera = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Camera",
-  iconNode: iconNode$1D
+  iconNode: iconNode$1L
 }));
 var camera_default = Camera;
-var iconNode$1C = [["path", {
+var iconNode$1K = [["path", {
   d: "M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2",
   key: "5owen"
 }], ["circle", {
@@ -6111,10 +6203,28 @@ var iconNode$1C = [["path", {
 }]];
 var Car = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Car",
-  iconNode: iconNode$1C
+  iconNode: iconNode$1K
 }));
 var car_default = Car;
-var iconNode$1B = [["rect", {
+var iconNode$1J = [["path", {
+  d: "m6 9 6 6 6-6",
+  key: "qrunsl"
+}]];
+var ChevronDown = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ChevronDown",
+  iconNode: iconNode$1J
+}));
+var chevron_down_default = ChevronDown;
+var iconNode$1I = [["path", {
+  d: "m18 15-6-6-6 6",
+  key: "153udz"
+}]];
+var ChevronUp = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "ChevronUp",
+  iconNode: iconNode$1I
+}));
+var chevron_up_default = ChevronUp;
+var iconNode$1H = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -6140,10 +6250,10 @@ var iconNode$1B = [["rect", {
 }]];
 var CircuitBoard = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "CircuitBoard",
-  iconNode: iconNode$1B
+  iconNode: iconNode$1H
 }));
 var circuit_board_default = CircuitBoard;
-var iconNode$1A = [["rect", {
+var iconNode$1G = [["rect", {
   width: "8",
   height: "4",
   x: "8",
@@ -6169,10 +6279,10 @@ var iconNode$1A = [["rect", {
 }]];
 var ClipboardList = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ClipboardList",
-  iconNode: iconNode$1A
+  iconNode: iconNode$1G
 }));
 var clipboard_list_default = ClipboardList;
-var iconNode$1z = [["circle", {
+var iconNode$1F = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -6183,19 +6293,19 @@ var iconNode$1z = [["circle", {
 }]];
 var Clock = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Clock",
-  iconNode: iconNode$1z
+  iconNode: iconNode$1F
 }));
 var clock_default = Clock;
-var iconNode$1y = [["path", {
+var iconNode$1E = [["path", {
   d: "M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z",
   key: "p7xjir"
 }]];
 var Cloud = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Cloud",
-  iconNode: iconNode$1y
+  iconNode: iconNode$1E
 }));
 var cloud_default = Cloud;
-var iconNode$1x = [["path", {
+var iconNode$1D = [["path", {
   d: "m18 16 4-4-4-4",
   key: "1inbqp"
 }], ["path", {
@@ -6207,10 +6317,10 @@ var iconNode$1x = [["path", {
 }]];
 var CodeXml = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "CodeXml",
-  iconNode: iconNode$1x
+  iconNode: iconNode$1D
 }));
 var code_xml_default = CodeXml;
-var iconNode$1w = [["path", {
+var iconNode$1C = [["path", {
   d: "M10 2v2",
   key: "7u0qdc"
 }], ["path", {
@@ -6225,10 +6335,10 @@ var iconNode$1w = [["path", {
 }]];
 var Coffee = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Coffee",
-  iconNode: iconNode$1w
+  iconNode: iconNode$1C
 }));
 var coffee_default = Coffee;
-var iconNode$1v = [["circle", {
+var iconNode$1B = [["circle", {
   cx: "8",
   cy: "8",
   r: "6",
@@ -6245,19 +6355,19 @@ var iconNode$1v = [["circle", {
 }]];
 var Coins = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Coins",
-  iconNode: iconNode$1v
+  iconNode: iconNode$1B
 }));
 var coins_default = Coins;
-var iconNode$1u = [["path", {
+var iconNode$1A = [["path", {
   d: "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
   key: "11bfej"
 }]];
 var Command = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Command",
-  iconNode: iconNode$1u
+  iconNode: iconNode$1A
 }));
 var command_default = Command;
-var iconNode$1t = [["path", {
+var iconNode$1z = [["path", {
   d: "m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z",
   key: "9ktpf1"
 }], ["circle", {
@@ -6268,10 +6378,10 @@ var iconNode$1t = [["path", {
 }]];
 var Compass = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Compass",
-  iconNode: iconNode$1t
+  iconNode: iconNode$1z
 }));
 var compass_default = Compass;
-var iconNode$1s = [["circle", {
+var iconNode$1y = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -6282,10 +6392,10 @@ var iconNode$1s = [["circle", {
 }]];
 var Contrast = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Contrast",
-  iconNode: iconNode$1s
+  iconNode: iconNode$1y
 }));
 var contrast_default = Contrast;
-var iconNode$1r = [["rect", {
+var iconNode$1x = [["rect", {
   width: "14",
   height: "14",
   x: "8",
@@ -6299,10 +6409,22 @@ var iconNode$1r = [["rect", {
 }]];
 var Copy = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Copy",
-  iconNode: iconNode$1r
+  iconNode: iconNode$1x
 }));
 var copy_default = Copy;
-var iconNode$1q = [["rect", {
+var iconNode$1w = [["polyline", {
+  points: "9 10 4 15 9 20",
+  key: "r3jprv"
+}], ["path", {
+  d: "M20 4v7a4 4 0 0 1-4 4H4",
+  key: "6o5b7l"
+}]];
+var CornerDownLeft = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "CornerDownLeft",
+  iconNode: iconNode$1w
+}));
+var corner_down_left_default = CornerDownLeft;
+var iconNode$1v = [["rect", {
   width: "16",
   height: "16",
   x: "4",
@@ -6343,10 +6465,10 @@ var iconNode$1q = [["rect", {
 }]];
 var Cpu = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Cpu",
-  iconNode: iconNode$1q
+  iconNode: iconNode$1v
 }));
 var cpu_default = Cpu;
-var iconNode$1p = [["rect", {
+var iconNode$1u = [["rect", {
   width: "20",
   height: "14",
   x: "2",
@@ -6362,10 +6484,10 @@ var iconNode$1p = [["rect", {
 }]];
 var CreditCard = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "CreditCard",
-  iconNode: iconNode$1p
+  iconNode: iconNode$1u
 }));
 var credit_card_default = CreditCard;
-var iconNode$1o = [["path", {
+var iconNode$1t = [["path", {
   d: "M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z",
   key: "1vdc57"
 }], ["path", {
@@ -6374,10 +6496,10 @@ var iconNode$1o = [["path", {
 }]];
 var Crown = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Crown",
-  iconNode: iconNode$1o
+  iconNode: iconNode$1t
 }));
 var crown_default = Crown;
-var iconNode$1n = [["ellipse", {
+var iconNode$1s = [["ellipse", {
   cx: "12",
   cy: "5",
   rx: "9",
@@ -6392,10 +6514,10 @@ var iconNode$1n = [["ellipse", {
 }]];
 var Database = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Database",
-  iconNode: iconNode$1n
+  iconNode: iconNode$1s
 }));
 var database_default = Database;
-var iconNode$1m = [["line", {
+var iconNode$1r = [["line", {
   x1: "12",
   x2: "12",
   y1: "2",
@@ -6407,10 +6529,10 @@ var iconNode$1m = [["line", {
 }]];
 var DollarSign = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "DollarSign",
-  iconNode: iconNode$1m
+  iconNode: iconNode$1r
 }));
 var dollar_sign_default = DollarSign;
-var iconNode$1l = [["path", {
+var iconNode$1q = [["path", {
   d: "M14.4 14.4 9.6 9.6",
   key: "ic80wn"
 }], ["path", {
@@ -6428,10 +6550,10 @@ var iconNode$1l = [["path", {
 }]];
 var Dumbbell = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Dumbbell",
-  iconNode: iconNode$1l
+  iconNode: iconNode$1q
 }));
 var dumbbell_default = Dumbbell;
-var iconNode$1k = [["path", {
+var iconNode$1p = [["path", {
   d: "M15 3h6v6",
   key: "1q9fwt"
 }], ["path", {
@@ -6443,10 +6565,10 @@ var iconNode$1k = [["path", {
 }]];
 var ExternalLink = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ExternalLink",
-  iconNode: iconNode$1k
+  iconNode: iconNode$1p
 }));
 var external_link_default = ExternalLink;
-var iconNode$1j = [["path", {
+var iconNode$1o = [["path", {
   d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
   key: "1nclc0"
 }], ["circle", {
@@ -6457,10 +6579,10 @@ var iconNode$1j = [["path", {
 }]];
 var Eye = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Eye",
-  iconNode: iconNode$1j
+  iconNode: iconNode$1o
 }));
 var eye_default = Eye;
-var iconNode$1i = [["path", {
+var iconNode$1n = [["path", {
   d: "M10 12.5 8 15l2 2.5",
   key: "1tg20x"
 }], ["path", {
@@ -6475,10 +6597,10 @@ var iconNode$1i = [["path", {
 }]];
 var FileCode = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "FileCode",
-  iconNode: iconNode$1i
+  iconNode: iconNode$1n
 }));
 var file_code_default = FileCode;
-var iconNode$1h = [["path", {
+var iconNode$1m = [["path", {
   d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
   key: "1rqfz7"
 }], ["path", {
@@ -6496,10 +6618,10 @@ var iconNode$1h = [["path", {
 }]];
 var FileText = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "FileText",
-  iconNode: iconNode$1h
+  iconNode: iconNode$1m
 }));
 var file_text_default = FileText;
-var iconNode$1g = [["rect", {
+var iconNode$1l = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -6530,10 +6652,10 @@ var iconNode$1g = [["rect", {
 }]];
 var Film = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Film",
-  iconNode: iconNode$1g
+  iconNode: iconNode$1l
 }));
 var film_default = Film;
-var iconNode$1f = [["path", {
+var iconNode$1k = [["path", {
   d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z",
   key: "i9b6wo"
 }], ["line", {
@@ -6545,10 +6667,10 @@ var iconNode$1f = [["path", {
 }]];
 var Flag = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Flag",
-  iconNode: iconNode$1f
+  iconNode: iconNode$1k
 }));
 var flag_default = Flag;
-var iconNode$1e = [["path", {
+var iconNode$1j = [["path", {
   d: "M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z",
   key: "1fr9dc"
 }], ["path", {
@@ -6563,19 +6685,19 @@ var iconNode$1e = [["path", {
 }]];
 var FolderKanban = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "FolderKanban",
-  iconNode: iconNode$1e
+  iconNode: iconNode$1j
 }));
 var folder_kanban_default = FolderKanban;
-var iconNode$1d = [["path", {
+var iconNode$1i = [["path", {
   d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
   key: "1kt360"
 }]];
 var Folder = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Folder",
-  iconNode: iconNode$1d
+  iconNode: iconNode$1i
 }));
 var folder_default = Folder;
-var iconNode$1c = [["line", {
+var iconNode$1h = [["line", {
   x1: "6",
   x2: "10",
   y1: "11",
@@ -6605,10 +6727,10 @@ var iconNode$1c = [["line", {
 }]];
 var Gamepad2 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Gamepad2",
-  iconNode: iconNode$1c
+  iconNode: iconNode$1h
 }));
 var gamepad_2_default = Gamepad2;
-var iconNode$1b = [["path", {
+var iconNode$1g = [["path", {
   d: "m12 14 4-4",
   key: "9kzdfg"
 }], ["path", {
@@ -6617,10 +6739,10 @@ var iconNode$1b = [["path", {
 }]];
 var Gauge = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Gauge",
-  iconNode: iconNode$1b
+  iconNode: iconNode$1g
 }));
 var gauge_default = Gauge;
-var iconNode$1a = [["line", {
+var iconNode$1f = [["line", {
   x1: "6",
   x2: "6",
   y1: "3",
@@ -6642,10 +6764,10 @@ var iconNode$1a = [["line", {
 }]];
 var GitBranch = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "GitBranch",
-  iconNode: iconNode$1a
+  iconNode: iconNode$1f
 }));
 var git_branch_default = GitBranch;
-var iconNode$19 = [["circle", {
+var iconNode$1e = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -6659,10 +6781,10 @@ var iconNode$19 = [["circle", {
 }]];
 var Globe = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Globe",
-  iconNode: iconNode$19
+  iconNode: iconNode$1e
 }));
 var globe_default = Globe;
-var iconNode$18 = [["line", {
+var iconNode$1d = [["line", {
   x1: "4",
   x2: "20",
   y1: "9",
@@ -6689,28 +6811,28 @@ var iconNode$18 = [["line", {
 }]];
 var Hash = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Hash",
-  iconNode: iconNode$18
+  iconNode: iconNode$1d
 }));
 var hash_default = Hash;
-var iconNode$17 = [["path", {
+var iconNode$1c = [["path", {
   d: "M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3",
   key: "1xhozi"
 }]];
 var Headphones = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Headphones",
-  iconNode: iconNode$17
+  iconNode: iconNode$1c
 }));
 var headphones_default = Headphones;
-var iconNode$16 = [["path", {
+var iconNode$1b = [["path", {
   d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z",
   key: "c3ymky"
 }]];
 var Heart = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Heart",
-  iconNode: iconNode$16
+  iconNode: iconNode$1b
 }));
 var heart_default = Heart;
-var iconNode$15 = [["path", {
+var iconNode$1a = [["path", {
   d: "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8",
   key: "5wwlr5"
 }], ["path", {
@@ -6719,10 +6841,10 @@ var iconNode$15 = [["path", {
 }]];
 var House = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "House",
-  iconNode: iconNode$15
+  iconNode: iconNode$1a
 }));
 var house_default = House;
-var iconNode$14 = [["rect", {
+var iconNode$19 = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -6741,10 +6863,10 @@ var iconNode$14 = [["rect", {
 }]];
 var Image = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Image",
-  iconNode: iconNode$14
+  iconNode: iconNode$19
 }));
 var image_default = Image;
-var iconNode$13 = [["polyline", {
+var iconNode$18 = [["polyline", {
   points: "22 12 16 12 14 15 10 15 8 12 2 12",
   key: "o97t9d"
 }], ["path", {
@@ -6753,10 +6875,10 @@ var iconNode$13 = [["polyline", {
 }]];
 var Inbox = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Inbox",
-  iconNode: iconNode$13
+  iconNode: iconNode$18
 }));
 var inbox_default = Inbox;
-var iconNode$12 = [["path", {
+var iconNode$17 = [["path", {
   d: "M6 5v11",
   key: "mdvv1e"
 }], ["path", {
@@ -6768,10 +6890,10 @@ var iconNode$12 = [["path", {
 }]];
 var Kanban = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Kanban",
-  iconNode: iconNode$12
+  iconNode: iconNode$17
 }));
 var kanban_default = Kanban;
-var iconNode$11 = [["path", {
+var iconNode$16 = [["path", {
   d: "m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4",
   key: "g0fldk"
 }], ["path", {
@@ -6785,10 +6907,10 @@ var iconNode$11 = [["path", {
 }]];
 var Key = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Key",
-  iconNode: iconNode$11
+  iconNode: iconNode$16
 }));
 var key_default = Key;
-var iconNode$10 = [["line", {
+var iconNode$15 = [["line", {
   x1: "3",
   x2: "21",
   y1: "22",
@@ -6824,10 +6946,10 @@ var iconNode$10 = [["line", {
 }]];
 var Landmark = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Landmark",
-  iconNode: iconNode$10
+  iconNode: iconNode$15
 }));
 var landmark_default = Landmark;
-var iconNode$$ = [["path", {
+var iconNode$14 = [["path", {
   d: "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z",
   key: "zw3jo"
 }], ["path", {
@@ -6839,10 +6961,10 @@ var iconNode$$ = [["path", {
 }]];
 var Layers = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Layers",
-  iconNode: iconNode$$
+  iconNode: iconNode$14
 }));
 var layers_default = Layers;
-var iconNode$_ = [["path", {
+var iconNode$13 = [["path", {
   d: "M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5",
   key: "1gvzjb"
 }], ["path", {
@@ -6854,10 +6976,10 @@ var iconNode$_ = [["path", {
 }]];
 var Lightbulb = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Lightbulb",
-  iconNode: iconNode$_
+  iconNode: iconNode$13
 }));
 var lightbulb_default = Lightbulb;
-var iconNode$Z = [["path", {
+var iconNode$12 = [["path", {
   d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
   key: "1cjeqo"
 }], ["path", {
@@ -6866,10 +6988,10 @@ var iconNode$Z = [["path", {
 }]];
 var Link = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Link",
-  iconNode: iconNode$Z
+  iconNode: iconNode$12
 }));
 var link_default = Link;
-var iconNode$Y = [["rect", {
+var iconNode$11 = [["rect", {
   x: "3",
   y: "5",
   width: "6",
@@ -6891,10 +7013,10 @@ var iconNode$Y = [["rect", {
 }]];
 var ListTodo = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ListTodo",
-  iconNode: iconNode$Y
+  iconNode: iconNode$11
 }));
 var list_todo_default = ListTodo;
-var iconNode$X = [["rect", {
+var iconNode$10 = [["rect", {
   width: "18",
   height: "11",
   x: "3",
@@ -6908,10 +7030,10 @@ var iconNode$X = [["rect", {
 }]];
 var Lock = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Lock",
-  iconNode: iconNode$X
+  iconNode: iconNode$10
 }));
 var lock_default = Lock;
-var iconNode$W = [["rect", {
+var iconNode$$ = [["rect", {
   width: "20",
   height: "16",
   x: "2",
@@ -6924,10 +7046,10 @@ var iconNode$W = [["rect", {
 }]];
 var Mail = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Mail",
-  iconNode: iconNode$W
+  iconNode: iconNode$$
 }));
 var mail_default = Mail;
-var iconNode$V = [["path", {
+var iconNode$_ = [["path", {
   d: "M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0",
   key: "1r0f0z"
 }], ["circle", {
@@ -6938,10 +7060,10 @@ var iconNode$V = [["path", {
 }]];
 var MapPin = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "MapPin",
-  iconNode: iconNode$V
+  iconNode: iconNode$_
 }));
 var map_pin_default = MapPin;
-var iconNode$U = [["path", {
+var iconNode$Z = [["path", {
   d: "M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z",
   key: "169xi5"
 }], ["path", {
@@ -6953,10 +7075,34 @@ var iconNode$U = [["path", {
 }]];
 var Map$1 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Map",
-  iconNode: iconNode$U
+  iconNode: iconNode$Z
 }));
 var map_default = Map$1;
-var iconNode$T = [["path", {
+var iconNode$Y = [["polyline", {
+  points: "15 3 21 3 21 9",
+  key: "mznyad"
+}], ["polyline", {
+  points: "9 21 3 21 3 15",
+  key: "1avn1i"
+}], ["line", {
+  x1: "21",
+  x2: "14",
+  y1: "3",
+  y2: "10",
+  key: "ota7mn"
+}], ["line", {
+  x1: "3",
+  x2: "10",
+  y1: "21",
+  y2: "14",
+  key: "1atl0r"
+}]];
+var Maximize2 = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Maximize2",
+  iconNode: iconNode$Y
+}));
+var maximize_2_default = Maximize2;
+var iconNode$X = [["path", {
   d: "M8 3H5a2 2 0 0 0-2 2v3",
   key: "1dcmit"
 }], ["path", {
@@ -6971,10 +7117,10 @@ var iconNode$T = [["path", {
 }]];
 var Maximize = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Maximize",
-  iconNode: iconNode$T
+  iconNode: iconNode$X
 }));
 var maximize_default = Maximize;
-var iconNode$S = [["path", {
+var iconNode$W = [["path", {
   d: "m3 11 18-5v12L3 14v-3z",
   key: "n962bs"
 }], ["path", {
@@ -6983,19 +7129,19 @@ var iconNode$S = [["path", {
 }]];
 var Megaphone = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Megaphone",
-  iconNode: iconNode$S
+  iconNode: iconNode$W
 }));
 var megaphone_default = Megaphone;
-var iconNode$R = [["path", {
+var iconNode$V = [["path", {
   d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
   key: "1lielz"
 }]];
 var MessageSquare = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "MessageSquare",
-  iconNode: iconNode$R
+  iconNode: iconNode$V
 }));
 var message_square_default = MessageSquare;
-var iconNode$Q = [["path", {
+var iconNode$U = [["path", {
   d: "M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z",
   key: "p1xzt8"
 }], ["path", {
@@ -7004,10 +7150,34 @@ var iconNode$Q = [["path", {
 }]];
 var MessagesSquare = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "MessagesSquare",
-  iconNode: iconNode$Q
+  iconNode: iconNode$U
 }));
 var messages_square_default = MessagesSquare;
-var iconNode$P = [["path", {
+var iconNode$T = [["polyline", {
+  points: "4 14 10 14 10 20",
+  key: "11kfnr"
+}], ["polyline", {
+  points: "20 10 14 10 14 4",
+  key: "rlmsce"
+}], ["line", {
+  x1: "14",
+  x2: "21",
+  y1: "10",
+  y2: "3",
+  key: "o5lafz"
+}], ["line", {
+  x1: "3",
+  x2: "10",
+  y1: "21",
+  y2: "14",
+  key: "1atl0r"
+}]];
+var Minimize2 = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Minimize2",
+  iconNode: iconNode$T
+}));
+var minimize_2_default = Minimize2;
+var iconNode$S = [["path", {
   d: "M8 3v3a2 2 0 0 1-2 2H3",
   key: "hohbtr"
 }], ["path", {
@@ -7022,19 +7192,19 @@ var iconNode$P = [["path", {
 }]];
 var Minimize = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Minimize",
-  iconNode: iconNode$P
+  iconNode: iconNode$S
 }));
 var minimize_default = Minimize;
-var iconNode$O = [["path", {
+var iconNode$R = [["path", {
   d: "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z",
   key: "a7tn18"
 }]];
 var Moon = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Moon",
-  iconNode: iconNode$O
+  iconNode: iconNode$R
 }));
 var moon_default = Moon;
-var iconNode$N = [["path", {
+var iconNode$Q = [["path", {
   d: "M9 18V5l12-2v13",
   key: "1jmyc2"
 }], ["circle", {
@@ -7050,10 +7220,10 @@ var iconNode$N = [["path", {
 }]];
 var Music = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Music",
-  iconNode: iconNode$N
+  iconNode: iconNode$Q
 }));
 var music_default = Music;
-var iconNode$M = [["rect", {
+var iconNode$P = [["rect", {
   x: "16",
   y: "16",
   width: "6",
@@ -7083,10 +7253,10 @@ var iconNode$M = [["rect", {
 }]];
 var Network = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Network",
-  iconNode: iconNode$M
+  iconNode: iconNode$P
 }));
 var network_default = Network;
-var iconNode$L = [["circle", {
+var iconNode$O = [["circle", {
   cx: "13.5",
   cy: "6.5",
   r: ".5",
@@ -7116,10 +7286,10 @@ var iconNode$L = [["circle", {
 }]];
 var Palette = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Palette",
-  iconNode: iconNode$L
+  iconNode: iconNode$O
 }));
 var palette_default = Palette;
-var iconNode$K = [["rect", {
+var iconNode$N = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -7132,10 +7302,10 @@ var iconNode$K = [["rect", {
 }]];
 var PanelBottom = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "PanelBottom",
-  iconNode: iconNode$K
+  iconNode: iconNode$N
 }));
 var panel_bottom_default = PanelBottom;
-var iconNode$J = [["rect", {
+var iconNode$M = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -7148,10 +7318,10 @@ var iconNode$J = [["rect", {
 }]];
 var PanelRight = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "PanelRight",
-  iconNode: iconNode$J
+  iconNode: iconNode$M
 }));
 var panel_right_default = PanelRight;
-var iconNode$I = [["path", {
+var iconNode$L = [["path", {
   d: "M15.707 21.293a1 1 0 0 1-1.414 0l-1.586-1.586a1 1 0 0 1 0-1.414l5.586-5.586a1 1 0 0 1 1.414 0l1.586 1.586a1 1 0 0 1 0 1.414z",
   key: "nt11vn"
 }], ["path", {
@@ -7168,19 +7338,19 @@ var iconNode$I = [["path", {
 }]];
 var PenTool = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "PenTool",
-  iconNode: iconNode$I
+  iconNode: iconNode$L
 }));
 var pen_tool_default = PenTool;
-var iconNode$H = [["path", {
+var iconNode$K = [["path", {
   d: "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z",
   key: "foiqr5"
 }]];
 var Phone = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Phone",
-  iconNode: iconNode$H
+  iconNode: iconNode$K
 }));
 var phone_default = Phone;
-var iconNode$G = [["path", {
+var iconNode$J = [["path", {
   d: "M12 17v5",
   key: "bb1du9"
 }], ["path", {
@@ -7189,19 +7359,34 @@ var iconNode$G = [["path", {
 }]];
 var Pin = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Pin",
-  iconNode: iconNode$G
+  iconNode: iconNode$J
 }));
 var pin_default = Pin;
-var iconNode$F = [["path", {
+var iconNode$I = [["path", {
+  d: "m2 22 1-1h3l9-9",
+  key: "1sre89"
+}], ["path", {
+  d: "M3 21v-3l9-9",
+  key: "hpe2y6"
+}], ["path", {
+  d: "m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z",
+  key: "196du1"
+}]];
+var Pipette = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Pipette",
+  iconNode: iconNode$I
+}));
+var pipette_default = Pipette;
+var iconNode$H = [["path", {
   d: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z",
   key: "1v9wt8"
 }]];
 var Plane = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Plane",
-  iconNode: iconNode$F
+  iconNode: iconNode$H
 }));
 var plane_default = Plane;
-var iconNode$E = [["path", {
+var iconNode$G = [["path", {
   d: "M5 12h14",
   key: "1ays0h"
 }], ["path", {
@@ -7210,10 +7395,10 @@ var iconNode$E = [["path", {
 }]];
 var Plus = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Plus",
-  iconNode: iconNode$E
+  iconNode: iconNode$G
 }));
 var plus_default = Plus;
-var iconNode$D = [["path", {
+var iconNode$F = [["path", {
   d: "M16.85 18.58a9 9 0 1 0-9.7 0",
   key: "d71mpg"
 }], ["path", {
@@ -7230,10 +7415,10 @@ var iconNode$D = [["path", {
 }]];
 var Podcast = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Podcast",
-  iconNode: iconNode$D
+  iconNode: iconNode$F
 }));
 var podcast_default = Podcast;
-var iconNode$C = [["rect", {
+var iconNode$E = [["rect", {
   width: "5",
   height: "5",
   x: "3",
@@ -7284,10 +7469,10 @@ var iconNode$C = [["rect", {
 }]];
 var QrCode = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "QrCode",
-  iconNode: iconNode$C
+  iconNode: iconNode$E
 }));
 var qr_code_default = QrCode;
-var iconNode$B = [["path", {
+var iconNode$D = [["path", {
   d: "M4.9 19.1C1 15.2 1 8.8 4.9 4.9",
   key: "1vaf9d"
 }], ["path", {
@@ -7307,10 +7492,10 @@ var iconNode$B = [["path", {
 }]];
 var Radio = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Radio",
-  iconNode: iconNode$B
+  iconNode: iconNode$D
 }));
 var radio_default = Radio;
-var iconNode$A = [["path", {
+var iconNode$C = [["path", {
   d: "M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z",
   key: "q3az6g"
 }], ["path", {
@@ -7322,10 +7507,10 @@ var iconNode$A = [["path", {
 }]];
 var Receipt = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Receipt",
-  iconNode: iconNode$A
+  iconNode: iconNode$C
 }));
 var receipt_default = Receipt;
-var iconNode$z = [["path", {
+var iconNode$B = [["path", {
   d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",
   key: "v9h5vc"
 }], ["path", {
@@ -7340,10 +7525,10 @@ var iconNode$z = [["path", {
 }]];
 var RefreshCw = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "RefreshCw",
-  iconNode: iconNode$z
+  iconNode: iconNode$B
 }));
 var refresh_cw_default = RefreshCw;
-var iconNode$y = [["path", {
+var iconNode$A = [["path", {
   d: "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z",
   key: "m3kijz"
 }], ["path", {
@@ -7358,10 +7543,10 @@ var iconNode$y = [["path", {
 }]];
 var Rocket = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Rocket",
-  iconNode: iconNode$y
+  iconNode: iconNode$A
 }));
 var rocket_default = Rocket;
-var iconNode$x = [["path", {
+var iconNode$z = [["path", {
   d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
   key: "1357e3"
 }], ["path", {
@@ -7370,10 +7555,10 @@ var iconNode$x = [["path", {
 }]];
 var RotateCcw = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "RotateCcw",
-  iconNode: iconNode$x
+  iconNode: iconNode$z
 }));
 var rotate_ccw_default = RotateCcw;
-var iconNode$w = [["path", {
+var iconNode$y = [["path", {
   d: "m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z",
   key: "7g6ntu"
 }], ["path", {
@@ -7391,10 +7576,10 @@ var iconNode$w = [["path", {
 }]];
 var Scale = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Scale",
-  iconNode: iconNode$w
+  iconNode: iconNode$y
 }));
 var scale_default = Scale;
-var iconNode$v = [["circle", {
+var iconNode$x = [["circle", {
   cx: "6",
   cy: "6",
   r: "3",
@@ -7416,10 +7601,10 @@ var iconNode$v = [["circle", {
 }]];
 var Scissors = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Scissors",
-  iconNode: iconNode$v
+  iconNode: iconNode$x
 }));
 var scissors_default = Scissors;
-var iconNode$u = [["circle", {
+var iconNode$w = [["circle", {
   cx: "11",
   cy: "11",
   r: "8",
@@ -7430,10 +7615,10 @@ var iconNode$u = [["circle", {
 }]];
 var Search = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Search",
-  iconNode: iconNode$u
+  iconNode: iconNode$w
 }));
 var search_default = Search;
-var iconNode$t = [["path", {
+var iconNode$v = [["path", {
   d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
   key: "1ffxy3"
 }], ["path", {
@@ -7442,10 +7627,10 @@ var iconNode$t = [["path", {
 }]];
 var Send = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Send",
-  iconNode: iconNode$t
+  iconNode: iconNode$v
 }));
 var send_default = Send;
-var iconNode$s = [["rect", {
+var iconNode$u = [["rect", {
   width: "20",
   height: "8",
   x: "2",
@@ -7476,10 +7661,10 @@ var iconNode$s = [["rect", {
 }]];
 var Server = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Server",
-  iconNode: iconNode$s
+  iconNode: iconNode$u
 }));
 var server_default = Server;
-var iconNode$r = [["path", {
+var iconNode$t = [["path", {
   d: "M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z",
   key: "1bo67w"
 }], ["rect", {
@@ -7497,10 +7682,10 @@ var iconNode$r = [["path", {
 }]];
 var Shapes = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Shapes",
-  iconNode: iconNode$r
+  iconNode: iconNode$t
 }));
 var shapes_default = Shapes;
-var iconNode$q = [["circle", {
+var iconNode$s = [["circle", {
   cx: "18",
   cy: "5",
   r: "3",
@@ -7530,10 +7715,10 @@ var iconNode$q = [["circle", {
 }]];
 var Share2 = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Share2",
-  iconNode: iconNode$q
+  iconNode: iconNode$s
 }));
 var share_2_default = Share2;
-var iconNode$p = [["path", {
+var iconNode$r = [["path", {
   d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
   key: "oel41y"
 }], ["path", {
@@ -7542,19 +7727,19 @@ var iconNode$p = [["path", {
 }]];
 var ShieldCheck = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ShieldCheck",
-  iconNode: iconNode$p
+  iconNode: iconNode$r
 }));
 var shield_check_default = ShieldCheck;
-var iconNode$o = [["path", {
+var iconNode$q = [["path", {
   d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
   key: "oel41y"
 }]];
 var Shield = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Shield",
-  iconNode: iconNode$o
+  iconNode: iconNode$q
 }));
 var shield_default = Shield;
-var iconNode$n = [["path", {
+var iconNode$p = [["path", {
   d: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z",
   key: "hou9p0"
 }], ["path", {
@@ -7566,10 +7751,10 @@ var iconNode$n = [["path", {
 }]];
 var ShoppingBag = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ShoppingBag",
-  iconNode: iconNode$n
+  iconNode: iconNode$p
 }));
 var shopping_bag_default = ShoppingBag;
-var iconNode$m = [["circle", {
+var iconNode$o = [["circle", {
   cx: "8",
   cy: "21",
   r: "1",
@@ -7585,10 +7770,27 @@ var iconNode$m = [["circle", {
 }]];
 var ShoppingCart = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "ShoppingCart",
-  iconNode: iconNode$m
+  iconNode: iconNode$o
 }));
 var shopping_cart_default = ShoppingCart;
-var iconNode$l = [["circle", {
+var iconNode$n = [["rect", {
+  width: "14",
+  height: "20",
+  x: "5",
+  y: "2",
+  rx: "2",
+  ry: "2",
+  key: "1yt0o3"
+}], ["path", {
+  d: "M12 18h.01",
+  key: "mhygvu"
+}]];
+var Smartphone = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Smartphone",
+  iconNode: iconNode$n
+}));
+var smartphone_default = Smartphone;
+var iconNode$m = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -7611,10 +7813,10 @@ var iconNode$l = [["circle", {
 }]];
 var Smile = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Smile",
-  iconNode: iconNode$l
+  iconNode: iconNode$m
 }));
 var smile_default = Smile;
-var iconNode$k = [["path", {
+var iconNode$l = [["path", {
   d: "M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z",
   key: "4pj2yx"
 }], ["path", {
@@ -7632,9 +7834,22 @@ var iconNode$k = [["path", {
 }]];
 var Sparkles = (props) => createComponent(Icon_default, mergeProps(props, {
   name: "Sparkles",
-  iconNode: iconNode$k
+  iconNode: iconNode$l
 }));
 var sparkles_default = Sparkles;
+var iconNode$k = [["rect", {
+  width: "18",
+  height: "18",
+  x: "3",
+  y: "3",
+  rx: "2",
+  key: "afitv7"
+}]];
+var Square = (props) => createComponent(Icon_default, mergeProps(props, {
+  name: "Square",
+  iconNode: iconNode$k
+}));
+var square_default = Square;
 var iconNode$j = [["path", {
   d: "M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z",
   key: "r04s7s"
@@ -8181,7 +8396,7 @@ function getSmartIconId(name = "") {
     return "moon";
   return "folder";
 }
-var _tmpl$$1a = /* @__PURE__ */ template(`<span>`);
+var _tmpl$$1i = /* @__PURE__ */ template(`<span>`);
 function WorkspaceIcon(props) {
   const iconId = () => {
     if (props.icon && props.icon !== "auto") {
@@ -8194,7 +8409,7 @@ function WorkspaceIcon(props) {
     return item ? item.component : folder_default;
   };
   return (() => {
-    var _el$ = _tmpl$$1a();
+    var _el$ = _tmpl$$1i();
     insert(_el$, () => {
       const Comp = IconComp();
       return createComponent(Comp, {
@@ -8210,14 +8425,14 @@ function WorkspaceIcon(props) {
     return _el$;
   })();
 }
-var _tmpl$$19 = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
+var _tmpl$$1h = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
 function TabIslandEyebrow(props) {
   return createComponent(Show, {
     get when() {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$19(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$$1h(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, createComponent(WorkspaceIcon, {
         get icon() {
           return props.workspaceIcon;
@@ -13556,7 +13771,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$18 = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$H = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$u = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$l = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$d = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$9 = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$2 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1g = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$X = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$K = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$o = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$f = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$a = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$3 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$2 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -13581,14 +13796,14 @@ function TabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$18();
+        var _el$ = _tmpl$$1g();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$7$9(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$7$a(), _el$3 = _el$2.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -13613,16 +13828,16 @@ function TabPopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$4$u(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$4 = _tmpl$4$A(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
               insert(_el$8, createComponent(Show, {
                 get when() {
                   return props.isSplit;
                 },
                 get fallback() {
-                  return _tmpl$9$2();
+                  return _tmpl$9$3();
                 },
                 get children() {
-                  return _tmpl$2$R();
+                  return _tmpl$2$X();
                 }
               }));
               insert(_el$5, createComponent(Show, {
@@ -13630,7 +13845,7 @@ function TabPopover(props) {
                   return !props.tab.custom_name;
                 },
                 get children() {
-                  return _tmpl$3$H();
+                  return _tmpl$3$K();
                 }
               }), null);
               _el$10.$$keydown = (e) => {
@@ -13646,7 +13861,7 @@ function TabPopover(props) {
               createRenderEffect(() => _el$10.value = getCustomName());
               return _el$4;
             })(), (() => {
-              var _el$11 = _tmpl$5$l(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
+              var _el$11 = _tmpl$5$o(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$14) : flipThumbRef = _el$14;
               insert(_el$13, createComponent(For, {
@@ -13668,7 +13883,7 @@ function TabPopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$27 = _tmpl$0$1(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
+                    var _el$27 = _tmpl$0$2(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
                     _el$27.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -13702,7 +13917,7 @@ function TabPopover(props) {
               }), null);
               return _el$11;
             })(), (() => {
-              var _el$15 = _tmpl$6$d(), _el$16 = _el$15.firstChild;
+              var _el$15 = _tmpl$6$f(), _el$16 = _el$15.firstChild;
               _el$16.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -13730,42 +13945,31 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$17 = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$Q = /* @__PURE__ */ template(`<div>`), _tmpl$3$G = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+var _tmpl$$1f = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$W = /* @__PURE__ */ template(`<div>`), _tmpl$3$J = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
 function Favicon(props) {
   const [hasError, setHasError] = createSignal(false);
-  const [useFallback, setUseFallback] = createSignal(false);
   const size = () => props.size || 16;
   const faviconUrl = () => {
     if (isFaviconFailed(props.url)) return "";
-    if (useFallback()) {
-      const d = extractDomain(props.url);
-      if (!d || d === "localhost" || d.startsWith("127.0.0.1")) return "";
-      return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(d)}&sz=64`;
-    }
     return getFaviconUrl(props.url, 64);
   };
   createEffect(() => {
     const url = props.url;
     setHasError(isFaviconFailed(url));
-    setUseFallback(false);
   });
   const handleError2 = () => {
-    if (!useFallback()) {
-      setUseFallback(true);
-    } else {
-      setHasError(true);
-      markFaviconFailed(props.url);
-    }
+    setHasError(true);
+    markFaviconFailed(props.url);
   };
   return (() => {
-    var _el$ = _tmpl$2$Q();
+    var _el$ = _tmpl$2$W();
     insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!faviconUrl())() && !hasError();
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$3$G();
+          var _el$3 = _tmpl$3$J();
           createRenderEffect((_p$) => {
             var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
             _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
@@ -13779,7 +13983,7 @@ function Favicon(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$17();
+        var _el$2 = _tmpl$$1f();
         _el$2.addEventListener("error", handleError2);
         createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
         return _el$2;
@@ -13799,7 +14003,7 @@ function Favicon(props) {
     return _el$;
   })();
 }
-var _tmpl$$16 = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$P = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1e = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$V = /* @__PURE__ */ template(`<div>`);
 function TabFaviconStack(props) {
   const size = () => props.size || 14;
   const validUrls = () => props.urls.filter((u) => u && u.trim().length > 0 && u !== "about:blank");
@@ -13816,7 +14020,7 @@ function TabFaviconStack(props) {
       return validUrls().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$2$P();
+      var _el$ = _tmpl$2$V();
       insert(_el$, createComponent(For, {
         get each() {
           return displayUrls().slice(0, 3);
@@ -13824,7 +14028,7 @@ function TabFaviconStack(props) {
         children: (url, idx) => {
           const isFocused = () => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url)));
           return (() => {
-            var _el$4 = _tmpl$2$P();
+            var _el$4 = _tmpl$2$V();
             insert(_el$4, createComponent(Favicon, {
               url,
               get size() {
@@ -13849,7 +14053,7 @@ function TabFaviconStack(props) {
           return validUrls().length > 3;
         },
         get children() {
-          var _el$2 = _tmpl$$16();
+          var _el$2 = _tmpl$$1e();
           _el$2.firstChild;
           insert(_el$2, () => validUrls().length - 3, null);
           createRenderEffect((_p$) => {
@@ -14067,7 +14271,7 @@ function computeSmartTabName(customName, leafPanes) {
   const primaryName = formatSmartDomain(validPanes[0].url);
   return `${primaryName} + ${validPanes.length - 1}`;
 }
-var _tmpl$$15 = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$O = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$F = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+var _tmpl$$1d = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$U = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$I = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
 function TabItem(props) {
   const leafInfo = createMemo(() => extractTabLeafInfo(props.tab.id, props.activeTabId || (props.isActive ? props.tab.id : ""), layoutStore.nodes, layoutStore.rootId, props.tab.layout_state));
   const activeUrl = createMemo(() => {
@@ -14098,7 +14302,7 @@ function TabItem(props) {
     return name;
   });
   return (() => {
-    var _el$ = _tmpl$3$F(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$3$I(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
     addEventListener(_el$3, "click", props.onTabClick, true);
     insert(_el$3, createComponent(TabFaviconStack, {
@@ -14116,7 +14320,7 @@ function TabItem(props) {
         return isPlaying();
       },
       get children() {
-        var _el$5 = _tmpl$$15();
+        var _el$5 = _tmpl$$1d();
         _el$5.$$click = (e) => {
           e.stopPropagation();
           const ids = leafInfo().leafPaneIds;
@@ -14177,7 +14381,7 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$6 = _tmpl$2$O();
+        var _el$6 = _tmpl$2$U();
         _el$6.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
@@ -14213,7 +14417,7 @@ function TabItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$14 = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$N = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$1c = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$T = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
@@ -14241,7 +14445,7 @@ function TabIsland(props) {
   });
   const isCompact = () => props.tabs.length > 3;
   return (() => {
-    var _el$ = _tmpl$2$N(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$T(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
@@ -14355,7 +14559,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$14();
+        return _tmpl$$1c();
       }
     }), _el$4);
     _el$5.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
@@ -14364,7 +14568,7 @@ function TabIsland(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$13 = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
   const handleCloseTab = async (tabId) => {
     const currentTabs = props.ws.tabs();
@@ -14425,7 +14629,7 @@ function AppTopbar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$13(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1b(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -14458,7 +14662,7 @@ function AppTopbar(props) {
     }
   });
 }
-var _tmpl$$12 = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$M = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$E = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$S = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$H = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -14538,7 +14742,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$1a(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -14552,7 +14756,7 @@ function HistoryDropdown(props) {
           return props.items;
         },
         children: (item, idx) => (() => {
-          var _el$9 = _tmpl$3$E(), _el$0 = _el$9.firstChild;
+          var _el$9 = _tmpl$3$H(), _el$0 = _el$9.firstChild;
           _el$9.$$click = (e) => {
             e.stopPropagation();
             props.onSelect(item.url, item.index);
@@ -14576,7 +14780,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$M();
+              return _tmpl$2$S();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -14589,21 +14793,21 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$11 = /* @__PURE__ */ template(`<kbd>`);
+var _tmpl$$19 = /* @__PURE__ */ template(`<kbd>`);
 function ShortcutBadge(props) {
   return createComponent(Show, {
     get when() {
       return props.shortcut;
     },
     get children() {
-      var _el$ = _tmpl$$11();
+      var _el$ = _tmpl$$19();
       insert(_el$, () => props.shortcut);
       createRenderEffect(() => className(_el$, `px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none tracking-normal inline-flex items-center justify-center select-none ${props.class || ""}`));
       return _el$;
     }
   });
 }
-var _tmpl$$10 = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$L = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
+var _tmpl$$18 = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -14651,7 +14855,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$2$L();
+    var _el$ = _tmpl$2$R();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -14665,7 +14869,7 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$$10(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$18(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
             insert(_el$2, createComponent(ShortcutBadge, {
               get shortcut() {
@@ -14692,7 +14896,7 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$$ = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$K = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$D = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$t = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$Q = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$G = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
 function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
@@ -14797,7 +15001,7 @@ function ActivePaneNav(props) {
   };
   onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$4$t();
+    var _el$ = _tmpl$4$z();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -14805,7 +15009,7 @@ function ActivePaneNav(props) {
         return !canGoBack();
       },
       get children() {
-        var _el$2 = _tmpl$$$();
+        var _el$2 = _tmpl$$17();
         _el$2.$$contextmenu = (e) => {
           e.preventDefault();
           if (backItems().length > 0) openHistory("back");
@@ -14832,7 +15036,7 @@ function ActivePaneNav(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$K();
+        var _el$3 = _tmpl$2$Q();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -14859,7 +15063,7 @@ function ActivePaneNav(props) {
         return !props.node;
       },
       get children() {
-        var _el$4 = _tmpl$3$D();
+        var _el$4 = _tmpl$3$G();
         _el$4.$$click = handleReload;
         createRenderEffect((_p$) => {
           var _v$ = `flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0 ${isReloading() ? "animate-spin text-neutral-900" : ""}`, _v$2 = !props.node;
@@ -14899,6 +15103,87 @@ function ActivePaneNav(props) {
   })();
 }
 delegateEvents(["click", "pointerdown", "pointerup", "contextmenu"]);
+function isDomainPattern(str) {
+  return str.includes(".") && !str.includes(" ") && !str.startsWith("http://localhost") && !str.startsWith("localhost:");
+}
+function fuzzyScore(str, query) {
+  str = str.toLowerCase();
+  query = query.toLowerCase();
+  if (str === query) return 100;
+  if (str.startsWith(query)) return 80;
+  const words = str.split(/[\s-.]+/);
+  const acronym = words.map((w) => w[0]).join("");
+  if (acronym.startsWith(query)) return 70;
+  if (str.includes(query)) return 50;
+  let qIdx = 0;
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] === query[qIdx]) {
+      qIdx++;
+      if (qIdx === query.length) return 30 + query.length / str.length * 10;
+    }
+  }
+  return 0;
+}
+function buildAppSuggestions(apps, query) {
+  return apps.map((app) => {
+    const nameScore = fuzzyScore(app.name, query);
+    const domainScore = fuzzyScore(app.domain, query);
+    return { app, score: Math.max(nameScore, domainScore) };
+  }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score).slice(0, 3).map((item) => ({
+    type: "app",
+    label: `Launch ${item.app.name}`,
+    value: item.app.url,
+    subtitle: `App Directory • ${item.app.domain}`,
+    appItem: item.app
+  }));
+}
+function buildShortcutSuggestions(query) {
+  const list = [];
+  const lower = query.toLowerCase();
+  const shortcuts = [
+    { prefix: "drive ", name: "Google Drive", domain: "drive.google.com/drive/u/0/search?q=" },
+    { prefix: "sheet ", name: "Google Sheets", domain: "docs.google.com/spreadsheets/u/0/?q=" },
+    { prefix: "sheets ", name: "Google Sheets", domain: "docs.google.com/spreadsheets/u/0/?q=" },
+    { prefix: "doc ", name: "Google Docs", domain: "docs.google.com/document/u/0/?q=" },
+    { prefix: "docs ", name: "Google Docs", domain: "docs.google.com/document/u/0/?q=" },
+    { prefix: "canva ", name: "Canva Templates", domain: "www.canva.com/templates/?query=" },
+    { prefix: "gh ", name: "GitHub", domain: "github.com/search?q=" },
+    { prefix: "github ", name: "GitHub", domain: "github.com/search?q=" },
+    { prefix: "yt ", name: "YouTube", domain: "www.youtube.com/results?search_query=" },
+    { prefix: "youtube ", name: "YouTube", domain: "www.youtube.com/results?search_query=" }
+  ];
+  for (const s of shortcuts) {
+    if (lower.startsWith(s.prefix)) {
+      const term = query.substring(s.prefix.length).trim();
+      list.push({
+        type: "shortcut",
+        label: `Search ${s.name} for "${term}"`,
+        value: `https://${s.domain}${encodeURIComponent(term)}`,
+        subtitle: `Shortcut • ${s.name}`
+      });
+    }
+  }
+  const prefixHints = [
+    { hint: "drive", prefix: "drive ", label: "drive [query]", sub: "Search Google Drive" },
+    { hint: "sheet", prefix: "sheet ", label: "sheet [query]", sub: "Search Google Sheets" },
+    { hint: "doc", prefix: "doc ", label: "doc [query]", sub: "Search Google Docs" },
+    { hint: "canva", prefix: "canva ", label: "canva [query]", sub: "Search Canva Templates" },
+    { hint: "github", prefix: "gh ", label: "gh [query]", sub: "Search GitHub" },
+    { hint: "youtube", prefix: "yt ", label: "yt [query]", sub: "Search YouTube" }
+  ];
+  for (const h of prefixHints) {
+    if (h.hint.startsWith(lower) && lower.length > 0 && !lower.includes(" ")) {
+      list.push({
+        type: "shortcut",
+        label: h.label,
+        value: h.prefix,
+        subtitle: h.sub,
+        shortcutPrefix: h.prefix
+      });
+    }
+  }
+  return list;
+}
 function useSearchSuggestions(urlInput, profileApps) {
   const [suggestions, setSuggestions] = createSignal([]);
   const [activeSuggestionIdx, setActiveSuggestionIdx] = createSignal(-1);
@@ -14912,41 +15197,23 @@ function useSearchSuggestions(urlInput, profileApps) {
       return;
     }
     if (debounceTimer) clearTimeout(debounceTimer);
+    const currentQuery = query;
     debounceTimer = window.setTimeout(async () => {
       try {
         setIsSearching(true);
         if (window.api?.getSearchSuggestions) {
-          const res = await window.api.getSearchSuggestions(query);
-          setSuggestions(res || []);
+          const res = await window.api.getSearchSuggestions(currentQuery);
+          if (urlInput().trim() === currentQuery) {
+            setSuggestions(res || []);
+          }
         }
       } catch (e) {
         console.error(e);
       } finally {
         setIsSearching(false);
       }
-    }, 150);
+    }, 120);
   });
-  const isDomainPattern = (str) => {
-    return str.includes(".") && !str.includes(" ") && !str.startsWith("http://localhost") && !str.startsWith("localhost:");
-  };
-  const fuzzyScore = (str, query) => {
-    str = str.toLowerCase();
-    query = query.toLowerCase();
-    if (str === query) return 100;
-    if (str.startsWith(query)) return 80;
-    const words = str.split(/[\s-.]+/);
-    const acronym = words.map((w) => w[0]).join("");
-    if (acronym.startsWith(query)) return 70;
-    if (str.includes(query)) return 50;
-    let qIdx = 0;
-    for (let i = 0; i < str.length; i++) {
-      if (str[i] === query[qIdx]) {
-        qIdx++;
-        if (qIdx === query.length) return 30 + query.length / str.length * 10;
-      }
-    }
-    return 0;
-  };
   const allSuggestions = () => {
     const query = urlInput().trim();
     if (!query) return [];
@@ -14978,93 +15245,8 @@ function useSearchSuggestions(urlInput, profileApps) {
         }
       });
     }
-    const scoredApps = profileApps().map((app) => {
-      const nameScore = fuzzyScore(app.name, query);
-      const domainScore = fuzzyScore(app.domain, query);
-      return { app, score: Math.max(nameScore, domainScore) };
-    }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score);
-    for (const item of scoredApps.slice(0, 3)) {
-      list.push({
-        type: "app",
-        label: `Launch ${item.app.name}`,
-        value: item.app.url,
-        subtitle: `App Directory • ${item.app.domain}`,
-        appItem: item.app
-      });
-    }
-    const lowercaseQuery = query.toLowerCase();
-    if (lowercaseQuery.startsWith("drive ")) {
-      const dQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Drive for "${dQuery}"`,
-        value: `https://drive.google.com/drive/u/0/search?q=${encodeURIComponent(dQuery)}`,
-        subtitle: "Google Workspace • Drive"
-      });
-    }
-    if (lowercaseQuery.startsWith("sheet ")) {
-      const sQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Sheets for "${sQuery}"`,
-        value: `https://docs.google.com/spreadsheets/u/0/?q=${encodeURIComponent(sQuery)}`,
-        subtitle: "Google Workspace • Sheets"
-      });
-    }
-    if (lowercaseQuery.startsWith("doc ")) {
-      const docQuery = query.substring(4).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Google Docs for "${docQuery}"`,
-        value: `https://docs.google.com/document/u/0/?q=${encodeURIComponent(docQuery)}`,
-        subtitle: "Google Workspace • Docs"
-      });
-    }
-    if (lowercaseQuery.startsWith("canva ")) {
-      const canvaQuery = query.substring(6).trim();
-      list.push({
-        type: "shortcut",
-        label: `Search Canva Templates for "${canvaQuery}"`,
-        value: `https://www.canva.com/templates/?query=${encodeURIComponent(canvaQuery)}`,
-        subtitle: "Creative Marketing Templates"
-      });
-    }
-    if ("drive".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "drive [search_term]",
-        value: "drive ",
-        subtitle: "Search Google Drive Files",
-        shortcutPrefix: "drive "
-      });
-    }
-    if ("sheet".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "sheet [search_term]",
-        value: "sheet ",
-        subtitle: "Search Google Sheets Spreadsheets",
-        shortcutPrefix: "sheet "
-      });
-    }
-    if ("doc".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "doc [search_term]",
-        value: "doc ",
-        subtitle: "Search Google Docs Documents",
-        shortcutPrefix: "doc "
-      });
-    }
-    if ("canva".startsWith(lowercaseQuery)) {
-      list.push({
-        type: "shortcut",
-        label: "canva [template_name]",
-        value: "canva ",
-        subtitle: "Search Canva Creative Templates",
-        shortcutPrefix: "canva "
-      });
-    }
+    list.push(...buildAppSuggestions(profileApps(), query));
+    list.push(...buildShortcutSuggestions(query));
     for (const sug of suggestions().slice(0, 4)) {
       list.push({
         type: "google",
@@ -15089,39 +15271,39 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$_ = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$J = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$C = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$s = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$5 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
+var _tmpl$$16 = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$P = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$F = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$y = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$n = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$e = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$9 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$5 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$2 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
 const SlackIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$ = _tmpl$$_();
+  var _el$ = _tmpl$$16();
   setAttribute(_el$, "class", className2);
   return _el$;
 })();
 const GmailIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$2 = _tmpl$2$J();
+  var _el$2 = _tmpl$2$P();
   setAttribute(_el$2, "class", className2);
   return _el$2;
 })();
 const NotionIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$3 = _tmpl$3$C();
+  var _el$3 = _tmpl$3$F();
   setAttribute(_el$3, "class", className2);
   return _el$3;
 })();
 const FigmaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$4 = _tmpl$4$s();
+  var _el$4 = _tmpl$4$y();
   setAttribute(_el$4, "class", className2);
   return _el$4;
 })();
 const CanvaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$5 = _tmpl$5$k();
+  var _el$5 = _tmpl$5$n();
   setAttribute(_el$5, "class", className2);
   return _el$5;
 })();
 const GitHubIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$6 = _tmpl$6$c();
+  var _el$6 = _tmpl$6$e();
   setAttribute(_el$6, "class", className2);
   return _el$6;
 })();
 const ChatGPTIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$7 = _tmpl$7$8();
+  var _el$7 = _tmpl$7$9();
   setAttribute(_el$7, "class", className2);
   return _el$7;
 })();
@@ -15131,12 +15313,12 @@ const HubSpotIcon = (className2 = "w-6 h-6") => (() => {
   return _el$8;
 })();
 const StripeIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$9 = _tmpl$9$1();
+  var _el$9 = _tmpl$9$2();
   setAttribute(_el$9, "class", className2);
   return _el$9;
 })();
 const ShopifyIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$0 = _tmpl$0();
+  var _el$0 = _tmpl$0$1();
   setAttribute(_el$0, "class", className2);
   return _el$0;
 })();
@@ -15456,22 +15638,34 @@ function useProfileApps(profileId) {
     handleDrop
   };
 }
-var _tmpl$$Z = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/60 p-1.5 max-h-[220px] overflow-y-auto z-50">`), _tmpl$2$I = /* @__PURE__ */ template(`<span class="text-[8px] text-neutral-400 font-medium truncate">`), _tmpl$3$B = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-400 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0">Launch`), _tmpl$4$r = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$j = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded bg-neutral-100 shrink-0">`);
+var _tmpl$$15 = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/80 p-1.5 max-h-[240px] overflow-y-auto z-50 animate-in fade-in zoom-in-[0.99] duration-100">`), _tmpl$2$O = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-medium truncate">`), _tmpl$3$E = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$4$x = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$m = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$6$d = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
 function CommandBarDropdown(props) {
+  let listContainer;
+  createEffect(() => {
+    const idx = props.activeIdx;
+    if (idx >= 0 && listContainer) {
+      const activeEl = listContainer.children[idx];
+      activeEl?.scrollIntoView({
+        block: "nearest"
+      });
+    }
+  });
   return createComponent(Show, {
     get when() {
       return memo(() => !!props.show)() && props.suggestions.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$Z();
-      var _ref$ = props.containerRef;
-      typeof _ref$ === "function" ? use(_ref$, _el$) : props.containerRef = _el$;
+      var _el$ = _tmpl$$15();
+      use((el) => {
+        listContainer = el;
+        props.containerRef(el);
+      }, _el$);
       insert(_el$, createComponent(For, {
         get each() {
           return props.suggestions;
         },
         children: (item, idx) => (() => {
-          var _el$2 = _tmpl$4$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
+          var _el$2 = _tmpl$4$x(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
           _el$2.$$click = () => props.onExecute(item);
           insert(_el$3, createComponent(Show, {
             get when() {
@@ -15479,7 +15673,7 @@ function CommandBarDropdown(props) {
             },
             get fallback() {
               return (() => {
-                var _el$8 = _tmpl$5$j();
+                var _el$8 = _tmpl$5$m();
                 insert(_el$8, createComponent(Switch, {
                   get children() {
                     return [createComponent(Match, {
@@ -15528,7 +15722,7 @@ function CommandBarDropdown(props) {
               return item.subtitle;
             },
             get children() {
-              var _el$6 = _tmpl$2$I();
+              var _el$6 = _tmpl$2$O();
               insert(_el$6, () => item.subtitle);
               return _el$6;
             }
@@ -15537,13 +15731,27 @@ function CommandBarDropdown(props) {
             get when() {
               return item.type === "app" || item.type === "shortcut";
             },
+            get fallback() {
+              return createComponent(Show, {
+                get when() {
+                  return props.activeIdx === idx();
+                },
+                get children() {
+                  var _el$9 = _tmpl$6$d(), _el$0 = _el$9.firstChild;
+                  insert(_el$9, createComponent(corner_down_left_default, {
+                    "class": "w-2.5 h-2.5"
+                  }), _el$0);
+                  return _el$9;
+                }
+              });
+            },
             get children() {
-              return _tmpl$3$B();
+              return _tmpl$3$E();
             }
           }), null);
           createRenderEffect((_$p) => classList(_el$2, {
-            "bg-neutral-50 text-neutral-900 font-semibold": props.activeIdx === idx(),
-            "hover:bg-neutral-50/50 text-neutral-600": props.activeIdx !== idx()
+            "bg-neutral-100 text-neutral-900 font-semibold shadow-xs": props.activeIdx === idx(),
+            "hover:bg-neutral-50 text-neutral-600": props.activeIdx !== idx()
           }, _$p));
           return _el$2;
         })()
@@ -15599,7 +15807,143 @@ function cleanUrlString(rawUrl) {
     return rawUrl;
   }
 }
-var _tmpl$$Y = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
+var _tmpl$$14 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$N = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$D = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$w = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$l = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$c = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$8 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+function OmniboxInputIcon(props) {
+  return (() => {
+    var _el$ = _tmpl$4$w();
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.type === "search";
+      },
+      get children() {
+        return _tmpl$$14();
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.type === "localhost";
+      },
+      get children() {
+        return _tmpl$2$N();
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.type === "url";
+      },
+      get children() {
+        return _tmpl$3$D();
+      }
+    }), null);
+    return _el$;
+  })();
+}
+function CopyCleanButton(props) {
+  return (() => {
+    var _el$5 = _tmpl$6$c();
+    addEventListener(_el$5, "click", props.onCopy, true);
+    insert(_el$5, createComponent(Show, {
+      get when() {
+        return props.copied;
+      },
+      get fallback() {
+        return _tmpl$7$8();
+      },
+      get children() {
+        return _tmpl$5$l();
+      }
+    }));
+    createRenderEffect(() => setAttribute(_el$5, "title", props.copied ? "Clean Link Copied!" : "Copy Clean URL (Strips tracking parameters)"));
+    return _el$5;
+  })();
+}
+delegateEvents(["click"]);
+function useOmniboxEvents(params) {
+  onMount(() => {
+    const handleGlobalFocus = (e) => {
+      if (!e.detail?.activePaneId || e.detail.activePaneId === params.paneId) {
+        params.setIsFocused(true);
+        params.onFocusChange?.(true);
+        const el = params.inputRef();
+        if (el && document.activeElement !== el) {
+          el.focus();
+          el.select();
+        }
+      }
+    };
+    const handleOutsideClick = (e) => {
+      const target = e.target;
+      const cRef = params.suggestionsContainerRef();
+      const iRef = params.inputRef();
+      if (cRef && !cRef.contains(target) && iRef && !iRef.contains(target)) {
+        params.setShowSuggestions(false);
+      }
+    };
+    window.addEventListener("focus-address-bar", handleGlobalFocus);
+    window.addEventListener("mousedown", handleOutsideClick);
+    onCleanup(() => {
+      window.removeEventListener("focus-address-bar", handleGlobalFocus);
+      window.removeEventListener("mousedown", handleOutsideClick);
+    });
+  });
+  const handleKeyDown = (e) => {
+    if (e.key === "Tab") {
+      const list = params.allSuggestions();
+      if (list.length > 0) {
+        e.preventDefault();
+        const idx = params.activeSuggestionIdx() >= 0 ? params.activeSuggestionIdx() : 0;
+        const target = list[idx];
+        if (target) {
+          if (target.shortcutPrefix) {
+            params.setLiveInput(target.shortcutPrefix);
+          } else if (target.type === "google") {
+            params.setLiveInput(target.label);
+          } else if (target.type === "app" && target.appItem?.domain) {
+            params.setLiveInput(target.appItem.domain);
+          } else {
+            params.setLiveInput(target.value);
+          }
+          params.setActiveSuggestionIdx(-1);
+        }
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      if (params.allSuggestions().length > 0) {
+        e.preventDefault();
+        params.setShowSuggestions(true);
+        params.setActiveSuggestionIdx((prev) => Math.min(prev + 1, params.allSuggestions().length - 1));
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      params.setActiveSuggestionIdx((prev) => Math.max(prev - 1, -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const idx = params.activeSuggestionIdx();
+      const list = params.allSuggestions();
+      if (idx >= 0 && idx < list.length) {
+        if (list[idx].shortcutPrefix) {
+          params.setLiveInput(list[idx].shortcutPrefix);
+          params.setActiveSuggestionIdx(-1);
+          params.inputRef()?.focus();
+          return;
+        }
+        params.onLaunchUrl(list[idx].value);
+      } else if (params.liveInput().trim()) {
+        params.onLaunchUrl(params.liveInput().trim());
+      }
+      params.inputRef()?.blur();
+    } else if (e.key === "Escape") {
+      params.setLiveInput(params.url || "");
+      params.setShowSuggestions(false);
+      params.setIsFocused(false);
+      params.onFocusChange?.(false);
+      params.inputRef()?.blur();
+    }
+  };
+  return { handleKeyDown };
+}
+var _tmpl$$13 = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
 function ActivePaneProgress(props) {
   const [loading, setLoading] = createSignal(false);
   const [progress, setProgress] = createSignal(0);
@@ -15651,13 +15995,15 @@ function ActivePaneProgress(props) {
     window.addEventListener("pane.reloaded", handleStart);
     window.addEventListener("pane.loaded", handleStop);
     window.addEventListener("pane.navigated", handleStop);
-    const unsubNav = window.api?.onNavigated?.((_e, data) => {
-      if (props.paneId && data.paneId === props.paneId) {
+    const unsubNav = window.api?.onNavigated?.((data) => {
+      const payload = data?.paneId ? data : data?.detail || data;
+      if (props.paneId && payload?.paneId === props.paneId) {
         finishProgress();
       }
     });
     const unsubLoaded = window.api?.onViewLoaded?.((data) => {
-      const id = typeof data === "string" ? data : data?.paneId;
+      const payload = data?.paneId ? data : data?.detail || data;
+      const id = typeof payload === "string" ? payload : payload?.paneId;
       if (props.paneId && id === props.paneId) {
         finishProgress();
       }
@@ -15680,13 +16026,13 @@ function ActivePaneProgress(props) {
       return loading();
     },
     get children() {
-      var _el$ = _tmpl$$Y(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$13(), _el$2 = _el$.firstChild;
       createRenderEffect((_$p) => setStyleProperty(_el$2, "width", `${progress()}%`));
       return _el$;
     }
   });
 }
-var _tmpl$$X = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$H = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$A = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$12 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$M = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$C = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function ActivePaneAudio(props) {
   const [isPlaying, setIsPlaying] = createSignal(false);
   const [isMuted, setIsMuted] = createSignal(false);
@@ -15709,17 +16055,17 @@ function ActivePaneAudio(props) {
       return isPlaying();
     },
     get children() {
-      var _el$ = _tmpl$2$H();
+      var _el$ = _tmpl$2$M();
       _el$.$$click = toggleMute;
       insert(_el$, createComponent(Show, {
         get when() {
           return !isMuted();
         },
         get fallback() {
-          return _tmpl$3$A();
+          return _tmpl$3$C();
         },
         get children() {
-          return _tmpl$$X();
+          return _tmpl$$12();
         }
       }));
       createRenderEffect((_p$) => {
@@ -15736,7 +16082,7 @@ function ActivePaneAudio(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$W = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$G = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$5$i = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-green-600><polyline points="20 6 9 17 4 12">`), _tmpl$6$b = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none"></div><input type=text placeholder="Search or enter address (Alt+D)...">`), _tmpl$8$4 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+var _tmpl$$11 = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$2$L = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)...">`);
 function ActivePaneOmnibox(props) {
   let inputRef;
   let suggestionsContainerRef;
@@ -15758,31 +16104,6 @@ function ActivePaneOmnibox(props) {
     const url = props.node?.url || "";
     if (!isFocused()) setLiveInput(url);
   });
-  onMount(() => {
-    const handleGlobalFocus = (e) => {
-      if (!e.detail?.activePaneId || e.detail.activePaneId === props.node?.id) {
-        setIsFocused(true);
-        props.onFocusChange?.(true);
-        setTimeout(() => {
-          inputRef?.focus();
-          inputRef?.select();
-        }, 30);
-      }
-    };
-    const handleOutsideClick = (e) => {
-      const target = e.target;
-      if (suggestionsContainerRef && !suggestionsContainerRef.contains(target) && inputRef && !inputRef.contains(target)) {
-        setShowSuggestions(false);
-      }
-    };
-    window.addEventListener("focus-address-bar", handleGlobalFocus);
-    window.addEventListener("mousedown", handleOutsideClick);
-    onCleanup(() => {
-      window.removeEventListener("focus-address-bar", handleGlobalFocus);
-      window.removeEventListener("mousedown", handleOutsideClick);
-    });
-  });
-  const inputType = () => detectInputType(liveInput());
   const handleLaunchUrl = (url) => {
     const resolved = resolveInputUrl(url);
     if (!resolved) return;
@@ -15804,6 +16125,23 @@ function ActivePaneOmnibox(props) {
     setShowSuggestions(false);
     props.onFocusChange?.(false);
   };
+  const {
+    handleKeyDown
+  } = useOmniboxEvents({
+    paneId: props.node?.id,
+    url: props.node?.url,
+    liveInput,
+    setLiveInput,
+    setIsFocused,
+    setShowSuggestions,
+    allSuggestions,
+    activeSuggestionIdx,
+    setActiveSuggestionIdx,
+    inputRef: () => inputRef,
+    suggestionsContainerRef: () => suggestionsContainerRef,
+    onFocusChange: props.onFocusChange,
+    onLaunchUrl: handleLaunchUrl
+  });
   const handleCopyCleanUrl = (e) => {
     e.stopPropagation();
     const url = props.node?.url;
@@ -15813,103 +16151,52 @@ function ActivePaneOmnibox(props) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
-  const handleKeyDown = (e) => {
-    if (e.key === "ArrowDown") {
-      if (allSuggestions().length > 0) {
-        e.preventDefault();
-        setShowSuggestions(true);
-        setActiveSuggestionIdx((prev) => Math.min(prev + 1, allSuggestions().length - 1));
-      }
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveSuggestionIdx((prev) => Math.max(prev - 1, -1));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const idx = activeSuggestionIdx();
-      const list = allSuggestions();
-      if (idx >= 0 && idx < list.length) {
-        if (list[idx].shortcutPrefix) {
-          setLiveInput(list[idx].shortcutPrefix);
-          setActiveSuggestionIdx(-1);
-          inputRef?.focus();
-          return;
-        }
-        handleLaunchUrl(list[idx].value);
-      } else if (liveInput().trim()) {
-        handleLaunchUrl(liveInput().trim());
-      }
-      inputRef?.blur();
-    } else if (e.key === "Escape") {
-      setLiveInput(props.node?.url || "");
-      setShowSuggestions(false);
-      setIsFocused(false);
-      props.onFocusChange?.(false);
-      inputRef?.blur();
-    }
-  };
   const displayLabel = () => {
     const url = props.node?.url;
     if (!url) return "Search Google or enter address...";
     return formatUrlForDisplay(url);
   };
   return (() => {
-    var _el$ = _tmpl$7$7(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$L(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$2.$$click = () => {
       if (!isFocused()) {
         setIsFocused(true);
         setShowSuggestions(true);
         props.onFocusChange?.(true);
         setTimeout(() => {
-          inputRef?.focus();
-          inputRef?.select();
+          if (inputRef && document.activeElement !== inputRef) {
+            inputRef.focus();
+            inputRef.select();
+          }
         }, 20);
       }
     };
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return inputType() === "search";
-      },
-      get children() {
-        return _tmpl$$W();
+    insert(_el$2, createComponent(OmniboxInputIcon, {
+      get type() {
+        return detectInputType(liveInput());
       }
-    }), null);
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return inputType() === "localhost";
-      },
-      get children() {
-        return _tmpl$2$G();
-      }
-    }), null);
-    insert(_el$3, createComponent(Show, {
-      get when() {
-        return inputType() === "url";
-      },
-      get children() {
-        return _tmpl$3$z();
-      }
-    }), null);
-    _el$7.$$keydown = handleKeyDown;
-    _el$7.addEventListener("focus", () => {
+    }), _el$3);
+    addEventListener(_el$3, "keydown", handleKeyDown, true);
+    _el$3.addEventListener("focus", () => {
       setIsFocused(true);
       setShowSuggestions(true);
       props.onFocusChange?.(true);
     });
-    _el$7.$$input = (e) => {
+    _el$3.$$input = (e) => {
       setLiveInput(e.currentTarget.value);
       setShowSuggestions(true);
     };
-    var _ref$ = inputRef;
-    typeof _ref$ === "function" ? use(_ref$, _el$7) : inputRef = _el$7;
+    use((el) => inputRef = el, _el$3);
+    setAttribute(_el$3, "spellcheck", false);
     insert(_el$2, createComponent(Show, {
       get when() {
         return !isFocused();
       },
       get children() {
         return [(() => {
-          var _el$8 = _tmpl$4$q(), _el$9 = _el$8.firstChild;
-          insert(_el$9, displayLabel);
-          return _el$8;
+          var _el$4 = _tmpl$$11(), _el$5 = _el$4.firstChild;
+          insert(_el$5, displayLabel);
+          return _el$4;
         })(), createComponent(ActivePaneAudio, {
           get paneId() {
             return props.node?.id;
@@ -15919,21 +16206,12 @@ function ActivePaneOmnibox(props) {
             return props.node?.url;
           },
           get children() {
-            var _el$0 = _tmpl$6$b();
-            _el$0.$$click = handleCopyCleanUrl;
-            insert(_el$0, createComponent(Show, {
-              get when() {
+            return createComponent(CopyCleanButton, {
+              get copied() {
                 return copied();
               },
-              get fallback() {
-                return _tmpl$8$4();
-              },
-              get children() {
-                return _tmpl$5$i();
-              }
-            }));
-            createRenderEffect(() => setAttribute(_el$0, "title", copied() ? "Clean Link Copied!" : "Copy Clean URL (Strips tracking parameters)"));
-            return _el$0;
+              onCopy: handleCopyCleanUrl
+            });
           }
         })];
       }
@@ -15967,18 +16245,18 @@ function ActivePaneOmnibox(props) {
     createRenderEffect((_p$) => {
       var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-all duration-200 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-2 ring-neutral-900/10 border-neutral-300 shadow-sm" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
       _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
-      _v$2 !== _p$.t && className(_el$7, _p$.t = _v$2);
+      _v$2 !== _p$.t && className(_el$3, _p$.t = _v$2);
       return _p$;
     }, {
       e: void 0,
       t: void 0
     });
-    createRenderEffect(() => _el$7.value = liveInput());
+    createRenderEffect(() => _el$3.value = liveInput());
     return _el$;
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$V = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+var _tmpl$$10 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$K = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$v = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
 function SplitMenu(props) {
   let triggerRef;
   const [coords, setCoords] = createSignal({
@@ -16011,7 +16289,7 @@ function SplitMenu(props) {
     props.setShowSplitMenu(false);
   };
   return (() => {
-    var _el$ = _tmpl$4$p(), _el$3 = _el$.firstChild;
+    var _el$ = _tmpl$4$v(), _el$3 = _el$.firstChild;
     var _ref$ = triggerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
     insert(_el$, createComponent(ActionTooltip, {
@@ -16023,7 +16301,7 @@ function SplitMenu(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$V();
+        var _el$2 = _tmpl$$10();
         _el$2.$$click = (e) => {
           e.stopPropagation();
           setLayoutStore("splitPreview", null);
@@ -16041,14 +16319,14 @@ function SplitMenu(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$F();
+              var _el$4 = _tmpl$2$K();
               _el$4.$$click = (e) => {
                 e.stopPropagation();
                 props.setShowSplitMenu(false);
               };
               return _el$4;
             })(), (() => {
-              var _el$5 = _tmpl$3$y(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling;
+              var _el$5 = _tmpl$3$B(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling;
               _el$5.$$pointerdown = (e) => e.stopPropagation();
               _el$0.$$click = (e) => handleSplitClick("left", e);
               _el$1.$$click = (e) => handleSplitClick("right", e);
@@ -16071,7 +16349,7 @@ function SplitMenu(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$U = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$x = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$o = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$h = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
+var _tmpl$$$ = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$J = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$A = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$u = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$k = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
 const SUPPORTED_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -16148,7 +16426,7 @@ function ConnectedAccountsList(props) {
   };
   const displayedProviders = () => showAll() ? SUPPORTED_PROVIDERS : SUPPORTED_PROVIDERS.slice(0, 4);
   return (() => {
-    var _el$ = _tmpl$2$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$2$J(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     insert(_el$3, createComponent(For, {
       get each() {
         return displayedProviders();
@@ -16156,7 +16434,7 @@ function ConnectedAccountsList(props) {
       children: (provider) => {
         const identity = () => getIdentities()[provider.id];
         return (() => {
-          var _el$5 = _tmpl$4$o(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+          var _el$5 = _tmpl$4$u(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
           _el$8.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
@@ -16168,13 +16446,13 @@ function ConnectedAccountsList(props) {
             },
             get fallback() {
               return (() => {
-                var _el$11 = _tmpl$5$h();
+                var _el$11 = _tmpl$5$k();
                 _el$11.$$click = () => handleConnect(provider.loginUrl);
                 return _el$11;
               })();
             },
             get children() {
-              var _el$10 = _tmpl$3$x();
+              var _el$10 = _tmpl$3$A();
               _el$10.$$click = () => handleDisconnect(provider.id);
               return _el$10;
             }
@@ -16197,7 +16475,7 @@ function ConnectedAccountsList(props) {
         return SUPPORTED_PROVIDERS.length > 4;
       },
       get children() {
-        var _el$4 = _tmpl$$U();
+        var _el$4 = _tmpl$$$();
         _el$4.$$click = () => setShowAll(!showAll());
         insert(_el$4, (() => {
           var _c$ = memo(() => !!showAll());
@@ -16210,7 +16488,7 @@ function ConnectedAccountsList(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$T = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$w = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$n = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+var _tmpl$$_ = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$I = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$z = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$t = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
 const COLORS = [
   "#6d7f94",
   // Slate Grey
@@ -16246,7 +16524,7 @@ function ProfileForm(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$2$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    var _el$ = _tmpl$2$I(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
     _el$4.$$input = (e) => setName(e.currentTarget.value);
     insert(_el$, createComponent(ConnectedAccountsList, {
       get profileId() {
@@ -16257,7 +16535,7 @@ function ProfileForm(props) {
       }
     }), _el$5);
     insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$23 = _tmpl$3$w();
+      var _el$23 = _tmpl$3$z();
       _el$23.$$click = () => setColor(c);
       setStyleProperty(_el$23, "background-color", c);
       createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer ${color() === c ? "ring-2 ring-offset-1 ring-neutral-900 scale-105" : ""}`));
@@ -16270,7 +16548,7 @@ function ProfileForm(props) {
         return showAdvanced();
       },
       get children() {
-        var _el$1 = _tmpl$$T(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+        var _el$1 = _tmpl$$_(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
         _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
         _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
         _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
@@ -16283,7 +16561,7 @@ function ProfileForm(props) {
     insert(_el$19, (() => {
       var _c$ = memo(() => !!props.onDelete);
       return () => _c$() && (() => {
-        var _el$24 = _tmpl$4$n();
+        var _el$24 = _tmpl$4$t();
         addEventListener(_el$24, "click", props.onDelete, true);
         return _el$24;
       })();
@@ -16296,7 +16574,7 @@ function ProfileForm(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$C = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$g = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
+var _tmpl$$Z = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$H = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$s = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$j = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$b = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
 function ProfileMenuList(props) {
   let listRef;
   const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
@@ -16325,7 +16603,7 @@ function ProfileMenuList(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$S(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$$Z(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
     _el$.$$keydown = handleKeyDown;
     var _ref$ = listRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
@@ -16334,7 +16612,7 @@ function ProfileMenuList(props) {
         return layoutStore.profiles;
       },
       children: (profile, idx) => (() => {
-        var _el$6 = _tmpl$5$g(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
+        var _el$6 = _tmpl$5$j(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
         _el$6.$$click = (e) => {
           e.stopPropagation();
           props.onSelect(profile.id);
@@ -16349,7 +16627,7 @@ function ProfileMenuList(props) {
               const first = Object.values(idents).find((val) => val?.email || val?.handle);
               if (first) {
                 return (() => {
-                  var _el$14 = _tmpl$6$a();
+                  var _el$14 = _tmpl$6$b();
                   insert(_el$14, () => first.email || first.handle);
                   return _el$14;
                 })();
@@ -16364,7 +16642,7 @@ function ProfileMenuList(props) {
             return profile.is_ephemeral;
           },
           get children() {
-            return _tmpl$2$C();
+            return _tmpl$2$H();
           }
         }), null);
         insert(_el$6, createComponent(Show, {
@@ -16372,7 +16650,7 @@ function ProfileMenuList(props) {
             return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
           },
           get children() {
-            return _tmpl$3$v();
+            return _tmpl$3$y();
           }
         }), _el$11);
         insert(_el$11, createComponent(Show, {
@@ -16380,7 +16658,7 @@ function ProfileMenuList(props) {
             return props.onSplitWithProfile;
           },
           get children() {
-            var _el$12 = _tmpl$4$m();
+            var _el$12 = _tmpl$4$s();
             _el$12.$$click = (e) => {
               e.stopPropagation();
               props.onSplitWithProfile?.(profile.id);
@@ -16466,7 +16744,7 @@ function useProfileMenuController(nodeId, onUpdatePane) {
     handleDeleteProfile
   };
 }
-var _tmpl$$R = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$B = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$l = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$f = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div>`), _tmpl$7$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+var _tmpl$$Y = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$G = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$x = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$a = /* @__PURE__ */ template(`<div>`), _tmpl$7$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
 function ProfileMenu$1(props) {
   let btnRef;
   const [anchorPos, setAnchorPos] = createSignal(null);
@@ -16524,14 +16802,14 @@ function ProfileMenu$1(props) {
     ctrl.setIsCreatingProfile(true);
   };
   const renderContent = () => (() => {
-    var _el$ = _tmpl$$R(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$Y(), _el$2 = _el$.firstChild;
     insert(_el$2, createComponent(Show, {
       get when() {
         return !isFormMode();
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$B();
+          var _el$3 = _tmpl$2$G();
           insert(_el$3, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((p2) => p2.id === ctrl.editingProfileId());
@@ -16588,7 +16866,7 @@ function ProfileMenu$1(props) {
     return _el$;
   })();
   return (() => {
-    var _el$4 = _tmpl$6$9();
+    var _el$4 = _tmpl$6$a();
     insert(_el$4, createComponent(Show, {
       get when() {
         return isCluster();
@@ -16603,7 +16881,7 @@ function ProfileMenu$1(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$12 = _tmpl$7$6(), _el$13 = _el$12.firstChild;
+            var _el$12 = _tmpl$7$7(), _el$13 = _el$12.firstChild;
             _el$12.$$click = (e) => {
               e.stopPropagation();
               toggleMenu();
@@ -16618,7 +16896,7 @@ function ProfileMenu$1(props) {
       },
       get children() {
         return [(() => {
-          var _el$5 = _tmpl$3$u(), _el$6 = _el$5.firstChild;
+          var _el$5 = _tmpl$3$x(), _el$6 = _el$5.firstChild;
           _el$5.$$click = (e) => {
             e.stopPropagation();
             const rect = e.currentTarget.getBoundingClientRect();
@@ -16643,7 +16921,7 @@ function ProfileMenu$1(props) {
           });
           return _el$5;
         })(), (() => {
-          var _el$7 = _tmpl$4$l(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
+          var _el$7 = _tmpl$4$r(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
           _el$1.nextSibling;
           insert(_el$8, () => currentProfile().name, _el$1);
           return _el$7;
@@ -16658,14 +16936,14 @@ function ProfileMenu$1(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$10 = _tmpl$5$f();
+              var _el$10 = _tmpl$5$i();
               _el$10.$$pointerdown = (e) => {
                 e.stopPropagation();
                 props.setShowProfileMenu(false);
               };
               return _el$10;
             })(), (() => {
-              var _el$11 = _tmpl$6$9();
+              var _el$11 = _tmpl$6$a();
               insert(_el$11, renderContent);
               createRenderEffect((_p$) => {
                 var _v$3 = `pointer-events-auto fixed z-[9999] animate-in fade-in duration-200 ${isCluster() ? "slide-in-from-right-2" : "slide-in-from-top-2"}`, _v$4 = isCluster() ? {
@@ -16693,7 +16971,7 @@ function ProfileMenu$1(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$Q = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$X = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActivePaneActions(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -16702,7 +16980,7 @@ function ActivePaneActions(props) {
     props.onMenuOpenChange?.(isAny);
   });
   return (() => {
-    var _el$ = _tmpl$$Q();
+    var _el$ = _tmpl$$X();
     insert(_el$, createComponent(Show, {
       get when() {
         return props.node;
@@ -16738,7 +17016,7 @@ function ActivePaneActions(props) {
     return _el$;
   })();
 }
-var _tmpl$$P = /* @__PURE__ */ template(`<div id=active-pane-bar class="fixed top-2 left-1/2 -translate-x-1/2 z-[60] h-[40px] pointer-events-auto flex items-center gap-1.5 px-2 bg-white border border-neutral-200/60 rounded-2xl shadow-md select-none opacity-0 -translate-y-4"role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
+var _tmpl$$W = /* @__PURE__ */ template(`<div id=active-pane-bar class="fixed top-2 left-1/2 -translate-x-1/2 z-[60] h-[40px] pointer-events-auto flex items-center gap-1.5 px-2 bg-white border border-neutral-200/60 rounded-2xl shadow-md select-none opacity-0 -translate-y-4"role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
 function ActivePaneBar(props) {
   const activeNode = () => {
     const id = props.ws.activePaneId();
@@ -16751,7 +17029,7 @@ function ActivePaneBar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$P();
+      var _el$ = _tmpl$$W();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("top"));
       var _ref$ = props.activeBarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.activeBarRef = _el$;
@@ -16789,12 +17067,12 @@ function ActivePaneBar(props) {
     }
   });
 }
-var _tmpl$$O = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
+var _tmpl$$V = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
 function WorkspaceTooltip(props) {
   const profile = () => layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id);
   return createComponent(Portal, {
     get children() {
-      var _el$ = _tmpl$$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+      var _el$ = _tmpl$$V(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
       insert(_el$3, createComponent(WorkspaceIcon, {
         get icon() {
           return props.ws.icon;
@@ -16826,7 +17104,7 @@ function WorkspaceTooltip(props) {
     }
   });
 }
-var _tmpl$$N = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
+var _tmpl$$U = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
 function WorkspaceItem(props) {
   const [isHovered, setIsHovered] = createSignal(false);
   const [hoveredRect, setHoveredRect] = createSignal(null);
@@ -16846,7 +17124,7 @@ function WorkspaceItem(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$$U(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     _el$.addEventListener("mouseleave", () => setIsHovered(false));
     _el$.addEventListener("mouseenter", (e) => {
       setIsHovered(true);
@@ -16899,7 +17177,7 @@ function WorkspaceItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$M = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$t = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$8 = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$3 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+var _tmpl$$T = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$F = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$h = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$9 = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$6 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$4 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
 const RECENT_KEY = "apposition:recent_workspace_icons";
 function IconPickerPopover(props) {
   let popoverRef;
@@ -16982,14 +17260,14 @@ function IconPickerPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$M();
+        var _el$ = _tmpl$$T();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$k(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        var _el$2 = _tmpl$4$q(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -17007,7 +17285,7 @@ function IconPickerPopover(props) {
             return search();
           },
           get children() {
-            var _el$7 = _tmpl$2$A();
+            var _el$7 = _tmpl$2$F();
             _el$7.$$click = () => setSearch("");
             insert(_el$7, createComponent(x_default, {
               size: 12
@@ -17024,7 +17302,7 @@ function IconPickerPopover(props) {
             return memo(() => recentIcons().length > 0)() && !search();
           },
           get children() {
-            var _el$0 = _tmpl$3$t();
+            var _el$0 = _tmpl$3$w();
             insert(_el$0, createComponent(clock_default, {
               size: 11,
               "class": "text-neutral-400 ml-1 mr-0.5 shrink-0"
@@ -17038,7 +17316,7 @@ function IconPickerPopover(props) {
                 if (!item) return null;
                 const Comp = item.component;
                 return (() => {
-                  var _el$11 = _tmpl$5$e();
+                  var _el$11 = _tmpl$5$h();
                   _el$11.$$click = () => handlePickIcon(id);
                   insert(_el$11, createComponent(Comp, {
                     size: 12,
@@ -17055,7 +17333,7 @@ function IconPickerPopover(props) {
         insert(_el$1, createComponent(For, {
           each: ICON_CATEGORIES,
           children: (cat) => (() => {
-            var _el$12 = _tmpl$6$8();
+            var _el$12 = _tmpl$6$9();
             _el$12.$$click = () => {
               setSelectedCategory(cat);
               setFocusedIdx(-1);
@@ -17074,7 +17352,7 @@ function IconPickerPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$7$5(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+              var _el$13 = _tmpl$7$6(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
               _el$16.nextSibling;
               insert(_el$13, search, _el$16);
               return _el$13;
@@ -17085,7 +17363,7 @@ function IconPickerPopover(props) {
             const isFocused = () => focusedIdx() === idx();
             const Comp = item.component;
             return (() => {
-              var _el$17 = _tmpl$8$3();
+              var _el$17 = _tmpl$8$4();
               _el$17.$$click = () => handlePickIcon(item.id);
               insert(_el$17, createComponent(Comp, {
                 size: 15,
@@ -17133,7 +17411,7 @@ function IconPickerPopover(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$z = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$j = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$d = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$S = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$E = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$g = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$8 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$5 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function WorkspacePopover(props) {
   let popoverRef;
@@ -17159,14 +17437,14 @@ function WorkspacePopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$L();
+        var _el$ = _tmpl$$S();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$5$d(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$5$g(), _el$3 = _el$2.firstChild;
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
         insert(_el$3, createComponent(Show, {
@@ -17175,7 +17453,7 @@ function WorkspacePopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$6$7(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
+              var _el$13 = _tmpl$6$8(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
               insert(_el$18, () => props.cascadePrompt?.profileName);
               _el$20.$$click = (e) => {
                 e.stopPropagation();
@@ -17190,7 +17468,7 @@ function WorkspacePopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$z(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+              var _el$4 = _tmpl$2$E(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
               _el$7.$$click = (e) => {
                 e.stopPropagation();
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -17220,7 +17498,7 @@ function WorkspacePopover(props) {
               createRenderEffect(() => _el$8.value = props.ws.name);
               return _el$4;
             })(), (() => {
-              var _el$9 = _tmpl$3$s(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$9 = _tmpl$3$v(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$10) : flipThumbRef = _el$10;
               insert(_el$1, createComponent(For, {
@@ -17242,7 +17520,7 @@ function WorkspacePopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$22 = _tmpl$7$4(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
+                    var _el$22 = _tmpl$7$5(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
                     _el$22.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -17276,7 +17554,7 @@ function WorkspacePopover(props) {
               }), null);
               return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$4$j(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$4$p(), _el$12 = _el$11.firstChild;
               _el$12.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -17320,7 +17598,7 @@ function WorkspacePopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$K = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+var _tmpl$$R = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
 function WorkspaceCreateFlyout(props) {
   const [name, setName] = createSignal("");
   const [selectedIcon, setSelectedIcon] = createSignal(null);
@@ -17348,14 +17626,14 @@ function WorkspaceCreateFlyout(props) {
       return createComponent(Portal, {
         get children() {
           return [(() => {
-            var _el$ = _tmpl$$K();
+            var _el$ = _tmpl$$R();
             _el$.$$click = (e) => {
               e.stopPropagation();
               handleClose();
             };
             return _el$;
           })(), (() => {
-            var _el$2 = _tmpl$2$y(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+            var _el$2 = _tmpl$2$D(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
             _el$2.$$click = (e) => e.stopPropagation();
             _el$4.$$click = (e) => {
               e.stopPropagation();
@@ -17419,7 +17697,7 @@ function WorkspaceCreateFlyout(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$J = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$x = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$i = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$Q = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$C = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$u = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$o = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function WorkspaceDock(props) {
   const [isCreatingHover, setIsCreatingHover] = createSignal(false);
   const [configOpenId, setConfigOpenId] = createSignal(null);
@@ -17430,7 +17708,7 @@ function WorkspaceDock(props) {
   onMount(() => {
   });
   return (() => {
-    var _el$ = _tmpl$3$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
+    var _el$ = _tmpl$3$u(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
     insert(_el$4, createComponent(For, {
       get each() {
         return props.workspaces;
@@ -17470,7 +17748,7 @@ function WorkspaceDock(props) {
       },
       get fallback() {
         return (() => {
-          var _el$0 = _tmpl$4$i();
+          var _el$0 = _tmpl$4$o();
           _el$0.$$click = (e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setCreatePos({
@@ -17483,7 +17761,7 @@ function WorkspaceDock(props) {
         })();
       },
       get children() {
-        return _tmpl$$J();
+        return _tmpl$$Q();
       }
     }));
     insert(_el$6, createComponent(Show, {
@@ -17491,7 +17769,7 @@ function WorkspaceDock(props) {
         return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
       },
       get children() {
-        return _tmpl$2$x();
+        return _tmpl$2$C();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -17567,14 +17845,14 @@ function WorkspaceDock(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$I = /* @__PURE__ */ template(`<div id=workspace-dock class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
+var _tmpl$$P = /* @__PURE__ */ template(`<div id=workspace-dock class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
 function AppDock(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$I(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$P(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.dockRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -17658,19 +17936,19 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$H = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$h = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$O = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$n = /* @__PURE__ */ template(`<div id=window-controls class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$4$h();
+      var _el$ = _tmpl$4$n();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
       insert(_el$, createComponent(ActionTooltip, {
         label: "Minimize",
         get children() {
-          var _el$2 = _tmpl$$H();
+          var _el$2 = _tmpl$$O();
           _el$2.$$click = () => window.api?.minimizeWindow();
           return _el$2;
         }
@@ -17678,7 +17956,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Maximize",
         get children() {
-          var _el$3 = _tmpl$2$w();
+          var _el$3 = _tmpl$2$B();
           _el$3.$$click = () => window.api?.maximizeWindow();
           return _el$3;
         }
@@ -17686,7 +17964,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Close",
         get children() {
-          var _el$4 = _tmpl$3$q();
+          var _el$4 = _tmpl$3$t();
           _el$4.$$click = () => window.api?.closeWindow();
           return _el$4;
         }
@@ -17696,7 +17974,7 @@ function AppWindowControls(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$p = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$c = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+var _tmpl$$N = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$A = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$s = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$m = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$f = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$4 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
 function AppEdgeZones(props) {
   return createComponent(Show, {
     get when() {
@@ -17704,35 +17982,35 @@ function AppEdgeZones(props) {
     },
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$G();
+        var _el$ = _tmpl$$N();
         _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$v();
+        var _el$2 = _tmpl$2$A();
         _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
         return _el$2;
       })(), (() => {
-        var _el$3 = _tmpl$3$p();
+        var _el$3 = _tmpl$3$s();
         _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
         return _el$3;
       })(), (() => {
-        var _el$4 = _tmpl$4$g();
+        var _el$4 = _tmpl$4$m();
         _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
         return _el$4;
       })(), (() => {
-        var _el$5 = _tmpl$5$c();
+        var _el$5 = _tmpl$5$f();
         _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
         return _el$5;
       })(), (() => {
-        var _el$6 = _tmpl$6$6();
+        var _el$6 = _tmpl$6$7();
         _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
         return _el$6;
       })(), (() => {
-        var _el$7 = _tmpl$7$3();
+        var _el$7 = _tmpl$7$4();
         _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
         return _el$7;
       })(), (() => {
-        var _el$8 = _tmpl$8$2();
+        var _el$8 = _tmpl$8$3();
         _el$8.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
         return _el$8;
       })()];
@@ -17805,7 +18083,7 @@ function useFeaturebase() {
   };
   return { openFeedback, openUpdates, hasUnread };
 }
-var _tmpl$$F = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$u = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$o = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$f = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$b = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+var _tmpl$$M = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$z = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$r = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$l = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div id=support-cluster class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportCluster(props) {
   const {
     hasUnread
@@ -17884,7 +18162,7 @@ function SupportCluster(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$6$5(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
+      var _el$ = _tmpl$6$6(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
       insert(_el$2, createComponent(ActionTooltip, {
         get label() {
@@ -17895,7 +18173,7 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$3 = _tmpl$$F(), _el$4 = _el$3.firstChild;
+          var _el$3 = _tmpl$$M(), _el$4 = _el$3.firstChild;
           _el$3.$$click = handleOpenProfiles;
           insert(_el$4, () => (activeProfile().name || "M").charAt(0).toUpperCase());
           createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", activeProfile().color || "#4a4a49"));
@@ -17909,7 +18187,7 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$7 = _tmpl$2$u();
+          var _el$7 = _tmpl$2$z();
           _el$7.$$click = handleOpenSettings;
           return _el$7;
         }
@@ -17918,7 +18196,7 @@ function SupportCluster(props) {
         label: "Release Notes",
         placement: "right",
         get children() {
-          var _el$9 = _tmpl$4$f();
+          var _el$9 = _tmpl$4$l();
           _el$9.firstChild;
           _el$9.$$click = handleOpenUpdates;
           insert(_el$9, createComponent(Show, {
@@ -17926,7 +18204,7 @@ function SupportCluster(props) {
               return hasUnread();
             },
             get children() {
-              return _tmpl$3$o();
+              return _tmpl$3$r();
             }
           }), null);
           return _el$9;
@@ -17936,7 +18214,7 @@ function SupportCluster(props) {
         label: "Feedback & Roadmap",
         placement: "right",
         get children() {
-          var _el$11 = _tmpl$5$b();
+          var _el$11 = _tmpl$5$e();
           _el$11.$$click = handleOpenFeedback;
           return _el$11;
         }
@@ -17946,10 +18224,10 @@ function SupportCluster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$E = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$n = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$e = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$a = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$L = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$y = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$k = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$d = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActionClusterSplitBar(props) {
   return (() => {
-    var _el$ = _tmpl$5$a();
+    var _el$ = _tmpl$5$d();
     _el$.addEventListener("mouseleave", () => props.onSplitLeave?.());
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.splitBarRef;
@@ -17961,7 +18239,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$2 = _tmpl$$E();
+        var _el$2 = _tmpl$$L();
         _el$2.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$2.addEventListener("mouseenter", () => props.onSplitHover?.("left"));
         _el$2.$$click = (e) => props.onSplit("left", e);
@@ -17975,7 +18253,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$3 = _tmpl$2$t();
+        var _el$3 = _tmpl$2$y();
         _el$3.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$3.addEventListener("mouseenter", () => props.onSplitHover?.("right"));
         _el$3.$$click = (e) => props.onSplit("right", e);
@@ -17989,7 +18267,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$3$n();
+        var _el$4 = _tmpl$3$q();
         _el$4.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$4.addEventListener("mouseenter", () => props.onSplitHover?.("top"));
         _el$4.$$click = (e) => props.onSplit("top", e);
@@ -18003,7 +18281,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$5 = _tmpl$4$e();
+        var _el$5 = _tmpl$4$k();
         _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
         _el$5.$$click = (e) => props.onSplit("bottom", e);
@@ -18014,11 +18292,11 @@ function ActionClusterSplitBar(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$D = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$s = /* @__PURE__ */ template(`<button>`), _tmpl$3$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$d = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$9 = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$K = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$x = /* @__PURE__ */ template(`<button>`), _tmpl$3$p = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$j = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$c = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function ActionClusterVerticalDock(props) {
   const isMaximized = () => !!layoutStore.maximizedPaneId;
   return (() => {
-    var _el$ = _tmpl$4$d(), _el$5 = _el$.firstChild;
+    var _el$ = _tmpl$4$j(), _el$5 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.dockRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -18031,17 +18309,17 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$2 = _tmpl$2$s();
+        var _el$2 = _tmpl$2$x();
         addEventListener(_el$2, "click", props.onToggleMaximize, true);
         insert(_el$2, createComponent(Show, {
           get when() {
             return isMaximized();
           },
           get fallback() {
-            return _tmpl$5$9();
+            return _tmpl$5$c();
           },
           get children() {
-            return _tmpl$$D();
+            return _tmpl$$K();
           }
         }));
         createRenderEffect(() => className(_el$2, `w-[28px] h-[28px] rounded-lg flex items-center justify-center transition-all active:scale-95 active:shadow-double-bezel-active ${isMaximized() ? "bg-neutral-100 text-neutral-900 shadow-inner ring-1 ring-neutral-300/40" : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -18055,7 +18333,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$4 = _tmpl$3$m();
+        var _el$4 = _tmpl$3$p();
         addEventListener(_el$4, "click", props.onCreateTab, true);
         return _el$4;
       }
@@ -18083,10 +18361,689 @@ function ActionClusterVerticalDock(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$C = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$r = /* @__PURE__ */ template(`<button class="group/btn relative w-[24px] h-[24px] rounded-md hover:bg-neutral-100 flex items-center justify-center text-neutral-600 transition-all active:scale-95 active:shadow-double-bezel-active"style=-webkit-app-region:no-drag><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12>`), _tmpl$3$l = /* @__PURE__ */ template(`<div id=action-cluster class="absolute bottom-2 right-2 z-[60] w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-md flex items-center justify-center hover:bg-neutral-50 transition-colors pointer-events-auto select-none"style=-webkit-app-region:no-drag>`);
+const DEFAULT_STACKS = [
+  {
+    id: "main_stack",
+    name: "Main",
+    icon: "M",
+    apps: [
+      { id: "gmail_main", name: "Gmail", url: "https://mail.google.com", icon: "gmail", profileId: "main", unreadCount: 0 }
+    ]
+  }
+];
+const [commStore, setCommStore] = createStore({
+  isOpen: false,
+  isPinned: false,
+  isExpanded: false,
+  activeStackId: "main_stack",
+  activeTab: "gmail_main",
+  stacks: DEFAULT_STACKS,
+  notifications: []
+});
+let closeTimer = null;
+const commActions = {
+  open: (pinned = false, tab) => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+    setCommStore({
+      isOpen: true,
+      isPinned: pinned ? true : commStore.isPinned,
+      activeTab: tab || commStore.activeTab
+    });
+  },
+  keepOpen: () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  },
+  scheduleClose: (delay = 400) => {
+    if (closeTimer) clearTimeout(closeTimer);
+    if (!commStore.isPinned) {
+      closeTimer = setTimeout(() => {
+        if (!commStore.isPinned) {
+          setCommStore({ isOpen: false, isPinned: false });
+        }
+      }, delay);
+    }
+  },
+  close: () => {
+    if (closeTimer) clearTimeout(closeTimer);
+    setCommStore({ isOpen: false, isPinned: false });
+  },
+  togglePin: () => {
+    if (commStore.isOpen && commStore.isPinned) {
+      commActions.close();
+    } else {
+      commActions.open(true);
+    }
+  },
+  toggleExpand: () => {
+    setCommStore("isExpanded", (prev) => !prev);
+  },
+  setStack: (stackId) => {
+    const stack = commStore.stacks.find((s) => s.id === stackId);
+    const firstApp = stack?.apps[0]?.id || "all";
+    setCommStore({ activeStackId: stackId, activeTab: firstApp });
+  },
+  setTab: (tab, autoPin = true) => {
+    commActions.keepOpen();
+    setCommStore({
+      activeTab: tab,
+      isPinned: autoPin ? true : commStore.isPinned,
+      isOpen: true
+    });
+  },
+  addStack: (name, icon = "📁") => {
+    const newStack = {
+      id: `stack_${Date.now()}`,
+      name: name || "New Stack",
+      icon,
+      apps: []
+    };
+    setCommStore("stacks", (prev) => [...prev, newStack]);
+    setCommStore("activeStackId", newStack.id);
+  },
+  addAppToActiveStack: (app) => {
+    const sIdx = commStore.stacks.findIndex((s) => s.id === commStore.activeStackId);
+    if (sIdx === -1) return;
+    const newApp = {
+      ...app,
+      id: `app_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      unreadCount: 0
+    };
+    setCommStore("stacks", sIdx, "apps", (prev) => [...prev, newApp]);
+    setCommStore("activeTab", newApp.id);
+  },
+  removeApp: (appId) => {
+    const sIdx = commStore.stacks.findIndex((s) => s.id === commStore.activeStackId);
+    if (sIdx === -1) return;
+    setCommStore("stacks", sIdx, "apps", (prev) => prev.filter((a) => a.id !== appId));
+    if (commStore.activeTab === appId) {
+      setCommStore("activeTab", "all");
+    }
+  },
+  updateUnread: (appId, count) => {
+    for (let s = 0; s < commStore.stacks.length; s++) {
+      const idx = commStore.stacks[s].apps.findIndex((a) => a.id === appId || a.icon === appId || a.url.includes(appId));
+      if (idx !== -1) {
+        setCommStore("stacks", s, "apps", idx, "unreadCount", count);
+      }
+    }
+  },
+  addNotification: (n) => {
+    const item = {
+      ...n,
+      id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: Date.now()
+    };
+    setCommStore("notifications", (prev) => [item, ...prev].slice(0, 50));
+  }
+};
+var _tmpl$$J = /* @__PURE__ */ template(`<span>`), _tmpl$2$w = /* @__PURE__ */ template(`<button id=action-cluster style=-webkit-app-region:no-drag>`);
+function CommunicatorTrigger(props) {
+  let hoverTimer = null;
+  const totalUnread = () => commStore.stacks.flatMap((s) => s.apps).reduce((sum, a) => sum + a.unreadCount, 0);
+  const handleMouseEnter = () => {
+    props.onZoneEnter("bottomRight");
+    commActions.keepOpen();
+    if (hoverTimer) clearTimeout(hoverTimer);
+    hoverTimer = setTimeout(() => {
+      if (!commStore.isOpen && !commStore.isPinned) {
+        commActions.open(false);
+      }
+    }, 120);
+  };
+  const handleMouseLeave = () => {
+    if (hoverTimer) clearTimeout(hoverTimer);
+    commActions.scheduleClose(400);
+  };
+  const handleClick = (e) => {
+    e.stopPropagation();
+    if (hoverTimer) clearTimeout(hoverTimer);
+    commActions.togglePin();
+  };
+  onMount(() => {
+    const handleUnread = (e) => {
+      const {
+        appId,
+        unreadCount
+      } = e.detail || {};
+      if (appId && typeof unreadCount === "number") {
+        commActions.updateUnread(appId, unreadCount);
+      }
+    };
+    const handleNotif = (e) => {
+      const {
+        appId,
+        appName,
+        title,
+        snippet
+      } = e.detail || {};
+      if (title) {
+        commActions.addNotification({
+          appId: appId || "slack",
+          appName: appName || "Message",
+          title,
+          snippet: snippet || ""
+        });
+      }
+    };
+    window.addEventListener("communicator.unread-updated", handleUnread);
+    window.addEventListener("pane.unread-badge", (e) => {
+      const {
+        count
+      } = e.detail || {};
+      if (typeof count === "number") {
+        commActions.updateUnread("slack", count);
+      }
+    });
+    window.addEventListener("pane.notification-posted", handleNotif);
+    onCleanup(() => {
+      if (hoverTimer) clearTimeout(hoverTimer);
+      window.removeEventListener("communicator.unread-updated", handleUnread);
+      window.removeEventListener("pane.notification-posted", handleNotif);
+    });
+  });
+  return (() => {
+    var _el$ = _tmpl$2$w();
+    _el$.addEventListener("mouseleave", handleMouseLeave);
+    _el$.addEventListener("mouseenter", handleMouseEnter);
+    _el$.$$click = handleClick;
+    var _ref$ = props.hubRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
+    insert(_el$, createComponent(message_square_default, {
+      "class": "w-4 h-4 transition-transform group-hover:scale-105 pointer-events-none"
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return totalUnread() > 0;
+      },
+      get children() {
+        var _el$2 = _tmpl$$J();
+        insert(_el$2, (() => {
+          var _c$ = memo(() => totalUnread() > 99);
+          return () => _c$() ? "99+" : totalUnread();
+        })());
+        createRenderEffect(() => className(_el$2, `absolute -top-1 -right-1 min-w-[16px] h-[16px] px-1 rounded-full text-[9px] font-mono font-bold flex items-center justify-center border-2 shadow-sm animate-in zoom-in-50 duration-150 ${commStore.isPinned ? "bg-white text-neutral-900 border-neutral-900 dark:bg-neutral-900 dark:text-white dark:border-white" : "bg-neutral-900 text-white border-white dark:bg-white dark:text-neutral-900 dark:border-[#18181b]"}`));
+        return _el$2;
+      }
+    }), null);
+    createRenderEffect((_p$) => {
+      var _v$ = `absolute bottom-2 right-2 z-[120] flex items-center justify-center w-[40px] h-[40px] rounded-2xl transition-all duration-300 active:scale-[0.92] cursor-pointer select-none pointer-events-auto ${commStore.isPinned ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-neutral-900 dark:border-white shadow-[0_4px_16px_rgba(0,0,0,0.25)] scale-[1.03]" : "bg-white dark:bg-[#18181b] border border-neutral-200/60 dark:border-neutral-700/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] text-neutral-500 hover:text-neutral-800 dark:text-neutral-400 dark:hover:text-neutral-100 hover:bg-neutral-100 dark:hover:bg-neutral-800"}`, _v$2 = commStore.isPinned ? "Unpin Communicator" : "Communicator & Quick Actions";
+      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+      _v$2 !== _p$.t && setAttribute(_el$, "title", _p$.t = _v$2);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$I = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:border-neutral-400 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="w-[44px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-neutral-100/60 dark:bg-black/30 flex flex-col items-center py-2.5 gap-2 select-none">`), _tmpl$3$o = /* @__PURE__ */ template(`<button><span>`), _tmpl$4$i = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[10px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
+function CommunicatorStackRail() {
+  const [isAdding, setIsAdding] = createSignal(false);
+  const [newStackName, setNewStackName] = createSignal("");
+  const handleCreate = (e) => {
+    e.preventDefault();
+    if (newStackName().trim()) {
+      commActions.addStack(newStackName().trim());
+      setNewStackName("");
+      setIsAdding(false);
+    }
+  };
+  return (() => {
+    var _el$ = _tmpl$2$v();
+    insert(_el$, createComponent(For, {
+      get each() {
+        return commStore.stacks;
+      },
+      children: (st) => {
+        const isActive = () => commStore.activeStackId === st.id;
+        return createComponent(ActionTooltip, {
+          get label() {
+            return st.name;
+          },
+          placement: "right",
+          get children() {
+            var _el$3 = _tmpl$3$o(), _el$4 = _el$3.firstChild;
+            _el$3.$$click = () => commActions.setStack(st.id);
+            insert(_el$4, () => st.icon || st.name.slice(0, 1).toUpperCase());
+            createRenderEffect(() => className(_el$3, `w-8 h-8 rounded-xl flex items-center justify-center text-xs font-semibold transition-all duration-200 cursor-pointer ${isActive() ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 shadow-sm scale-105" : "bg-white/80 dark:bg-neutral-800/80 text-neutral-600 dark:text-neutral-400 hover:bg-white dark:hover:bg-neutral-700 hover:text-neutral-900 dark:hover:text-white border border-neutral-200/60 dark:border-neutral-700/60"}`));
+            return _el$3;
+          }
+        });
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return !isAdding();
+      },
+      get fallback() {
+        return (() => {
+          var _el$5 = _tmpl$4$i(), _el$6 = _el$5.firstChild;
+          _el$5.addEventListener("submit", handleCreate);
+          _el$6.$$keydown = (e) => e.key === "Escape" && setIsAdding(false);
+          _el$6.$$input = (e) => setNewStackName(e.currentTarget.value);
+          createRenderEffect(() => _el$6.value = newStackName());
+          return _el$5;
+        })();
+      },
+      get children() {
+        return createComponent(ActionTooltip, {
+          label: "New Stack Preset",
+          placement: "right",
+          get children() {
+            var _el$2 = _tmpl$$I();
+            _el$2.$$click = () => setIsAdding(true);
+            insert(_el$2, createComponent(plus_default, {
+              "class": "w-3.5 h-3.5"
+            }));
+            return _el$2;
+          }
+        });
+      }
+    }), null);
+    return _el$;
+  })();
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$H = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$u = /* @__PURE__ */ template(`<button title="Expand to Workspace Split"class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors">`), _tmpl$3$n = /* @__PURE__ */ template(`<div class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-black/[0.02] dark:bg-white/[0.02]"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[520px]"><button><span>Feed</span></button><button title="Add App to Stack"class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0"></button></div><div class="flex items-center gap-0.5 shrink-0 pl-1"><button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button><button></button><button title="Close Drawer (Esc)"class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors">`), _tmpl$4$h = /* @__PURE__ */ template(`<span class="w-2 h-2 rounded-full bg-neutral-900 dark:bg-white absolute top-0.5 right-0.5 border border-white dark:border-neutral-900">`), _tmpl$5$b = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button>`);
+function CommunicatorHeader(props) {
+  return (() => {
+    var _el$ = _tmpl$3$n(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$2.nextSibling, _el$9 = _el$7.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
+    _el$3.$$click = () => commActions.setTab("all");
+    insert(_el$3, createComponent(inbox_default, {
+      "class": "w-3.5 h-3.5"
+    }), _el$4);
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return props.totalUnread() > 0;
+      },
+      get children() {
+        var _el$5 = _tmpl$$H();
+        insert(_el$5, () => props.totalUnread());
+        return _el$5;
+      }
+    }), null);
+    insert(_el$2, createComponent(For, {
+      get each() {
+        return props.currentApps();
+      },
+      children: (app) => {
+        const isActive = () => commStore.activeTab === app.id;
+        return (() => {
+          var _el$10 = _tmpl$5$b(), _el$11 = _el$10.firstChild;
+          _el$11.$$click = () => commActions.setTab(app.id);
+          insert(_el$11, createComponent(Favicon, {
+            get url() {
+              return app.url;
+            },
+            size: 16,
+            "class": "rounded-[3px]"
+          }), null);
+          insert(_el$11, createComponent(Show, {
+            get when() {
+              return app.unreadCount > 0;
+            },
+            get children() {
+              return _tmpl$4$h();
+            }
+          }), null);
+          createRenderEffect((_p$) => {
+            var _v$5 = `${app.name} (${app.profileId})`, _v$6 = `p-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1 select-none ${isActive() ? "bg-neutral-200/80 dark:bg-neutral-700 shadow-sm" : "hover:bg-neutral-200/50 dark:hover:bg-neutral-800"}`;
+            _v$5 !== _p$.e && setAttribute(_el$11, "title", _p$.e = _v$5);
+            _v$6 !== _p$.t && className(_el$11, _p$.t = _v$6);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$10;
+        })();
+      }
+    }), _el$6);
+    addEventListener(_el$6, "click", props.onAddApp, true);
+    insert(_el$6, createComponent(plus_default, {
+      "class": "w-3.5 h-3.5"
+    }));
+    insert(_el$7, createComponent(Show, {
+      get when() {
+        return commStore.activeTab !== "all";
+      },
+      get children() {
+        var _el$8 = _tmpl$2$u();
+        _el$8.$$click = () => {
+          const current = props.currentApps().find((a) => a.id === commStore.activeTab);
+          if (current) props.onExpandToSplit(current.url, current.name);
+        };
+        insert(_el$8, createComponent(external_link_default, {
+          "class": "w-3.5 h-3.5"
+        }));
+        return _el$8;
+      }
+    }), _el$9);
+    addEventListener(_el$9, "click", commActions.toggleExpand, true);
+    insert(_el$9, createComponent(Show, {
+      get when() {
+        return commStore.isExpanded;
+      },
+      get fallback() {
+        return createComponent(maximize_2_default, {
+          "class": "w-3.5 h-3.5"
+        });
+      },
+      get children() {
+        return createComponent(minimize_2_default, {
+          "class": "w-3.5 h-3.5"
+        });
+      }
+    }));
+    addEventListener(_el$0, "click", commActions.togglePin, true);
+    insert(_el$0, createComponent(pin_default, {
+      "class": "w-3.5 h-3.5"
+    }));
+    addEventListener(_el$1, "click", commActions.close, true);
+    insert(_el$1, createComponent(x_default, {
+      "class": "w-3.5 h-3.5"
+    }));
+    createRenderEffect((_p$) => {
+      var _v$ = `px-2 py-1 rounded-lg text-xs font-medium transition-all flex items-center gap-1 shrink-0 select-none ${commStore.activeTab === "all" ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 shadow-sm" : "text-neutral-600 dark:text-neutral-400 hover:bg-neutral-200/60 dark:hover:bg-neutral-800"}`, _v$2 = commStore.isExpanded ? "Collapse Size" : "Expand Height", _v$3 = commStore.isPinned ? "Unpin Drawer" : "Pin Drawer Open", _v$4 = `p-1.5 rounded-lg transition-colors text-xs ${commStore.isPinned ? "bg-neutral-200 dark:bg-neutral-700 text-neutral-900 dark:text-white" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`;
+      _v$ !== _p$.e && className(_el$3, _p$.e = _v$);
+      _v$2 !== _p$.t && setAttribute(_el$9, "title", _p$.t = _v$2);
+      _v$3 !== _p$.a && setAttribute(_el$0, "title", _p$.a = _v$3);
+      _v$4 !== _p$.o && className(_el$0, _p$.o = _v$4);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$G = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$t = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415]">`), _tmpl$3$m = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 select-none animate-in fade-in duration-200"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-inner"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications from <!> will appear here in real time.`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/60 dark:bg-neutral-900/60 hover:bg-neutral-100/80 dark:hover:bg-neutral-800/80 transition-all cursor-pointer group select-none shadow-[0_1px_3px_rgba(0,0,0,0.04)]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
+function CommunicatorFeed() {
+  const activeStack = () => commStore.stacks.find((s) => s.id === commStore.activeStackId) || commStore.stacks[0];
+  return (() => {
+    var _el$ = _tmpl$2$t();
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return commStore.notifications.length > 0;
+      },
+      get fallback() {
+        return (() => {
+          var _el$3 = _tmpl$3$m(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+          _el$9.nextSibling;
+          insert(_el$4, createComponent(inbox_default, {
+            "class": "w-5 h-5 text-neutral-400 dark:text-neutral-500"
+          }));
+          insert(_el$6, () => activeStack().name, _el$9);
+          return _el$3;
+        })();
+      },
+      get children() {
+        var _el$2 = _tmpl$$G();
+        insert(_el$2, createComponent(For, {
+          get each() {
+            return commStore.notifications;
+          },
+          children: (item) => (() => {
+            var _el$0 = _tmpl$4$g(), _el$1 = _el$0.firstChild, _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling, _el$12 = _el$1.nextSibling, _el$13 = _el$12.nextSibling;
+            _el$0.$$click = () => commActions.setTab(item.appId);
+            insert(_el$10, () => item.appName);
+            insert(_el$11, () => new Date(item.timestamp).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit"
+            }));
+            insert(_el$12, () => item.title);
+            insert(_el$13, () => item.snippet);
+            return _el$0;
+          })()
+        }));
+        return _el$2;
+      }
+    }));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$F = /* @__PURE__ */ template(`<div class="absolute top-11 right-2 z-[60] w-[360px] bg-white dark:bg-[#18181b] border border-neutral-200/90 dark:border-neutral-700/90 rounded-2xl shadow-[0_20px_40px_-8px_rgba(0,0,0,0.3)] p-3.5 flex flex-col gap-3 animate-in fade-in zoom-in-95 duration-150 select-none"><div class="flex items-center justify-between border-b border-neutral-100 dark:border-neutral-800 pb-2"><div><h4 class="text-xs font-semibold text-neutral-900 dark:text-white">Add App to Stack</h4><p class="text-[10px] text-neutral-400">Quick add popular messengers or custom URLs</p></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button></div><div class="flex items-center justify-between bg-neutral-50 dark:bg-neutral-800/60 px-2.5 py-1.5 rounded-xl text-[11px]"><span class="text-neutral-500 font-medium">Session Auth:</span><select class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg px-2 py-0.5 text-[11px] focus:outline-none cursor-pointer"><option value=main>Main Workspace</option><option value=personal>Personal Profile</option><option value=work>Work Profile</option></select></div><div class="grid grid-cols-3 gap-1.5 max-h-[180px] overflow-y-auto pr-0.5"></div><form class="flex gap-1.5 border-t border-neutral-100 dark:border-neutral-800 pt-2.5"><input type=text placeholder="Custom URL (e.g. linear.app)"class="flex-1 text-[11px] px-2.5 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><button type=submit class="px-2.5 py-1.5 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-medium flex items-center gap-1 hover:opacity-90 transition-opacity cursor-pointer shrink-0"><span>Add`), _tmpl$2$s = /* @__PURE__ */ template(`<button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50/60 dark:bg-neutral-800/40 hover:bg-neutral-100 dark:hover:bg-neutral-800 text-left transition-all group cursor-pointer"><span class="text-[11px] font-medium text-neutral-700 dark:text-neutral-300 truncate">`);
+const POPULAR_APPS = [{
+  name: "Gmail",
+  url: "https://mail.google.com",
+  icon: "gmail"
+}, {
+  name: "Slack",
+  url: "https://app.slack.com/client",
+  icon: "slack"
+}, {
+  name: "WhatsApp",
+  url: "https://web.whatsapp.com",
+  icon: "whatsapp"
+}, {
+  name: "Telegram",
+  url: "https://web.telegram.org",
+  icon: "telegram"
+}, {
+  name: "Discord",
+  url: "https://discord.com/app",
+  icon: "discord"
+}, {
+  name: "Linear",
+  url: "https://linear.app/inbox",
+  icon: "linear"
+}, {
+  name: "Notion",
+  url: "https://www.notion.so",
+  icon: "notion"
+}, {
+  name: "GitHub",
+  url: "https://github.com/notifications",
+  icon: "github"
+}, {
+  name: "Teams",
+  url: "https://teams.microsoft.com",
+  icon: "teams"
+}, {
+  name: "Twitter / X",
+  url: "https://x.com/messages",
+  icon: "twitter"
+}, {
+  name: "ChatGPT",
+  url: "https://chatgpt.com",
+  icon: "chatgpt"
+}, {
+  name: "Claude",
+  url: "https://claude.ai",
+  icon: "claude"
+}];
+function AddAppPopover(props) {
+  const [customName] = createSignal("");
+  const [customUrl, setCustomUrl] = createSignal("");
+  const [profileId, setProfileId] = createSignal("main");
+  const handleAddPreset = (app) => {
+    commActions.addAppToActiveStack({
+      name: app.name,
+      url: app.url,
+      icon: app.icon,
+      profileId: profileId()
+    });
+    props.onClose();
+  };
+  const handleAddCustom = (e) => {
+    e.preventDefault();
+    if (!customUrl().trim()) return;
+    const url = customUrl().trim().startsWith("http") ? customUrl().trim() : `https://${customUrl().trim()}`;
+    const name = customName().trim() || new URL(url).hostname;
+    commActions.addAppToActiveStack({
+      name,
+      url,
+      icon: name.toLowerCase(),
+      profileId: profileId()
+    });
+    props.onClose();
+  };
+  return (() => {
+    var _el$ = _tmpl$$F(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+    _el$.$$click = (e) => e.stopPropagation();
+    addEventListener(_el$4, "click", props.onClose, true);
+    insert(_el$4, createComponent(x_default, {
+      "class": "w-3.5 h-3.5"
+    }));
+    _el$7.addEventListener("change", (e) => setProfileId(e.currentTarget.value));
+    insert(_el$8, createComponent(For, {
+      each: POPULAR_APPS,
+      children: (app) => (() => {
+        var _el$11 = _tmpl$2$s(), _el$12 = _el$11.firstChild;
+        _el$11.$$click = () => handleAddPreset(app);
+        insert(_el$11, createComponent(Favicon, {
+          get url() {
+            return app.url;
+          },
+          size: 14,
+          "class": "rounded-[3px] shrink-0"
+        }), _el$12);
+        insert(_el$12, () => app.name);
+        return _el$11;
+      })()
+    }));
+    _el$9.addEventListener("submit", handleAddCustom);
+    _el$0.$$input = (e) => setCustomUrl(e.currentTarget.value);
+    insert(_el$1, createComponent(plus_default, {
+      "class": "w-3 h-3"
+    }), _el$10);
+    createRenderEffect(() => _el$7.value = profileId());
+    createRenderEffect(() => _el$0.value = customUrl());
+    return _el$;
+  })();
+}
+delegateEvents(["click", "input"]);
+var _tmpl$$E = /* @__PURE__ */ template(`<div><div class="flex-1 flex flex-col min-w-0 h-full"><div class="flex-1 w-full h-full relative overflow-hidden bg-white dark:bg-neutral-900">`);
+function CommunicatorDrawer(props) {
+  let containerRef;
+  const [showAddModal, setShowAddModal] = createSignal(false);
+  const activeStack = () => commStore.stacks.find((s) => s.id === commStore.activeStackId) || commStore.stacks[0];
+  const currentApps = () => activeStack()?.apps || [];
+  const handleExpandToSplit = (url, name) => {
+    commActions.close();
+    props.ws?.handleSplit?.(props.ws.activePaneId?.() || "root", "right");
+    setTimeout(() => {
+      const activeId = props.ws.activePaneId?.();
+      if (activeId) {
+        props.ws.handleUpdatePane?.(activeId, {
+          url,
+          title: name
+        });
+      }
+    }, 100);
+  };
+  const updateViewBounds = () => {
+    const tab = commStore.activeTab;
+    const stack = activeStack();
+    const app = stack?.apps.find((a) => a.id === tab);
+    if (commStore.isOpen && !showAddModal() && tab !== "all" && app && containerRef) {
+      const rect = containerRef.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const partition = app.profileId === "main" ? "persist:main" : `persist:${app.profileId}`;
+        window.api?.showCommunicatorDrawer?.(app.id, {
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        }, partition, app.url);
+      }
+    } else {
+      window.api?.hideCommunicatorDrawer?.();
+    }
+  };
+  createEffect(() => {
+    commStore.isOpen;
+    commStore.activeTab;
+    commStore.activeStackId;
+    showAddModal();
+    commStore.isExpanded;
+    updateViewBounds();
+    let start = performance.now();
+    let frameId;
+    const loop = (now) => {
+      updateViewBounds();
+      if (now - start < 320) {
+        frameId = requestAnimationFrame(loop);
+      }
+    };
+    frameId = requestAnimationFrame(loop);
+    onCleanup(() => cancelAnimationFrame(frameId));
+  });
+  let resizeObserver = null;
+  createEffect(() => {
+    if (containerRef) {
+      resizeObserver = new ResizeObserver(() => updateViewBounds());
+      resizeObserver.observe(containerRef);
+    }
+  });
+  createEffect(() => {
+    window.addEventListener("resize", updateViewBounds);
+    onCleanup(() => {
+      window.removeEventListener("resize", updateViewBounds);
+      resizeObserver?.disconnect();
+      window.api?.hideCommunicatorDrawer?.();
+    });
+  });
+  const totalUnread = () => commStore.stacks.flatMap((s) => s.apps).reduce((acc, a) => acc + a.unreadCount, 0);
+  return createComponent(Show, {
+    get when() {
+      return commStore.isOpen;
+    },
+    get children() {
+      var _el$ = _tmpl$$E(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      _el$.$$click = (e) => e.stopPropagation();
+      _el$.addEventListener("mouseleave", () => commActions.scheduleClose(350));
+      addEventListener(_el$, "mouseenter", commActions.keepOpen);
+      _el$.addEventListener("transitionend", updateViewBounds);
+      insert(_el$, createComponent(CommunicatorStackRail, {}), _el$2);
+      insert(_el$2, createComponent(CommunicatorHeader, {
+        currentApps,
+        totalUnread,
+        onAddApp: () => setShowAddModal(true),
+        onExpandToSplit: handleExpandToSplit
+      }), _el$3);
+      var _ref$ = containerRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$3) : containerRef = _el$3;
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return commStore.activeTab === "all";
+        },
+        get children() {
+          return createComponent(CommunicatorFeed, {});
+        }
+      }));
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return showAddModal();
+        },
+        get children() {
+          return createComponent(AddAppPopover, {
+            onClose: () => setShowAddModal(false)
+          });
+        }
+      }), null);
+      createRenderEffect(() => className(_el$, `fixed right-[64px] bottom-[64px] z-[130] bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_40px_-8px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl flex overflow-hidden transition-all duration-300 pointer-events-auto font-sans ${commStore.isExpanded ? "w-[920px] h-[calc(100vh-80px)] max-h-[960px]" : "w-[660px] h-[680px]"}`));
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$D = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
 function ActionCluster(props) {
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
-  const [isSpinning, setIsSpinning] = createSignal(false);
+  createSignal(false);
   const activePaneId = () => props.ws.activePaneId() || props.ws.findFirstPane?.(layoutStore.rootId) || layoutStore.rootId;
   const activeNode = () => {
     const node2 = layoutStore.nodes[activePaneId()];
@@ -18122,15 +19079,6 @@ function ActionCluster(props) {
   const handleSplitLeave = () => {
     setLayoutStore("splitPreview", null);
   };
-  const handleHubClick = (e) => {
-    e.stopPropagation();
-    window.dispatchEvent(new CustomEvent("app:zone-leave"));
-  };
-  const handleHubDblClick = (e) => {
-    e.stopPropagation();
-    setIsSpinning(true);
-    setTimeout(() => setIsSpinning(false), 700);
-  };
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
@@ -18141,7 +19089,7 @@ function ActionCluster(props) {
           return showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$C();
+          var _el$ = _tmpl$$D();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             setShowProfileMenu(false);
@@ -18178,35 +19126,23 @@ function ActionCluster(props) {
         get onUpdatePane() {
           return props.ws.handleUpdatePane;
         }
-      }), (() => {
-        var _el$2 = _tmpl$3$l();
-        _el$2.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
-        var _ref$ = props.hubRef;
-        typeof _ref$ === "function" ? use(_ref$, _el$2) : props.hubRef = _el$2;
-        insert(_el$2, createComponent(ActionTooltip, {
-          label: "Quick Actions",
-          placement: "top",
-          get children() {
-            var _el$3 = _tmpl$2$r(), _el$4 = _el$3.firstChild;
-            _el$3.addEventListener("auxclick", (e) => {
-              if (e.button === 1) {
-                e.stopPropagation();
-                props.ws.handleCreateTab();
-              }
-            });
-            _el$3.$$dblclick = handleHubDblClick;
-            _el$3.$$click = handleHubClick;
-            createRenderEffect(() => setAttribute(_el$4, "class", `transition-transform ${isSpinning() ? "rotate-[360deg] duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)]" : "group-hover/btn:rotate-45 duration-500 ease-[cubic-bezier(0.32,0.72,0,1)]"}`));
-            return _el$3;
-          }
-        }));
-        return _el$2;
-      })()];
+      }), createComponent(CommunicatorDrawer, {
+        get ws() {
+          return props.ws;
+        }
+      }), createComponent(CommunicatorTrigger, {
+        get hubRef() {
+          return props.hubRef;
+        },
+        get onZoneEnter() {
+          return props.onZoneEnter;
+        }
+      })];
     }
   });
 }
-delegateEvents(["pointerdown", "click", "dblclick"]);
-var _tmpl$$B = /* @__PURE__ */ template(`<div><div>`);
+delegateEvents(["pointerdown"]);
+var _tmpl$$C = /* @__PURE__ */ template(`<div><div>`);
 const STYLE_MAP = {
   md: {
     outer: "rounded-xl p-[3px]",
@@ -18256,7 +19192,7 @@ function DoubleBezel(rawProps) {
   const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
   const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
   return (() => {
-    var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$C(), _el$2 = _el$.firstChild;
     spread(_el$, mergeProps({
       get ["class"]() {
         return `${outerBg} ${outerBorder} overflow-hidden flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
@@ -18275,7 +19211,7 @@ function DoubleBezel(rawProps) {
     return _el$;
   })();
 }
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$q = /* @__PURE__ */ template(`<input type=text class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+var _tmpl$$B = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$r = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$l = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$f = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
 function CommandBar(props) {
   const [isFocused, setIsFocused] = createSignal(false);
   let inputEl;
@@ -18312,7 +19248,7 @@ function CommandBar(props) {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$4$c(), _el$5 = _el$4.firstChild;
+            var _el$4 = _tmpl$4$f(), _el$5 = _el$4.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = !!isFocused(), _v$5 = !isFocused();
               _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
@@ -18326,12 +19262,12 @@ function CommandBar(props) {
           })();
         },
         get children() {
-          var _el$ = _tmpl$$A();
+          var _el$ = _tmpl$$B();
           insert(_el$, () => props.icon);
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$2$q();
+        var _el$2 = _tmpl$2$r();
         _el$2.addEventListener("blur", handleBlur);
         _el$2.addEventListener("focus", handleFocus);
         addEventListener(_el$2, "keydown", props.onKeyDown, true);
@@ -18344,6 +19280,7 @@ function CommandBar(props) {
             props.ref = el;
           }
         }, _el$2);
+        setAttribute(_el$2, "spellcheck", false);
         createRenderEffect((_p$) => {
           var _v$ = props.id, _v$2 = props.autofocus, _v$3 = props.placeholder || "Search Google or type a web address...";
           _v$ !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$);
@@ -18355,14 +19292,14 @@ function CommandBar(props) {
           t: void 0,
           a: void 0
         });
-        createRenderEffect(() => _el$2.value = props.value);
+        createRenderEffect(() => _el$2.value = props.value ?? "");
         return _el$2;
       })(), createComponent(Show, {
         get when() {
           return props.rightElement;
         },
         get children() {
-          var _el$3 = _tmpl$3$k();
+          var _el$3 = _tmpl$3$l();
           insert(_el$3, () => props.rightElement);
           return _el$3;
         }
@@ -18372,7 +19309,7 @@ function CommandBar(props) {
 }
 delegateEvents(["input", "keydown"]);
 delegateEvents(["click"]);
-var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$p = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$j = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$8 = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+var _tmpl$$A = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$q = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$a = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
 function CommandPalette(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -18435,7 +19372,7 @@ function CommandPalette(props) {
       return isOpen();
     },
     get children() {
-      var _el$ = _tmpl$4$b();
+      var _el$ = _tmpl$4$e();
       _el$.$$click = () => setIsOpen(false);
       insert(_el$, createComponent(DoubleBezel, {
         size: "lg",
@@ -18445,7 +19382,7 @@ function CommandPalette(props) {
         onClick: (e) => e.stopPropagation(),
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$z(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$A(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$2.$$click = () => inputRef?.focus();
             _el$4.$$keydown = handleKeyDown;
             _el$4.$$input = (e) => {
@@ -18457,13 +19394,13 @@ function CommandPalette(props) {
             createRenderEffect(() => _el$4.value = query());
             return _el$2;
           })(), (() => {
-            var _el$5 = _tmpl$3$j(), _el$8 = _el$5.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
+            var _el$5 = _tmpl$3$k(), _el$8 = _el$5.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling;
             insert(_el$5, createComponent(Show, {
               get when() {
                 return matchingWorkspaces().length > 0;
               },
               get children() {
-                var _el$6 = _tmpl$2$p();
+                var _el$6 = _tmpl$2$q();
                 _el$6.firstChild;
                 insert(_el$6, createComponent(For, {
                   get each() {
@@ -18472,7 +19409,7 @@ function CommandPalette(props) {
                   children: (ws, idx) => {
                     const isFocused = () => activeIdx() === idx();
                     return (() => {
-                      var _el$10 = _tmpl$5$8(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
+                      var _el$10 = _tmpl$5$a(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
                       _el$10.addEventListener("mouseenter", () => setActiveIdx(idx()));
                       _el$10.$$click = () => handleSelectWorkspace(ws.id);
                       insert(_el$12, createComponent(WorkspaceIcon, {
@@ -18529,7 +19466,7 @@ function CommandPalette(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$y = /* @__PURE__ */ template(`<div><div></div><div>`);
+var _tmpl$$z = /* @__PURE__ */ template(`<div><div></div><div>`);
 function Resizer(props) {
   const onPointerDown = (e) => {
     e.preventDefault();
@@ -18605,7 +19542,7 @@ function Resizer(props) {
     window.addEventListener("mouseleave", onPointerUp);
   };
   return (() => {
-    var _el$ = _tmpl$$y(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$.$$pointerdown = onPointerDown;
     createRenderEffect((_p$) => {
       var _v$ = `relative flex items-center justify-center bg-transparent z-20 group pointer-events-auto shrink-0 ${props.isHorizontal ? "w-3 cursor-col-resize -mx-1.5" : "h-3 cursor-row-resize -my-1.5"}`, _v$2 = `bg-transparent group-hover:bg-neutral-400/60 group-active:bg-neutral-800 transition-colors duration-150 ${props.isHorizontal ? "w-[1px] h-full" : "h-[1px] w-full"}`, _v$3 = `absolute rounded-full bg-neutral-200 border border-neutral-400/50 shadow-sm opacity-0 group-hover:opacity-100 group-active:scale-95 transition-all duration-150 ${props.isHorizontal ? "w-1 h-6" : "h-1 w-6"}`;
@@ -18743,7 +19680,7 @@ function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximized
   traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
   return result;
 }
-var _tmpl$$x = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$o = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$i = /* @__PURE__ */ template(`<button>`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$4 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$2 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$y = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$p = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$j = /* @__PURE__ */ template(`<button>`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$9 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$3 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function PaneIsland(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -18759,7 +19696,7 @@ function PaneIsland(props) {
           return showSplitMenu() || showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$x();
+          var _el$ = _tmpl$$y();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             setShowSplitMenu(false);
@@ -18768,7 +19705,7 @@ function PaneIsland(props) {
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$6$4(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
+        var _el$2 = _tmpl$6$5(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
         insert(_el$4, createComponent(ProfileMenu$1, {
           get node() {
             return props.node;
@@ -18800,7 +19737,7 @@ function PaneIsland(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$7 = _tmpl$3$i();
+            var _el$7 = _tmpl$3$j();
             _el$7.$$click = (e) => {
               e.stopPropagation();
               setLayoutStore("maximizedPaneId", isMaximized() ? null : props.node.id);
@@ -18811,10 +19748,10 @@ function PaneIsland(props) {
                 return isMaximized();
               },
               get fallback() {
-                return _tmpl$7$2();
+                return _tmpl$7$3();
               },
               get children() {
-                return _tmpl$2$o();
+                return _tmpl$2$p();
               }
             }));
             createRenderEffect(() => className(_el$7, `w-7 h-7 rounded-[10px] flex items-center justify-center transition-all active:scale-95 shrink-0 ${isMaximized() ? "bg-neutral-900 text-white shadow-sm" : "text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -18825,7 +19762,7 @@ function PaneIsland(props) {
           label: "Drag to Move",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$a();
+            var _el$0 = _tmpl$4$d();
             _el$0.$$pointerdown = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -18844,7 +19781,7 @@ function PaneIsland(props) {
           shortcut: "Ctrl+W",
           placement: "bottom",
           get children() {
-            var _el$10 = _tmpl$5$7();
+            var _el$10 = _tmpl$5$9();
             _el$10.$$click = (e) => {
               e.stopPropagation();
               props.onClose(props.node.id);
@@ -18871,7 +19808,7 @@ function PaneIsland(props) {
   });
 }
 delegateEvents(["pointerdown", "click"]);
-var _tmpl$$w = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$9 = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$x = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$i = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function PaneNode(props) {
   const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
   const isTarget = () => props.dragTarget?.id === props.node.id;
@@ -18915,13 +19852,13 @@ function PaneNode(props) {
     },
     get fallback() {
       return (() => {
-        var _el$13 = _tmpl$4$9(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
+        var _el$13 = _tmpl$4$c(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
         insert(_el$15, () => props.node.title || "Split Preview");
         return _el$13;
       })();
     },
     get children() {
-      var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
+      var _el$ = _tmpl$3$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
       _el$.$$click = () => {
         props.onActivePaneChange(props.node.id);
         PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
@@ -18935,7 +19872,7 @@ function PaneNode(props) {
           return memo(() => !!isTarget())() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "top");
         },
         get children() {
-          var _el$4 = _tmpl$$w();
+          var _el$4 = _tmpl$$x();
           insert(_el$4, () => props.dragTarget?.direction === "left" ? "Drop Left" : "Drop Top");
           return _el$4;
         }
@@ -18945,7 +19882,7 @@ function PaneNode(props) {
           return memo(() => !!isTarget())() && props.dragTarget?.direction === "replace";
         },
         get children() {
-          return _tmpl$2$n();
+          return _tmpl$2$o();
         }
       }), null);
       insert(_el$3, createComponent(Show, {
@@ -18953,7 +19890,7 @@ function PaneNode(props) {
           return memo(() => !!isTarget())() && (props.dragTarget?.direction === "right" || props.dragTarget?.direction === "bottom");
         },
         get children() {
-          var _el$7 = _tmpl$$w();
+          var _el$7 = _tmpl$$x();
           insert(_el$7, () => props.dragTarget?.direction === "right" ? "Drop Right" : "Drop Bottom");
           return _el$7;
         }
@@ -19018,7 +19955,7 @@ function PaneNode(props) {
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$v = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$m = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$w = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div>`);
 function LayoutNode(props) {
   const node2 = () => (props.nodes || layoutStore.nodes)[props.nodeId];
   return createComponent(Show, {
@@ -19067,13 +20004,13 @@ function LayoutNode(props) {
       });
     },
     get children() {
-      var _el$ = _tmpl$2$m();
+      var _el$ = _tmpl$2$n();
       insert(_el$, createComponent(Show, {
         get when() {
           return props.activeDragId !== node2().a;
         },
         get children() {
-          var _el$2 = _tmpl$$v();
+          var _el$2 = _tmpl$$w();
           insert(_el$2, createComponent(LayoutNode, {
             get nodeId() {
               return node2().a;
@@ -19134,7 +20071,7 @@ function LayoutNode(props) {
           return props.activeDragId !== node2().b;
         },
         get children() {
-          var _el$3 = _tmpl$$v();
+          var _el$3 = _tmpl$$w();
           insert(_el$3, createComponent(LayoutNode, {
             get nodeId() {
               return node2().b;
@@ -19179,7 +20116,7 @@ function LayoutNode(props) {
     }
   });
 }
-var _tmpl$$u = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
+var _tmpl$$v = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
 function AbsolutePane(props) {
   let paneRef;
   const [style$1, setStyle] = createSignal({
@@ -19213,14 +20150,12 @@ function AbsolutePane(props) {
         height: "0px",
         opacity: "0"
       });
-      if (props.paneId) {
-        window.api?.viewSetBounds?.(props.paneId, {
-          x: -1e4,
-          y: -1e4,
-          width: 0,
-          height: 0
-        });
-      }
+      if (props.paneId) window.api?.viewSetBounds?.(props.paneId, {
+        x: -1e4,
+        y: -1e4,
+        width: 0,
+        height: 0
+      });
       return;
     }
     const rect = target.getBoundingClientRect();
@@ -19231,14 +20166,12 @@ function AbsolutePane(props) {
         ...s,
         opacity: "0"
       }));
-      if (props.paneId) {
-        window.api?.viewSetBounds?.(props.paneId, {
-          x: -1e4,
-          y: -1e4,
-          width: 0,
-          height: 0
-        });
-      }
+      if (props.paneId) window.api?.viewSetBounds?.(props.paneId, {
+        x: -1e4,
+        y: -1e4,
+        width: 0,
+        height: 0
+      });
       return;
     }
     if (rect.width === 0 && rect.height === 0) {
@@ -19304,11 +20237,16 @@ function AbsolutePane(props) {
         setTimeout(() => setIsFlashing(false), 400);
       }
     };
+    const handleTransitionEnd = () => {
+      window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    };
+    paneRef?.addEventListener("transitionend", handleTransitionEnd);
     window.addEventListener("pane-target-mounted", onTargetMounted);
     window.addEventListener("app:dragend", scheduleUpdate);
     window.addEventListener("app:layout-sync", onLayoutSync);
     onCleanup(() => {
       if (rafId !== null) cancelAnimationFrame(rafId);
+      paneRef?.removeEventListener("transitionend", handleTransitionEnd);
       window.removeEventListener("pane-target-mounted", onTargetMounted);
       window.removeEventListener("app:dragend", scheduleUpdate);
       window.removeEventListener("app:layout-sync", onLayoutSync);
@@ -19317,7 +20255,7 @@ function AbsolutePane(props) {
     });
   });
   return (() => {
-    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$v(), _el$2 = _el$.firstChild;
     var _ref$ = paneRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
     insert(_el$2, () => props.children);
@@ -19333,7 +20271,7 @@ function AbsolutePane(props) {
         "box-shadow": props.isDragging ? "0 25px 50px -12px rgba(0, 0, 0, 0.45)" : "",
         opacity: props.isReplaceTarget ? "0.4" : props.isDragging ? "0.92" : "1",
         filter: props.isDragging ? "blur(0.2px)" : "none"
-      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border ${props.isActive ? "border-neutral-300 dark:border-neutral-700 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_2px_12px_rgba(0,0,0,0.06)]" : "border-neutral-200/50 dark:border-neutral-800 shadow-[0_2px_8px_rgba(0,0,0,0.04)]"} overflow-hidden relative z-50 transition-all ${isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
+      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border ${props.isActive ? "border-neutral-300/90 dark:border-neutral-700/90 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_0_0_8px_#F7F7F5,0_2px_12px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.85)] dark:shadow-[0_0_0_8px_#121212,0_2px_12px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)]" : "border-neutral-200/80 dark:border-neutral-800/80 shadow-[0_0_0_8px_#F7F7F5,0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.5)] dark:shadow-[0_0_0_8px_#121212,0_2px_8px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.04)]"} overflow-hidden relative z-50 transition-all ${isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
       _v$ !== _p$.e && className(_el$, _p$.e = _v$);
       _p$.t = style(_el$, _v$2, _p$.t);
       _v$3 !== _p$.a && setAttribute(_el$, "data-target-id", _p$.a = _v$3);
@@ -19348,6 +20286,62 @@ function AbsolutePane(props) {
     return _el$;
   })();
 }
+function useDefaultPanelKeyEvents(params) {
+  const handleKeyDown = (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "Tab") {
+      const suggestionsList = params.allSuggestions();
+      if (suggestionsList.length > 0) {
+        e.preventDefault();
+        const idx = params.activeSuggestionIdx() >= 0 ? params.activeSuggestionIdx() : 0;
+        const target = suggestionsList[idx];
+        if (target) {
+          if (target.shortcutPrefix) {
+            params.setUrlInput(target.shortcutPrefix);
+          } else if (target.type === "google") {
+            params.setUrlInput(target.label);
+          } else if (target.type === "app" && target.appItem?.domain) {
+            params.setUrlInput(target.appItem.domain);
+          } else {
+            params.setUrlInput(target.value);
+          }
+          params.setActiveSuggestionIdx(-1);
+        }
+      }
+      return;
+    }
+    if (e.key === "ArrowDown") {
+      if (params.allSuggestions().length > 0) {
+        e.preventDefault();
+        params.setActiveSuggestionIdx(
+          (prev) => Math.min(prev + 1, params.allSuggestions().length - 1)
+        );
+      } else {
+        e.preventDefault();
+        params.setActiveView("notes");
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      params.setActiveSuggestionIdx((prev) => Math.max(prev - 1, -1));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const idx = params.activeSuggestionIdx();
+      const suggestionsList = params.allSuggestions();
+      if (idx >= 0 && idx < suggestionsList.length) {
+        params.executeSearchSuggestion(suggestionsList[idx]);
+      } else if (params.urlInput().trim()) {
+        const targetUrl = resolveInputUrl(params.urlInput().trim());
+        params.handleLaunchUrl(targetUrl);
+      }
+    } else if (e.key === "Escape") {
+      params.setShowSuggestions(false);
+      params.setActiveSuggestionIdx(-1);
+      params.getSearchInputEl()?.blur();
+      params.setActiveView("notes");
+    }
+  };
+  return { handleKeyDown };
+}
 function useDefaultPanelController(props) {
   const [urlInput, setUrlInput] = createSignal(
     layoutStore.nodes[props.id]?.inputValue || ""
@@ -19356,12 +20350,6 @@ function useDefaultPanelController(props) {
   const [showAddCustomModal, setShowAddCustomModal] = createSignal(false);
   const [newAppUrl, setNewAppUrl] = createSignal("");
   const [activeView, setActiveView] = createSignal("command");
-  createEffect(() => {
-    const savedValue = layoutStore.nodes[props.id]?.inputValue;
-    if (savedValue !== void 0 && savedValue !== urlInput()) {
-      setUrlInput(savedValue);
-    }
-  });
   const {
     profileApps,
     handleSaveCustomApp,
@@ -19375,7 +20363,8 @@ function useDefaultPanelController(props) {
     activeSuggestionIdx,
     setActiveSuggestionIdx,
     showSuggestions,
-    setShowSuggestions
+    setShowSuggestions,
+    isDomainPattern: isDomainPattern2
   } = useSearchSuggestions(urlInput, profileApps);
   let searchInputRef;
   let suggestionsContainerRef;
@@ -19401,38 +20390,18 @@ function useDefaultPanelController(props) {
     }
     handleLaunchUrl(item.value);
   };
-  const handleKeyDown = (e) => {
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === "ArrowDown") {
-      if (allSuggestions().length > 0) {
-        e.preventDefault();
-        setActiveSuggestionIdx(
-          (prev) => Math.min(prev + 1, allSuggestions().length - 1)
-        );
-      } else {
-        e.preventDefault();
-        setActiveView("notes");
-      }
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setActiveSuggestionIdx((prev) => Math.max(prev - 1, -1));
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      const idx = activeSuggestionIdx();
-      const suggestionsList = allSuggestions();
-      if (idx >= 0 && idx < suggestionsList.length) {
-        executeSearchSuggestion(suggestionsList[idx]);
-      } else if (urlInput().trim()) {
-        const targetUrl = resolveInputUrl(urlInput().trim());
-        handleLaunchUrl(targetUrl);
-      }
-    } else if (e.key === "Escape") {
-      setShowSuggestions(false);
-      setActiveSuggestionIdx(-1);
-      searchInputRef?.blur();
-      setActiveView("notes");
-    }
-  };
+  const { handleKeyDown } = useDefaultPanelKeyEvents({
+    urlInput,
+    setUrlInput,
+    allSuggestions,
+    activeSuggestionIdx,
+    setActiveSuggestionIdx,
+    setShowSuggestions,
+    setActiveView,
+    getSearchInputEl: () => searchInputRef,
+    executeSearchSuggestion,
+    handleLaunchUrl
+  });
   const handleGlobalMouseDown = (e) => {
     const target = e.target;
     if (suggestionsContainerRef && !suggestionsContainerRef.contains(target) && searchInputRef && !searchInputRef.contains(target)) {
@@ -19444,8 +20413,6 @@ function useDefaultPanelController(props) {
   };
   onMount(() => {
     window.addEventListener("mousedown", handleGlobalMouseDown);
-    const currentInput = layoutStore.nodes[props.id]?.inputValue;
-    if (currentInput) setUrlInput(currentInput);
     const handleFocus = () => {
       const globalActiveId = window.activePaneIdForFocus;
       const isActuallyActive = globalActiveId ? globalActiveId === props.id : props.isActivePane;
@@ -19498,10 +20465,11 @@ function useDefaultPanelController(props) {
     },
     handleLaunchUrl,
     executeSearchSuggestion,
-    handleKeyDown
+    handleKeyDown,
+    isDomainPattern: isDomainPattern2
   };
 }
-var _tmpl$$t = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
+var _tmpl$$u = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
 function WorkspaceNotes(props) {
   const [notes, setNotes] = createSignal("");
   let textareaRef;
@@ -19529,7 +20497,7 @@ function WorkspaceNotes(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
     _el$.$$click = () => {
       if (textareaRef) {
         textareaRef.focus();
@@ -19546,14 +20514,14 @@ function WorkspaceNotes(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$s = /* @__PURE__ */ template(`<div class="fixed inset-0 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center z-[100] p-4"><div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-xs shadow-xl p-5 space-y-4 relative animate-in fade-in zoom-in-95 duration-150"><div class=space-y-1><h3 class="text-xs font-bold text-neutral-800">Add Workspace Shortcut</h3><p class="text-[9px] text-neutral-400 font-semibold uppercase tracking-wider">Save a quick link to this dashboard</p></div><div class=space-y-3><div class=space-y-1><label class="text-[9px] font-extrabold text-neutral-400 uppercase tracking-wider">Website URL</label><input type=text class="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-300 focus:ring-1 focus:ring-neutral-300 font-medium"placeholder="e.g. app.todoist.com, figma.com"></div></div><div class="flex items-center justify-end gap-2 pt-1"><button class="text-[9px] font-bold text-neutral-400 hover:text-neutral-600 px-3 py-1.5 cursor-pointer">Cancel</button><button class="text-[9px] font-bold bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer">Add Shortcut`);
+var _tmpl$$t = /* @__PURE__ */ template(`<div class="fixed inset-0 bg-neutral-900/40 backdrop-blur-xs flex items-center justify-center z-[100] p-4"><div class="bg-white border border-neutral-200 rounded-2xl w-full max-w-xs shadow-xl p-5 space-y-4 relative animate-in fade-in zoom-in-95 duration-150"><div class=space-y-1><h3 class="text-xs font-bold text-neutral-800">Add Workspace Shortcut</h3><p class="text-[9px] text-neutral-400 font-semibold uppercase tracking-wider">Save a quick link to this dashboard</p></div><div class=space-y-3><div class=space-y-1><label class="text-[9px] font-extrabold text-neutral-400 uppercase tracking-wider">Website URL</label><input type=text class="w-full bg-white border border-neutral-200 rounded-xl px-3 py-2 text-xs text-neutral-800 outline-none focus:border-neutral-300 focus:ring-1 focus:ring-neutral-300 font-medium"placeholder="e.g. app.todoist.com, figma.com"></div></div><div class="flex items-center justify-end gap-2 pt-1"><button class="text-[9px] font-bold text-neutral-400 hover:text-neutral-600 px-3 py-1.5 cursor-pointer">Cancel</button><button class="text-[9px] font-bold bg-neutral-900 hover:bg-neutral-800 text-white rounded-xl px-4 py-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors cursor-pointer">Add Shortcut`);
 function AddCustomAppModal(props) {
   return createComponent(Show, {
     get when() {
       return props.show;
     },
     get children() {
-      var _el$ = _tmpl$$s(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+      var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
       _el$7.$$input = (e) => props.setNewAppUrl(e.currentTarget.value);
       addEventListener(_el$9, "click", props.onClose, true);
       _el$0.$$click = () => props.onSave(props.newAppUrl);
@@ -19564,16 +20532,16 @@ function AddCustomAppModal(props) {
   });
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$r = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
+var _tmpl$$s = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-5 mt-5 w-full border-t border-neutral-100"><div class="flex items-center justify-center flex-wrap gap-3.5 py-0.5"><button class="w-10 h-10 rounded-xl bg-white border border-dashed border-neutral-200 flex items-center justify-center text-neutral-400 hover:text-neutral-600 hover:border-neutral-300 hover:scale-105 active:scale-95 transition-all cursor-pointer"title="Add Shortcut">`), _tmpl$2$m = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center gap-1 shrink-0"><button class="w-10 h-10 rounded-xl bg-white border border-neutral-200/50 shadow-sm flex items-center justify-center hover:border-neutral-300 hover:shadow-md hover:scale-105 active:scale-95 transition-all cursor-pointer animate-in fade-in duration-300"></button><button class="absolute -top-1 -right-1 p-0.5 bg-white border border-neutral-200 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer"title="Delete Shortcut">`);
 function PinnedShortcuts(props) {
   return (() => {
-    var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$s(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     insert(_el$2, createComponent(For, {
       get each() {
         return props.profileApps;
       },
       children: (app, idx) => (() => {
-        var _el$4 = _tmpl$2$l(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$m(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         _el$4.addEventListener("drop", (e) => props.onDrop(idx(), e));
         addEventListener(_el$4, "dragover", props.onDragOver);
         _el$4.addEventListener("dragstart", (e) => props.onDragStart(idx(), e));
@@ -19599,11 +20567,11 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$q = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$k = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$g = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
+var _tmpl$$r = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$h = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === props.currentProfileId);
   return (() => {
-    var _el$ = _tmpl$2$k(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$l(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
       e.stopPropagation();
       props.onToggle();
@@ -19614,7 +20582,7 @@ function ProfileMenu(props) {
         return props.show;
       },
       get children() {
-        var _el$3 = _tmpl$$q();
+        var _el$3 = _tmpl$$r();
         insert(_el$3, createComponent(For, {
           get each() {
             return [{
@@ -19624,7 +20592,7 @@ function ProfileMenu(props) {
             }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
           },
           children: (profile) => (() => {
-            var _el$4 = _tmpl$3$g(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+            var _el$4 = _tmpl$3$h(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
             _el$4.$$click = () => {
               props.onSelect(profile.id === "main" ? void 0 : profile.id);
             };
@@ -19658,7 +20626,7 @@ function ProfileMenu(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 text-neutral-800 relative @container wake-region"style=container-type:size><style>
+var _tmpl$$q = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 text-neutral-800 relative @container wake-region pointer-events-auto"style=container-type:size><style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @container (max-height: 380px) {
@@ -19672,11 +20640,11 @@ var _tmpl$$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col h-full
           .default-panel-header h1 { font-size: 0.95rem !important; }
           .default-panel-shortcuts { flex-wrap: wrap !important; justify-content: center !important; gap: 0.25rem !important; }
         }
-      `), _tmpl$2$j = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
+      `), _tmpl$2$k = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center p-4 md:p-6 z-30 transition-all duration-500 min-h-0 overflow-y-auto no-scrollbar"><div class="w-full max-w-xl flex flex-col items-center px-4"><div class="mb-5 select-none text-center default-panel-header"><h1 class="text-lg font-bold text-neutral-800 tracking-tight leading-none">Apposition Workspace</h1><p class="text-[9px] text-neutral-450 font-bold uppercase tracking-wider mt-2"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts"></div><div class="w-full text-left mt-6 px-1 default-panel-notes"><span class="text-neutral-300 hover:text-neutral-450 transition-colors text-[11px] italic cursor-pointer font-semibold select-none">Click here to draft a note...`);
 function DefaultPanel(props) {
   const ctrl = useDefaultPanelController(props);
   return (() => {
-    var _el$ = _tmpl$$p();
+    var _el$ = _tmpl$$q();
     _el$.firstChild;
     _el$.$$click = (e) => {
       PaneFocusManager.focusPane(props.id);
@@ -19702,7 +20670,7 @@ function DefaultPanel(props) {
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$j(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
+          var _el$3 = _tmpl$2$k(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling, _el$1 = _el$0.firstChild;
           insert(_el$7, () => props.activeWorkspaceName);
           insert(_el$8, createComponent(CommandBar, {
             get id() {
@@ -19720,9 +20688,6 @@ function DefaultPanel(props) {
             },
             onInput: (value) => {
               ctrl.setUrlInput(value);
-              props.onUpdate({
-                inputValue: value
-              });
               ctrl.setShowSuggestions(true);
               ctrl.setActiveSuggestionIdx(-1);
             },
@@ -19832,10 +20797,10 @@ function DefaultPanel(props) {
   })();
 }
 delegateEvents(["focusin", "mousedown", "click"]);
-var _tmpl$$o = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+var _tmpl$$p = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$j = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
-    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
     var _ref$ = props.gateContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.gateContainerRef = _el$;
     var _ref$2 = props.topGateRef;
@@ -19847,7 +20812,7 @@ function GateAnimation(props) {
         return props.gateDomain;
       },
       get children() {
-        var _el$6 = _tmpl$$o();
+        var _el$6 = _tmpl$$p();
         createRenderEffect(() => setAttribute(_el$6, "src", `https://www.google.com/s2/favicons?domain=${props.gateDomain}&sz=128`));
         return _el$6;
       }
@@ -19858,11 +20823,11 @@ function GateAnimation(props) {
     return _el$;
   })();
 }
-var _tmpl$$n = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$h = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$f = /* @__PURE__ */ template(`<div class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
+var _tmpl$$o = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$i = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$g = /* @__PURE__ */ template(`<div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`), _tmpl$4$b = /* @__PURE__ */ template(`<div data-overlay-chrome class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
 function MenuItem(props) {
   const IconComp = props.icon;
   return (() => {
-    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     addEventListener(_el$, "click", props.onClick, true);
     insert(_el$2, createComponent(IconComp, {
       "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
@@ -19873,7 +20838,7 @@ function MenuItem(props) {
         return props.badge;
       },
       get children() {
-        var _el$4 = _tmpl$$n();
+        var _el$4 = _tmpl$$o();
         insert(_el$4, () => props.badge);
         return _el$4;
       }
@@ -19929,7 +20894,7 @@ function PaneContextMenu(props) {
   };
   return createComponent(Portal, {
     get children() {
-      var _el$5 = _tmpl$3$f(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.nextSibling;
+      var _el$5 = _tmpl$4$b(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.nextSibling;
       _el$5.$$contextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -19962,7 +20927,7 @@ function PaneContextMenu(props) {
             onClick: () => copyText(props.contextMenu.linkURL)
           })];
         }
-      }), _el$8);
+      }), _el$9);
       insert(_el$6, createComponent(Show, {
         get when() {
           return props.contextMenu.srcURL;
@@ -19974,7 +20939,7 @@ function PaneContextMenu(props) {
             onClick: () => copyText(props.contextMenu.srcURL)
           });
         }
-      }), _el$8);
+      }), _el$9);
       insert(_el$6, createComponent(Show, {
         get when() {
           return props.contextMenu.selectionText;
@@ -19988,12 +20953,12 @@ function PaneContextMenu(props) {
             onClick: () => openNewPane(`https://www.google.com/search?q=${encodeURIComponent(props.contextMenu.selectionText)}`)
           });
         }
-      }), _el$8);
+      }), _el$9);
       insert(_el$6, createComponent(MenuItem, {
         icon: copy_default,
         label: "Copy Page URL",
         onClick: () => copyText(props.currentUrl || props.contextMenu.pageURL || "")
-      }), _el$8);
+      }), _el$9);
       insert(_el$6, createComponent(Show, {
         get when() {
           return memo(() => !!props.currentUrl)() && props.currentUrl.startsWith("http");
@@ -20005,7 +20970,7 @@ function PaneContextMenu(props) {
             onClick: handleSystemAuth
           });
         }
-      }), _el$8);
+      }), _el$9);
       insert(_el$6, createComponent(Show, {
         get when() {
           return getOrigin();
@@ -20017,7 +20982,32 @@ function PaneContextMenu(props) {
             onClick: handleClearCookies
           });
         }
-      }), _el$8);
+      }), _el$9);
+      insert(_el$6, createComponent(Show, {
+        get when() {
+          return (layoutStore.profiles || []).length > 1;
+        },
+        get children() {
+          return [_tmpl$3$g(), createComponent(For, {
+            get each() {
+              return layoutStore.profiles;
+            },
+            children: (prof) => createComponent(MenuItem, {
+              icon: layers_default,
+              get label() {
+                return `Profile: ${prof.name}`;
+              },
+              get badge() {
+                return (props.profileId || "main") === prof.id ? "Active" : void 0;
+              },
+              onClick: () => {
+                props.onUpdateProfile?.(prof.id);
+                closeMenu();
+              }
+            })
+          })];
+        }
+      }), _el$9);
       insert(_el$6, createComponent(MenuItem, {
         icon: panel_right_default,
         label: "Split Right",
@@ -20026,7 +21016,7 @@ function PaneContextMenu(props) {
           props.onSplit?.("right");
           closeMenu();
         }
-      }), _el$9);
+      }), _el$0);
       insert(_el$6, createComponent(MenuItem, {
         icon: panel_bottom_default,
         label: "Split Down",
@@ -20035,7 +21025,7 @@ function PaneContextMenu(props) {
           props.onSplit?.("bottom");
           closeMenu();
         }
-      }), _el$9);
+      }), _el$0);
       insert(_el$6, createComponent(MenuItem, {
         get icon() {
           return isMaximized() ? minimize_default : maximize_default;
@@ -20048,12 +21038,44 @@ function PaneContextMenu(props) {
           setLayoutStore("maximizedPaneId", isMaximized() ? null : props.paneId);
           closeMenu();
         }
-      }), _el$9);
+      }), _el$0);
+      insert(_el$6, createComponent(MenuItem, {
+        icon: book_open_default,
+        label: "Reader Mode",
+        onClick: () => {
+          window.api?.view?.extractReaderMode?.(props.paneId);
+          closeMenu();
+        }
+      }), null);
+      insert(_el$6, createComponent(MenuItem, {
+        icon: pipette_default,
+        label: "Pick Color from Pane",
+        onClick: () => {
+          window.api?.view?.pickColor?.(props.paneId, props.contextMenu.x, props.contextMenu.y);
+          closeMenu();
+        }
+      }), null);
+      insert(_el$6, createComponent(MenuItem, {
+        icon: smartphone_default,
+        label: "Toggle Mobile View",
+        onClick: () => {
+          window.api?.view?.setDeviceEmulation?.(props.paneId, "iphone_16_pro");
+          closeMenu();
+        }
+      }), null);
       insert(_el$6, createComponent(MenuItem, {
         icon: camera_default,
-        label: "Capture Screenshot",
+        label: "Capture Full Page (CDP)",
         onClick: () => {
-          window.api?.viewScreenshot?.(props.paneId);
+          window.api?.view?.captureFullPage?.(props.paneId);
+          closeMenu();
+        }
+      }), null);
+      insert(_el$6, createComponent(MenuItem, {
+        icon: image_default,
+        label: "Capture Viewport",
+        onClick: () => {
+          window.api?.view?.captureViewport?.(props.paneId);
           closeMenu();
         }
       }), null);
@@ -20090,19 +21112,19 @@ function PaneContextMenu(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$m = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
+var _tmpl$$n = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
 function MaximizedPaneControls(props) {
   return (() => {
-    var _el$ = _tmpl$$m(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$n(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$3.$$click = () => setLayoutStore("maximizedPaneId", null);
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$l = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
+var _tmpl$$m = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
 function DemoIframe(props) {
   return (() => {
-    var _el$ = _tmpl$$l();
+    var _el$ = _tmpl$$m();
     use((el) => {
       if (el) {
         el.onload = () => {
@@ -20230,10 +21252,10 @@ function DemoIframe(props) {
     return _el$;
   })();
 }
-var _tmpl$$k = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
+var _tmpl$$l = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
 function PaneCrashedOverlay(props) {
   return (() => {
-    var _el$ = _tmpl$$k(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
+    var _el$ = _tmpl$$l(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
     addEventListener(_el$7, "click", props.onReload, true);
     return _el$;
   })();
@@ -20275,6 +21297,127 @@ function usePaneContextMenu(paneId, _getPaneRef) {
     });
   });
   return { contextMenu, setContextMenu };
+}
+function usePaneLoadingState(paneId) {
+  const [isLoading, setIsLoading] = createSignal(false);
+  const [progress, setProgress] = createSignal(0);
+  let trickleTimer = null;
+  let fadeTimer = null;
+  const start = () => {
+    if (fadeTimer) clearTimeout(fadeTimer);
+    if (trickleTimer) clearInterval(trickleTimer);
+    setIsLoading(true);
+    setProgress(15);
+    trickleTimer = setInterval(() => {
+      setProgress((p) => p < 85 ? p + Math.random() * 12 : p);
+    }, 150);
+  };
+  const finish = () => {
+    if (trickleTimer) clearInterval(trickleTimer);
+    setProgress(100);
+    fadeTimer = setTimeout(() => {
+      setIsLoading(false);
+      setProgress(0);
+    }, 200);
+  };
+  onMount(() => {
+    const handleStart = (e) => {
+      const id = typeof e.detail === "string" ? e.detail : e.detail?.paneId || e.detail?.id;
+      if (id === paneId()) start();
+    };
+    const handleStop = (e) => {
+      const id = typeof e.detail === "string" ? e.detail : e.detail?.paneId || e.detail?.id;
+      if (id === paneId()) finish();
+    };
+    window.addEventListener("pane.load-start", handleStart);
+    window.addEventListener("pane.loaded", handleStop);
+    window.addEventListener("pane.navigated", handleStop);
+    const unsubNav = window.api?.onNavigated?.((data) => {
+      const payload = data?.paneId ? data : data?.detail || data;
+      if (payload?.paneId === paneId()) finish();
+    });
+    const unsubLoaded = window.api?.onViewLoaded?.((data) => {
+      const payload = data?.paneId ? data : data?.detail || data;
+      const id = typeof payload === "string" ? payload : payload?.paneId;
+      if (id === paneId()) finish();
+    });
+    onCleanup(() => {
+      if (trickleTimer) clearInterval(trickleTimer);
+      if (fadeTimer) clearTimeout(fadeTimer);
+      window.removeEventListener("pane.load-start", handleStart);
+      window.removeEventListener("pane.loaded", handleStop);
+      window.removeEventListener("pane.navigated", handleStop);
+      unsubNav?.();
+      unsubLoaded?.();
+    });
+  });
+  return { isLoading, progress };
+}
+function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgent, getContainerRef, setIsCrashed) {
+  const isNative = () => window.api?.isNativeViews === true;
+  const syncBounds = () => {
+    const container = getContainerRef();
+    if (!container) {
+      window.api?.view?.setBounds(paneId, { x: -1e4, y: -1e4, width: 0, height: 0 });
+      return;
+    }
+    const r = container.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) {
+      window.api?.view?.setBounds(paneId, {
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        width: Math.round(r.width),
+        height: Math.round(r.height)
+      });
+    } else {
+      window.api?.view?.setBounds(paneId, { x: -1e4, y: -1e4, width: 0, height: 0 });
+    }
+  };
+  onMount(() => {
+    const unsubCrash = window.api?.onViewCrashed?.((data) => {
+      if (data.paneId === paneId) setIsCrashed(true);
+    });
+    if (isNative()) {
+      const container = getContainerRef();
+      const rect = container?.getBoundingClientRect();
+      window.api?.view?.createPane({
+        paneId,
+        url: initialUrl,
+        partition: currentPartition(),
+        userAgent: currentUserAgent() || window.api?.defaultUserAgent || "",
+        rect: rect && rect.width > 0 && rect.height > 0 ? {
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height)
+        } : { x: -1e4, y: -1e4, width: 0, height: 0 }
+      });
+      let frame = 0;
+      const scheduleSync = () => {
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          syncBounds();
+        });
+      };
+      const ro = new ResizeObserver(scheduleSync);
+      if (container) ro.observe(container);
+      window.addEventListener("resize", scheduleSync);
+      window.addEventListener("app:layout-sync", scheduleSync);
+      window.addEventListener("pane.force-sync-bounds", scheduleSync);
+      onCleanup(() => {
+        ro.disconnect();
+        if (frame) cancelAnimationFrame(frame);
+        window.removeEventListener("resize", scheduleSync);
+        window.removeEventListener("app:layout-sync", scheduleSync);
+        window.removeEventListener("pane.force-sync-bounds", scheduleSync);
+        unsubCrash?.();
+        window.api?.view?.destroyPane(paneId);
+      });
+    } else {
+      onCleanup(() => unsubCrash?.());
+    }
+  });
 }
 function useGateAnimation(paneId, gateTriggeredSet2, currentUrl, currentType) {
   const [isInitialGate, setIsInitialGate] = createSignal(false);
@@ -20378,10 +21521,73 @@ function useGateAnimation(paneId, gateTriggeredSet2, currentUrl, currentType) {
     }
   };
 }
+function useNativePaneBridge(paneId) {
+  onMount(() => {
+    if (window.api?.isNativeViews !== true) return;
+    const api = window.api;
+    const offs = [];
+    const noop = () => {
+    };
+    offs.push(
+      api.onViewNavigated?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("app:webview-navigated", { detail: d }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onViewCrashed?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("app:webview-crashed", { detail: d }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onMediaStatus?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("app:media-status", { detail: d }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onViewLoaded?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("app:webview-loaded", { detail: d }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onViewFocusWc?.((_wcId) => {
+        PaneFocusManager.setActivePaneId(paneId);
+        window.dispatchEvent(new CustomEvent("app:webview-focused", { detail: paneId }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onNativeContextMenu?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("app:pane-context-menu", { detail: d }));
+      }) ?? noop
+    );
+    const ipc = window.electron?.ipcRenderer;
+    const onTs = (_e, d) => window.dispatchEvent(
+      new CustomEvent("app:media-timestamp", { detail: { paneId, ...d ?? {} } })
+    );
+    const onScroll = (_e, d) => window.dispatchEvent(
+      new CustomEvent("app:scroll-position", { detail: { paneId, ...d ?? {} } })
+    );
+    if (ipc) {
+      ipc.on("app:media-timestamp", onTs);
+      ipc.on("app:scroll-position", onScroll);
+      offs.push(() => {
+        ipc.removeListener("app:media-timestamp", onTs);
+        ipc.removeListener("app:scroll-position", onScroll);
+      });
+    }
+    onCleanup(() => offs.forEach((o) => o()));
+  });
+}
 function useWebviewBridge(paneId, isActivePane, onNavigated) {
   let webviewRef;
   let isDomReady = false;
   let pendingUrl = null;
+  const isNative = () => window.api?.isNativeViews === true;
+  useNativePaneBridge(paneId);
   const setupWebview = (el) => {
     if (!el) return;
     webviewRef = el;
@@ -20408,9 +21614,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       }
     };
     const handleFailLoad = (e) => {
-      if (e.errorCode === -3) {
-        return;
-      }
+      if (e.errorCode === -3) return;
       if (e.isMainFrame && e.validatedURL) {
         dispatchNav(e.validatedURL, el.getTitle?.());
       }
@@ -20480,9 +21684,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       const url = e.url || "";
       const lower = url.toLowerCase();
       const isPopup = e.options && (e.options.width || e.options.height) || e.disposition === "new-window" || lower.includes("accounts.google.com") || lower.includes("google.com/gsi") || lower.includes("firebaseapp.com") || lower.includes("login") || lower.includes("auth");
-      if (isPopup) {
-        return;
-      }
+      if (isPopup) return;
       if (typeof e.preventDefault === "function") e.preventDefault();
       window.dispatchEvent(
         new CustomEvent("app:open-in-new-pane", { detail: url })
@@ -20558,6 +21760,10 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
     onCleanup(cleanup);
   };
   const focusWebview = () => {
+    if (isNative()) {
+      window.api?.view?.focus(paneId);
+      return;
+    }
     if (webviewRef) {
       try {
         webviewRef.focus();
@@ -20566,6 +21772,10 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
     }
   };
   const loadURL = (url) => {
+    if (isNative()) {
+      window.api?.view?.navigate(paneId, url);
+      return;
+    }
     if (!webviewRef || !url) return;
     try {
       let current = "";
@@ -20578,14 +21788,10 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
         current = webviewRef.src || "";
       }
       if (current && current !== "about:blank") {
-        if (isCanonicalSameUrl(current, url)) {
-          return;
-        }
+        if (isCanonicalSameUrl(current, url)) return;
       }
       if (typeof webviewRef.isLoading === "function" && webviewRef.isLoading()) {
-        if (isCanonicalSameUrl(current, url)) {
-          return;
-        }
+        if (isCanonicalSameUrl(current, url)) return;
       }
       if (isDomReady && typeof webviewRef.loadURL === "function") {
         const promise = webviewRef.loadURL(url);
@@ -20604,7 +21810,11 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
       }
     }
   };
-  return { setupWebview, focusWebview, loadURL };
+  return {
+    setupWebview,
+    focusWebview,
+    loadURL
+  };
 }
 function usePaneLauncher(paneId, setCurrentType, setCurrentUrl, onUpdate) {
   const launchApp = (type, launchUrl) => {
@@ -20653,16 +21863,18 @@ function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebvi
     });
   });
 }
-var _tmpl$$j = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$3$e = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
+var _tmpl$$k = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 left-0 right-0 h-[2px] z-[60] overflow-hidden bg-neutral-200/40 dark:bg-neutral-800/40"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-200 ease-out">`), _tmpl$2$h = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane pointer-events-none"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full pointer-events-none"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$3$f = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$4$a = /* @__PURE__ */ template(`<div data-pane-gap class="w-full h-full bg-transparent">`), _tmpl$5$8 = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0 pointer-events-auto"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
 const gateTriggeredSet = /* @__PURE__ */ new Set();
 function Pane(props) {
   const [currentUrl, setCurrentUrl] = createSignal(props.url);
   const [currentType, setCurrentType] = createSignal(props.paneType);
   const [isCrashed, setIsCrashed] = createSignal(false);
   let paneRef;
+  let containerRef;
   const initialUrl = props.url || "";
   const currentPartition = () => props.profileId && props.profileId !== "main" ? `persist:${props.profileId}` : "persist:main";
   const currentUserAgent = () => layoutStore.profiles.find((p) => p.id === (props.profileId || "main"))?.user_agent || window.api?.defaultUserAgent;
+  const isNative = () => window.api?.isNativeViews === true;
   const isBlank = () => !currentUrl() && currentType() !== "terminal" && !props.children;
   createEffect(() => {
     if (props.paneType !== void 0 && props.paneType !== currentType()) setCurrentType(props.paneType);
@@ -20696,6 +21908,10 @@ function Pane(props) {
     refs
   } = useGateAnimation(props.id, gateTriggeredSet, currentUrl, currentType);
   const {
+    isLoading,
+    progress
+  } = usePaneLoadingState(() => props.id);
+  const {
     contextMenu,
     setContextMenu
   } = usePaneContextMenu(props.id);
@@ -20704,12 +21920,7 @@ function Pane(props) {
     handlePointerActivity
   } = usePaneLauncher(props.id, setCurrentType, setCurrentUrl, props.onUpdate);
   useSessionSync(props.id, currentPartition, currentUrl, () => props.isActivePane, () => window.api?.viewReload?.(props.id));
-  onMount(() => {
-    const unsubCrash = window.api?.onViewCrashed?.((data) => {
-      if (data.paneId === props.id) setIsCrashed(true);
-    });
-    onCleanup(() => unsubCrash?.());
-  });
+  useNativePaneView(props.id, initialUrl, currentPartition, currentUserAgent, () => containerRef, setIsCrashed);
   const handleContextMenu = (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -20722,7 +21933,7 @@ function Pane(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild, _el$5 = _el$2.firstChild;
     _el$.$$contextmenu = handleContextMenu;
     _el$.$$click = () => {
       props.onActive?.();
@@ -20744,53 +21955,75 @@ function Pane(props) {
     });
     var _ref$ = paneRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
-    insert(_el$3, createComponent(Show, {
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return isLoading();
+      },
+      get children() {
+        var _el$3 = _tmpl$$k(), _el$4 = _el$3.firstChild;
+        createRenderEffect((_$p) => setStyleProperty(_el$4, "width", `${progress()}%`));
+        return _el$3;
+      }
+    }), _el$5);
+    var _ref$2 = containerRef;
+    typeof _ref$2 === "function" ? use(_ref$2, _el$5) : containerRef = _el$5;
+    insert(_el$5, createComponent(Show, {
       get when() {
         return !props.children;
       },
       get fallback() {
         return (() => {
-          var _el$4 = _tmpl$2$g();
-          insert(_el$4, () => props.children);
-          return _el$4;
+          var _el$6 = _tmpl$3$f();
+          insert(_el$6, () => props.children);
+          return _el$6;
         })();
       },
       get children() {
         return createComponent(Show, {
           get when() {
-            return window.IS_WEB_DEMO;
+            return !isNative();
           },
           get fallback() {
-            return createComponent(Show, {
-              get when() {
-                return currentPartition();
-              },
-              keyed: true,
-              children: (partitionVal) => (() => {
-                var _el$5 = _tmpl$3$e();
-                use(setupWebview, _el$5);
-                setAttribute(_el$5, "partition", partitionVal);
-                createRenderEffect((_p$) => {
-                  var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = window.api?.panePreloadUrl;
-                  _v$3 !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$3);
-                  _v$4 !== _p$.t && setAttribute(_el$5, "src", _p$.t = _v$4);
-                  _v$5 !== _p$.a && setAttribute(_el$5, "useragent", _p$.a = _v$5);
-                  _v$6 !== _p$.o && setAttribute(_el$5, "preload", _p$.o = _v$6);
-                  return _p$;
-                }, {
-                  e: void 0,
-                  t: void 0,
-                  a: void 0,
-                  o: void 0
-                });
-                return _el$5;
-              })()
-            });
+            return _tmpl$4$a();
           },
           get children() {
-            return createComponent(DemoIframe, {
-              get currentUrl() {
-                return currentUrl();
+            return createComponent(Show, {
+              get when() {
+                return window.IS_WEB_DEMO;
+              },
+              get fallback() {
+                return createComponent(Show, {
+                  get when() {
+                    return currentPartition();
+                  },
+                  keyed: true,
+                  children: (partitionVal) => (() => {
+                    var _el$8 = _tmpl$5$8();
+                    use(setupWebview, _el$8);
+                    setAttribute(_el$8, "partition", partitionVal);
+                    createRenderEffect((_p$) => {
+                      var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = window.api?.panePreloadUrl;
+                      _v$3 !== _p$.e && setAttribute(_el$8, "id", _p$.e = _v$3);
+                      _v$4 !== _p$.t && setAttribute(_el$8, "src", _p$.t = _v$4);
+                      _v$5 !== _p$.a && setAttribute(_el$8, "useragent", _p$.a = _v$5);
+                      _v$6 !== _p$.o && setAttribute(_el$8, "preload", _p$.o = _v$6);
+                      return _p$;
+                    }, {
+                      e: void 0,
+                      t: void 0,
+                      a: void 0,
+                      o: void 0
+                    });
+                    return _el$8;
+                  })()
+                });
+              },
+              get children() {
+                return createComponent(DemoIframe, {
+                  get currentUrl() {
+                    return currentUrl();
+                  }
+                });
               }
             });
           }
@@ -20891,6 +22124,14 @@ function Pane(props) {
           get currentUrl() {
             return currentUrl();
           },
+          get profileId() {
+            return props.profileId || "main";
+          },
+          onUpdateProfile: (newProfileId) => {
+            props.onUpdate?.({
+              profileId: newProfileId
+            });
+          },
           get onClosePane() {
             return props.onClose;
           },
@@ -20902,8 +22143,8 @@ function Pane(props) {
     }), null);
     createRenderEffect((_p$) => {
       var _v$ = `webview-container-${props.id}`, _v$2 = isBlank() ? "none" : "flex";
-      _v$ !== _p$.e && setAttribute(_el$3, "id", _p$.e = _v$);
-      _v$2 !== _p$.t && setStyleProperty(_el$3, "display", _p$.t = _v$2);
+      _v$ !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$5, "display", _p$.t = _v$2);
       return _p$;
     }, {
       e: void 0,
@@ -20913,7 +22154,7 @@ function Pane(props) {
   })();
 }
 delegateEvents(["mousemove", "focusin", "mousedown", "click", "contextmenu"]);
-var _tmpl$$i = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$j = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function DropSnapPreview(props) {
   const isSplitTarget = () => {
     if (!props.target) return false;
@@ -20962,7 +22203,7 @@ function DropSnapPreview(props) {
       return memo(() => !!isSplitTarget())() && props.target;
     },
     get children() {
-      var _el$ = _tmpl$$i(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild;
       insert(_el$2, () => props.target.direction === "left" && "Dock Left", null);
       insert(_el$2, () => props.target.direction === "right" && "Dock Right", null);
       insert(_el$2, () => props.target.direction === "top" && "Dock Top", null);
@@ -20972,9 +22213,319 @@ function DropSnapPreview(props) {
     }
   });
 }
+var _tmpl$$i = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$g = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$7 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$2 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9$1 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
+function FindInPageBar(props) {
+  let inputRef;
+  const [query, setQuery] = createSignal("");
+  const [scope, setScope] = createSignal("active");
+  const [matchCase, setMatchCase] = createSignal(false);
+  const [matchInfo, setMatchInfo] = createSignal({
+    current: 0,
+    total: 0
+  });
+  const [splitCount, setSplitCount] = createSignal(0);
+  let debounceTimer;
+  const triggerFind = (q, forward = true, findNext = false) => {
+    const trimmed = q.trim();
+    if (!trimmed || scope() === "global") {
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      setMatchInfo({
+        current: 0,
+        total: 0
+      });
+      return;
+    }
+    const opts = {
+      forward,
+      findNext,
+      matchCase: matchCase(),
+      targetPaneId: scope() === "active" ? props.activePaneId : void 0
+    };
+    if (findNext) {
+      clearTimeout(debounceTimer);
+      window.api?.findInAllPanes?.(trimmed, opts);
+    } else {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        window.api?.findInAllPanes?.(trimmed, opts);
+      }, 100);
+    }
+  };
+  const handleSearch = (q, forward = true, findNext = false) => {
+    setQuery(q);
+    triggerFind(q, forward, findNext);
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      props.onClose();
+      if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
+    } else if (e.key === "Enter" && scope() !== "global") {
+      e.preventDefault();
+      triggerFind(query(), !e.shiftKey, true);
+    }
+  };
+  const matchingGlobal = createMemo(() => {
+    if (scope() !== "global") return [];
+    const q = query().trim().toLowerCase();
+    if (!q) return [];
+    const list = [];
+    const wss = props.ws?.workspaces?.() || [];
+    for (const w of wss) {
+      if (w.name.toLowerCase().includes(q)) list.push({
+        id: w.id,
+        name: w.name
+      });
+    }
+    return list.slice(0, 5);
+  });
+  createEffect(() => {
+    if (props.isOpen) {
+      setTimeout(() => {
+        inputRef?.focus();
+        inputRef?.select();
+      }, 30);
+    } else {
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      setQuery("");
+      setMatchInfo({
+        current: 0,
+        total: 0
+      });
+    }
+  });
+  onMount(() => {
+    const handleResult = (e) => {
+      const {
+        activeMatchOrdinal,
+        numberOfMatches,
+        matches,
+        activePaneId,
+        paneBreakdown
+      } = e.detail || {};
+      const total = typeof matches === "number" ? matches : typeof numberOfMatches === "number" ? numberOfMatches : 0;
+      setMatchInfo({
+        current: activeMatchOrdinal || 0,
+        total
+      });
+      if (paneBreakdown) setSplitCount(Object.keys(paneBreakdown).filter((k) => paneBreakdown[k].total > 0).length);
+      if (activePaneId) window.dispatchEvent(new CustomEvent("pane.focused", {
+        detail: activePaneId
+      }));
+    };
+    window.addEventListener("pane.found-in-page", handleResult);
+    onCleanup(() => {
+      window.removeEventListener("pane.found-in-page", handleResult);
+      window.api?.stopFind?.("clearSelection");
+    });
+  });
+  return createComponent(Show, {
+    get when() {
+      return props.isOpen;
+    },
+    get children() {
+      var _el$ = _tmpl$9$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$9 = _el$3.nextSibling;
+      _el$.$$click = (e) => e.stopPropagation();
+      insert(_el$3, createComponent(search_default, {
+        "class": "w-3.5 h-3.5 text-neutral-400 shrink-0 mr-1"
+      }), _el$4);
+      _el$4.$$keydown = handleKeyDown;
+      _el$4.$$input = (e) => handleSearch(e.currentTarget.value, true, false);
+      var _ref$ = inputRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$4) : inputRef = _el$4;
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return query().length > 0;
+        },
+        get children() {
+          var _el$5 = _tmpl$$i();
+          _el$5.$$click = () => {
+            setQuery("");
+            triggerFind("", true, false);
+            inputRef?.focus();
+          };
+          insert(_el$5, createComponent(x_default, {
+            "class": "w-3 h-3"
+          }));
+          return _el$5;
+        }
+      }), null);
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return memo(() => query().length > 0)() && scope() !== "global";
+        },
+        get children() {
+          var _el$6 = _tmpl$3$e();
+          insert(_el$6, (() => {
+            var _c$ = memo(() => matchInfo().total > 0);
+            return () => _c$() ? `${matchInfo().current} / ${matchInfo().total}` : "No matches";
+          })(), null);
+          insert(_el$6, createComponent(Show, {
+            get when() {
+              return memo(() => splitCount() > 1)() && scope() === "all";
+            },
+            get children() {
+              var _el$7 = _tmpl$2$g(), _el$8 = _el$7.firstChild;
+              insert(_el$7, splitCount, _el$8);
+              return _el$7;
+            }
+          }), null);
+          return _el$6;
+        }
+      }), _el$9);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "Active Split",
+        placement: "bottom",
+        get children() {
+          var _el$0 = _tmpl$4$9();
+          _el$0.$$click = () => {
+            setScope("active");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$0, createComponent(square_default, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$0, `p-1 rounded-md text-xs cursor-pointer ${scope() === "active" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$0;
+        }
+      }), null);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "All Splits",
+        placement: "bottom",
+        get children() {
+          var _el$1 = _tmpl$4$9();
+          _el$1.$$click = () => {
+            setScope("all");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$1, createComponent(layers_default, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$1, `p-1 rounded-md text-xs cursor-pointer ${scope() === "all" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$1;
+        }
+      }), null);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "All Workspaces",
+        placement: "bottom",
+        get children() {
+          var _el$10 = _tmpl$4$9();
+          _el$10.$$click = () => {
+            setScope("global");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$10, createComponent(globe_default, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$10, `p-1 rounded-md text-xs cursor-pointer ${scope() === "global" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$10;
+        }
+      }), null);
+      insert(_el$2, createComponent(ActionTooltip, {
+        get label() {
+          return matchCase() ? "Match Case (Active)" : "Match Case (Inactive)";
+        },
+        placement: "bottom",
+        get children() {
+          var _el$11 = _tmpl$5$7();
+          _el$11.$$click = () => {
+            setMatchCase(!matchCase());
+            triggerFind(query(), true, false);
+          };
+          createRenderEffect(() => className(_el$11, `px-1.5 py-0.5 rounded-lg text-[10px] font-mono font-semibold transition-colors cursor-pointer ${matchCase() ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$11;
+        }
+      }), null);
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return scope() !== "global";
+        },
+        get children() {
+          return [createComponent(ActionTooltip, {
+            label: "Previous Match",
+            shortcut: "Shift+Enter",
+            placement: "bottom",
+            get children() {
+              var _el$12 = _tmpl$6$4();
+              _el$12.$$click = () => triggerFind(query(), false, true);
+              insert(_el$12, createComponent(chevron_up_default, {
+                "class": "w-3.5 h-3.5"
+              }));
+              return _el$12;
+            }
+          }), createComponent(ActionTooltip, {
+            label: "Next Match",
+            shortcut: "Enter",
+            placement: "bottom",
+            get children() {
+              var _el$13 = _tmpl$6$4();
+              _el$13.$$click = () => triggerFind(query(), true, true);
+              insert(_el$13, createComponent(chevron_down_default, {
+                "class": "w-3.5 h-3.5"
+              }));
+              return _el$13;
+            }
+          })];
+        }
+      }), null);
+      insert(_el$2, createComponent(ActionTooltip, {
+        label: "Close Search",
+        shortcut: "Esc",
+        placement: "bottom",
+        get children() {
+          var _el$14 = _tmpl$7$2();
+          _el$14.$$click = () => {
+            window.api?.stopFind?.("clearSelection");
+            props.onClose();
+            if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
+          };
+          insert(_el$14, createComponent(x_default, {
+            "class": "w-3.5 h-3.5"
+          }));
+          return _el$14;
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return memo(() => scope() === "global")() && matchingGlobal().length > 0;
+        },
+        get children() {
+          var _el$15 = _tmpl$8$2();
+          insert(_el$15, createComponent(For, {
+            get each() {
+              return matchingGlobal();
+            },
+            children: (w) => (() => {
+              var _el$16 = _tmpl$0(), _el$17 = _el$16.firstChild;
+              _el$16.$$click = () => {
+                props.ws?.switchWorkspace?.(w.id, "forward");
+                props.onClose();
+              };
+              insert(_el$16, createComponent(globe_default, {
+                "class": "w-3.5 h-3.5 text-neutral-400 shrink-0"
+              }), _el$17);
+              insert(_el$17, () => w.name);
+              return _el$16;
+            })()
+          }));
+          return _el$15;
+        }
+      }), null);
+      createRenderEffect(() => setAttribute(_el$4, "placeholder", scope() === "active" ? "Find in active split..." : scope() === "all" ? "Find across all splits..." : "Search all workspaces..."));
+      createRenderEffect(() => _el$4.value = query());
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click", "input", "keydown"]);
 var _tmpl$$h = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`), _tmpl$2$f = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$d = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors">Reset & Reload Workspace`);
 function AppMainCanvas(props) {
   const displayTree = createMemo(() => getComputedPreviewTree());
+  const [isFindOpen, setIsFindOpen] = createSignal(false);
   onMount(() => {
     const unsubTimestamp = initMediaTimestampTracker();
     const handleMedia = (e) => {
@@ -20999,12 +22550,15 @@ function AppMainCanvas(props) {
         updatePaneCall(paneId, Boolean(isInCall), layoutStore.nodes[paneId] || getPaneFromPool(paneId));
       }
     };
+    const handleFind = () => setIsFindOpen(true);
     window.addEventListener("app:media-status", handleMedia);
     window.addEventListener("app:call-active", handleCall);
+    window.addEventListener("app:find-in-page", handleFind);
     onCleanup(() => {
       unsubTimestamp();
       window.removeEventListener("app:media-status", handleMedia);
       window.removeEventListener("app:call-active", handleCall);
+      window.removeEventListener("app:find-in-page", handleFind);
     });
   });
   const activePaneIds = createMemo(() => {
@@ -21063,6 +22617,18 @@ function AppMainCanvas(props) {
         return props.ws;
       }
     }), _el$3);
+    insert(_el$2, createComponent(FindInPageBar, {
+      get isOpen() {
+        return isFindOpen();
+      },
+      onClose: () => setIsFindOpen(false),
+      get activePaneId() {
+        return props.ws?.focusedPaneId?.() || props.ws?.activePaneId?.();
+      },
+      get ws() {
+        return props.ws;
+      }
+    }), _el$3);
     insert(_el$2, createComponent(DropSnapPreview, {
       get target() {
         return props.drag.dragTarget();
@@ -21074,9 +22640,19 @@ function AppMainCanvas(props) {
       },
       get children() {
         var _el$4 = _tmpl$$h();
-        _el$4.addEventListener("pointerenter", () => window.dispatchEvent(new CustomEvent("app:zone-leave")));
+        _el$4.addEventListener("pointerleave", () => {
+          let leaveTimer = window._leaveTimer;
+          if (leaveTimer) clearTimeout(leaveTimer);
+        });
+        _el$4.addEventListener("pointerenter", () => {
+          let leaveTimer = window._leaveTimer;
+          if (leaveTimer) clearTimeout(leaveTimer);
+          window._leaveTimer = setTimeout(() => {
+            window.dispatchEvent(new CustomEvent("app:zone-leave"));
+          }, 120);
+        });
         createRenderEffect((_p$) => {
-          var _v$ = isEdgeHovered("top") ? "80px" : "0px", _v$2 = isEdgeHovered("left") ? "80px" : "0px", _v$3 = isEdgeHovered("right") ? "80px" : "0px", _v$4 = isEdgeHovered("bottom") ? "80px" : "0px";
+          var _v$ = isEdgeHovered("top") ? "108px" : "0px", _v$2 = isEdgeHovered("left") ? "108px" : "0px", _v$3 = isEdgeHovered("right") ? "108px" : "0px", _v$4 = isEdgeHovered("bottom") ? "108px" : "0px";
           _v$ !== _p$.e && setStyleProperty(_el$4, "top", _p$.e = _v$);
           _v$2 !== _p$.t && setStyleProperty(_el$4, "left", _p$.t = _v$2);
           _v$3 !== _p$.a && setStyleProperty(_el$4, "right", _p$.a = _v$3);
@@ -23300,7 +24876,7 @@ function useAppLifecycle(ws) {
     });
   });
 }
-var _tmpl$$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-green-500><polyline points="20 6 9 17 4 12">`), _tmpl$2$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-red-500><circle cx=12 cy=12 r=10></circle><line x1=12 y1=8 x2=12 y2=12></line><line x1=12 y1=16 x2=12.01 y2=16>`), _tmpl$3$1 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] px-4 py-2.5 bg-white text-neutral-800 text-[13px] font-medium rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-neutral-200/60 flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">`), _tmpl$4 = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-transparent text-neutral-800 flex flex-row font-sans overflow-hidden w-full h-full">`);
+var _tmpl$$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-green-500><polyline points="20 6 9 17 4 12">`), _tmpl$2$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-red-500><circle cx=12 cy=12 r=10></circle><line x1=12 y1=8 x2=12 y2=12></line><line x1=12 y1=16 x2=12.01 y2=16>`), _tmpl$3$1 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] px-4 py-2.5 bg-white text-neutral-800 text-[13px] font-medium rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-neutral-200/60 flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">`), _tmpl$4 = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-transparent text-neutral-800 flex flex-row font-sans overflow-hidden w-full h-full pointer-events-none select-none"><div data-overlay-chrome class="pointer-events-auto contents">`);
 function App() {
   const ws = useWorkspaceManager();
   const drag = useDragEngine(ws.saveLayout, ws.handleClose, ws.getParent, ws.activeTabId, ws.switchTab, ws.cleanupEmptyTabs);
@@ -23347,8 +24923,8 @@ function App() {
   });
   useLayoutAnimations(uiMode, hoverZone, () => justCollapsedRef.current, () => hubRef, () => topbarRef, () => activeBarRef, () => dockRef, () => canvasContainerRef, () => actionHubRef, () => actionSplitBarRef, () => actionDockRef);
   return (() => {
-    var _el$ = _tmpl$4();
-    insert(_el$, createComponent(AppUiHub, {
+    var _el$ = _tmpl$4(), _el$2 = _el$.firstChild;
+    insert(_el$2, createComponent(AppUiHub, {
       hubRef: (el) => hubRef = el,
       uiMode,
       setUiMode,
@@ -23358,7 +24934,7 @@ function App() {
         return !!layoutStore.maximizedPaneId;
       }
     }), null);
-    insert(_el$, createComponent(AppTopbar, {
+    insert(_el$2, createComponent(AppTopbar, {
       topbarRef: (el) => topbarRef = el,
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
@@ -23366,7 +24942,7 @@ function App() {
       onZoneEnter: handleZoneEnter,
       ws
     }), null);
-    insert(_el$, createComponent(ActivePaneBar, {
+    insert(_el$2, createComponent(ActivePaneBar, {
       activeBarRef: (el) => activeBarRef = el,
       ws,
       get isMaximized() {
@@ -23374,7 +24950,7 @@ function App() {
       },
       onZoneEnter: handleZoneEnter
     }), null);
-    insert(_el$, createComponent(AppDock, {
+    insert(_el$2, createComponent(AppDock, {
       dockRef: (el) => dockRef = el,
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
@@ -23382,13 +24958,13 @@ function App() {
       onZoneEnter: handleZoneEnter,
       ws
     }), null);
-    insert(_el$, createComponent(AppWindowControls, {
+    insert(_el$2, createComponent(AppWindowControls, {
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
       },
       onZoneEnter: handleZoneEnter
     }), null);
-    insert(_el$, createComponent(AppEdgeZones, {
+    insert(_el$2, createComponent(AppEdgeZones, {
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
       },
@@ -23397,14 +24973,14 @@ function App() {
       },
       onZoneEnter: handleZoneEnter
     }), null);
-    insert(_el$, createComponent(SupportCluster, {
+    insert(_el$2, createComponent(SupportCluster, {
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
       },
       onZoneEnter: handleZoneEnter,
       ws
     }), null);
-    insert(_el$, createComponent(ActionCluster, {
+    insert(_el$2, createComponent(ActionCluster, {
       hubRef: (el) => actionHubRef = el,
       splitBarRef: (el) => actionSplitBarRef = el,
       dockRef: (el) => actionDockRef = el,
@@ -23414,18 +24990,7 @@ function App() {
       onZoneEnter: handleZoneEnter,
       ws
     }), null);
-    insert(_el$, createComponent(AppMainCanvas, {
-      canvasContainerRef: (el) => canvasContainerRef = el,
-      get hoverZone() {
-        return hoverZone();
-      },
-      get uiMode() {
-        return uiMode();
-      },
-      ws,
-      drag
-    }), null);
-    insert(_el$, createComponent(EdgeDragZones, {
+    insert(_el$2, createComponent(EdgeDragZones, {
       get isDragging() {
         return !!drag.activeDragId();
       },
@@ -23439,18 +25004,18 @@ function App() {
         };
       }
     }), null);
-    insert(_el$, createComponent(AppModals, {
+    insert(_el$2, createComponent(AppModals, {
       ws,
       cascadePrompt,
       setCascadePrompt
     }), null);
-    insert(_el$, createComponent(Show, {
+    insert(_el$2, createComponent(Show, {
       get when() {
         return toast();
       },
       get children() {
-        var _el$2 = _tmpl$3$1();
-        insert(_el$2, createComponent(Show, {
+        var _el$3 = _tmpl$3$1();
+        insert(_el$3, createComponent(Show, {
           get when() {
             return toast()?.type === "success";
           },
@@ -23458,7 +25023,7 @@ function App() {
             return _tmpl$$1();
           }
         }), null);
-        insert(_el$2, createComponent(Show, {
+        insert(_el$3, createComponent(Show, {
           get when() {
             return toast()?.type === "error";
           },
@@ -23466,14 +25031,25 @@ function App() {
             return _tmpl$2$1();
           }
         }), null);
-        insert(_el$2, () => toast()?.message, null);
-        return _el$2;
+        insert(_el$3, () => toast()?.message, null);
+        return _el$3;
       }
     }), null);
-    insert(_el$, createComponent(ClosedItemToast, {
+    insert(_el$2, createComponent(ClosedItemToast, {
       get onUndo() {
         return ws.reopenClosedTab;
       }
+    }), null);
+    insert(_el$, createComponent(AppMainCanvas, {
+      canvasContainerRef: (el) => canvasContainerRef = el,
+      get hoverZone() {
+        return hoverZone();
+      },
+      get uiMode() {
+        return uiMode();
+      },
+      ws,
+      drag
     }), null);
     return _el$;
   })();

@@ -1,11 +1,11 @@
 "use strict";
-const require$$1 = require("electron");
+const require$$1$3 = require("electron");
 const utils$2 = require("@electron-toolkit/utils");
-const Database = require("better-sqlite3");
-const require$$1$1 = require("path");
-const require$$1$2 = require("fs");
-const require$$1$3 = require("child_process");
+const require$$1 = require("path");
+const require$$1$1 = require("fs");
+const require$$1$2 = require("child_process");
 require("readline");
+const Database = require("better-sqlite3");
 const os = require("os");
 const crypto = require("crypto");
 const require$$4 = require("http");
@@ -18,6 +18,7 @@ const require$$1$4 = require("tty");
 const require$$2 = require("url");
 const require$$14 = require("zlib");
 const Sentry = require("@sentry/electron/main");
+const promises = require("fs/promises");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -34,43 +35,784 @@ function _interopNamespaceDefault(e) {
   n.default = e;
   return Object.freeze(n);
 }
-const require$$1__namespace = /* @__PURE__ */ _interopNamespaceDefault(require$$1$1);
+const require$$1__namespace = /* @__PURE__ */ _interopNamespaceDefault(require$$1);
 const Sentry__namespace = /* @__PURE__ */ _interopNamespaceDefault(Sentry);
-const isDevMode$2 = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
-const dbFileName = isDevMode$2 ? "apposition_state_dev.db" : "apposition_state.db";
-const dbPath = require$$1$1.join(require$$1.app.getPath("userData"), dbFileName);
-function initDatabase() {
+const LOG_LEVEL_SEVERITY = {
+  TRACE: 10,
+  DEBUG: 20,
+  INFO: 30,
+  WARN: 40,
+  ERROR: 50,
+  INVARIANT: 60,
+  FATAL: 70
+};
+const BENIGN_NOISE_PATTERNS = [
+  /ResizeObserver loop (limit exceeded|completed with undelivered notifications)/i,
+  /net::ERR_BLOCKED_BY_CLIENT/i,
+  /Third-party cookie will be blocked/i,
+  /DevTools listening on/i,
+  /Autofill\.enable/i,
+  /Autofocus processing was blocked/i,
+  /%cElectron Security Warning/i,
+  /cleanups created outside/i,
+  /\[Featurebase SDK\]/i,
+  /checkForUpdates/i,
+  /Permissions-Policy header/i,
+  /Feature-Policy header/i,
+  /source-map.*404/i,
+  /favicon\.ico.*404/i,
+  /Failed to load resource.*net::ERR_FAILED/i,
+  /\[Violation\]/i,
+  /non-passive event listener/i
+];
+const SECRET_PATTERNS = [
+  [/polar_[a-zA-Z0-9_-]{20,}/g, "polar_[REDACTED]"],
+  [
+    /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
+    "[UUID-KEY-REDACTED]"
+  ],
+  [/Bearer\s+[a-zA-Z0-9._~+\\/-]+=*/gi, "Bearer [REDACTED]"],
+  [/password["']?\s*[:=]\s*["'][^"']+["']/gi, 'password: "[REDACTED]"'],
+  [/token["']?\s*[:=]\s*["'][a-zA-Z0-9._~+\\/-]{16,}["']/gi, 'token: "[REDACTED]"']
+];
+class NoiseFilter {
+  guestBuckets = /* @__PURE__ */ new Map();
+  maxPerWindow = 30;
+  windowMs = 1e3;
+  isBenignNoise(msg) {
+    if (!msg) return true;
+    for (const pattern of BENIGN_NOISE_PATTERNS) {
+      if (pattern.test(msg)) return true;
+    }
+    return false;
+  }
+  redactSecrets(raw) {
+    if (!raw || typeof raw !== "string") return raw;
+    let redacted = raw;
+    for (const [pattern, replacement] of SECRET_PATTERNS) {
+      redacted = redacted.replace(pattern, replacement);
+    }
+    return redacted;
+  }
+  isRateLimited(key) {
+    const now = Date.now();
+    let bucket = this.guestBuckets.get(key);
+    if (!bucket || now - bucket.lastReset > this.windowMs) {
+      bucket = { count: 1, lastReset: now };
+      this.guestBuckets.set(key, bucket);
+      return false;
+    }
+    bucket.count++;
+    return bucket.count > this.maxPerWindow;
+  }
+}
+const defaultNoiseFilter = new NoiseFilter();
+function cleanSourcePath(raw) {
+  if (!raw) return void 0;
+  let clean = raw.replace(/^https?:\/\/[^/]+\/@fs\//, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\?.*$/, "");
+  const match = clean.match(/(?:src\/[^:]+|[^/]+\.[a-zA-Z0-9]+)$/);
+  return match ? match[0] : clean;
+}
+function filterStackTrace(raw) {
+  if (!raw || typeof raw !== "string") return raw;
+  const lines = raw.split("\n");
+  const filtered = lines.filter(
+    (line) => !line.includes("node_modules") && !line.includes("node:electron") && !line.includes("node:internal")
+  );
+  return filtered.length > 0 ? filtered.join("\n") : lines.slice(0, 3).join("\n");
+}
+class LogFormatter {
+  formatInteractive(entry) {
+    const timeStr = `\x1B[90m${entry.isoTime.substring(11, 23)}\x1B[0m`;
+    const domainText = entry.subsystem ? `[${entry.domain}:${entry.subsystem}]` : `[${entry.domain}]`;
+    const domainTag = `\x1B[1m\x1B[37m${domainText}\x1B[0m`;
+    let levelBadge = "";
+    if (entry.level === "ERROR") {
+      levelBadge = ` \x1B[1m\x1B[31mERROR\x1B[0m`;
+    } else if (entry.level === "FATAL") {
+      levelBadge = ` \x1B[1m\x1B[41m\x1B[37m FATAL \x1B[0m`;
+    } else if (entry.level === "WARN") {
+      levelBadge = ` \x1B[33mWARN\x1B[0m`;
+    } else if (entry.level === "INVARIANT") {
+      levelBadge = ` \x1B[1m\x1B[45m\x1B[37m INVARIANT \x1B[0m`;
+    }
+    let line = `${timeStr} ${domainTag}${levelBadge}: ${entry.message}`;
+    if (entry.durationMs !== void 0) {
+      if (entry.durationMs > 30) {
+        line += ` \x1B[33m(SLOW: ${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
+      } else {
+        line += ` \x1B[90m(${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
+      }
+    }
+    if (entry.correlationId) {
+      line += ` \x1B[36m#${entry.correlationId}\x1B[0m`;
+    }
+    const cleanSrc = cleanSourcePath(entry.source?.file);
+    if (cleanSrc) {
+      line += ` \x1B[90m(${cleanSrc}${entry.source?.line ? `:${entry.source.line}` : ""})\x1B[0m`;
+    }
+    if (entry.details !== void 0) {
+      let detailsStr = "";
+      if (typeof entry.details === "string") {
+        detailsStr = filterStackTrace(entry.details);
+      } else if (typeof entry.details === "object") {
+        detailsStr = JSON.stringify(entry.details);
+      } else {
+        detailsStr = String(entry.details);
+      }
+      line += ` \x1B[90m| ${detailsStr}\x1B[0m`;
+    }
+    return line;
+  }
+  formatCompactAi(entry) {
+    const timeStr = entry.isoTime.substring(11, 19);
+    const domain = entry.subsystem ? `${entry.domain}:${entry.subsystem}` : entry.domain;
+    let out2 = `${timeStr} [${entry.level[0]}][${domain}] ${entry.message}`;
+    if (entry.durationMs !== void 0) {
+      out2 += ` ${entry.durationMs.toFixed(0)}ms`;
+    }
+    if (entry.correlationId) {
+      out2 += ` #${entry.correlationId}`;
+    }
+    const cleanSrc = cleanSourcePath(entry.source?.file);
+    if (cleanSrc) {
+      out2 += ` (${cleanSrc}:${entry.source?.line || 0})`;
+    }
+    if (entry.details !== void 0) {
+      out2 += ` :: ${JSON.stringify(entry.details)}`;
+    }
+    return out2;
+  }
+  formatJson(entry) {
+    return JSON.stringify(entry);
+  }
+}
+const defaultFormatter = new LogFormatter();
+class RingBuffer {
+  buffer;
+  pointer = 0;
+  isFull = false;
+  capacity;
+  constructor(capacity = 500) {
+    this.capacity = capacity;
+    this.buffer = new Array(capacity).fill(null);
+  }
+  push(entry) {
+    this.buffer[this.pointer] = entry;
+    this.pointer = (this.pointer + 1) % this.capacity;
+    if (this.pointer === 0) {
+      this.isFull = true;
+    }
+  }
+  snapshot() {
+    if (!this.isFull) {
+      return this.buffer.slice(0, this.pointer).filter(Boolean);
+    }
+    const tail = this.buffer.slice(this.pointer).filter(Boolean);
+    const head = this.buffer.slice(0, this.pointer).filter(Boolean);
+    return [...tail, ...head];
+  }
+  getErrors() {
+    return this.snapshot().filter(
+      (e) => e.level === "ERROR" || e.level === "FATAL" || e.level === "INVARIANT"
+    );
+  }
+  dumpSummary(limit = 20) {
+    const recent = this.snapshot().slice(-limit);
+    return recent.map(
+      (e) => `[${e.isoTime.substring(11, 23)}] [${e.level}][${e.domain}] ${e.message}${e.correlationId ? ` #${e.correlationId}` : ""}`
+    ).join("\n");
+  }
+  clear() {
+    this.buffer.fill(null);
+    this.pointer = 0;
+    this.isFull = false;
+  }
+}
+const flightRecorder = new RingBuffer(500);
+const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024;
+class AsyncFileSink {
+  stream = null;
+  queue = [];
+  flushTimer = null;
+  filePath = null;
+  isWriting = false;
+  init(filePath) {
+    try {
+      this.filePath = filePath;
+      const dir = require$$1.dirname(filePath);
+      if (!require$$1$1.existsSync(dir)) {
+        require$$1$1.mkdirSync(dir, { recursive: true });
+      }
+      if (require$$1$1.existsSync(filePath)) {
+        try {
+          const stats = require$$1$1.statSync(filePath);
+          if (stats.size > MAX_LOG_SIZE_BYTES) {
+            const oldPath = `${filePath}.old`;
+            if (require$$1$1.existsSync(oldPath)) {
+              require$$1$1.unlinkSync(oldPath);
+            }
+            require$$1$1.renameSync(filePath, oldPath);
+          }
+        } catch {
+        }
+      }
+      this.stream = require$$1$1.createWriteStream(filePath, { flags: "a", encoding: "utf8" });
+      this.stream.on("error", () => {
+        this.stream = null;
+      });
+      this.startTimer();
+      const sessionHeader = `
+--- [APPOSITION LOG SESSION START: ${(/* @__PURE__ */ new Date()).toISOString()}] (PID ${typeof process !== "undefined" ? process.pid : "N/A"}) ---
+`;
+      this.write(sessionHeader);
+      if (typeof process !== "undefined") {
+        process.on("exit", () => {
+          this.close();
+        });
+      }
+    } catch {
+      this.stream = null;
+    }
+  }
+  write(line) {
+    this.queue.push(line + "\n");
+    if (this.queue.length >= 50) {
+      this.flush();
+    }
+  }
+  startTimer() {
+    if (this.flushTimer) return;
+    this.flushTimer = setInterval(() => {
+      this.flush();
+    }, 500);
+  }
+  flush() {
+    if (this.isWriting || !this.stream || this.queue.length === 0) return;
+    this.isWriting = true;
+    const batch = this.queue.join("");
+    this.queue = [];
+    try {
+      this.stream.write(batch, () => {
+        this.isWriting = false;
+      });
+    } catch {
+      this.isWriting = false;
+    }
+  }
+  close() {
+    if (this.flushTimer) {
+      clearInterval(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (this.stream) {
+      if (this.queue.length > 0) {
+        try {
+          this.stream.write(this.queue.join(""));
+        } catch {
+        }
+      }
+      this.stream.end();
+      this.stream = null;
+    }
+  }
+}
+const defaultFileSink = new AsyncFileSink();
+class RuntimeStateManager {
+  state;
+  filePath = null;
+  constructor() {
+    const now = Date.now();
+    this.state = {
+      version: "1.1.3",
+      pid: typeof process !== "undefined" ? process.pid : 0,
+      startedAt: now,
+      rssMb: "0.0",
+      heapMb: "0.0",
+      errorCount: 0,
+      warningCount: 0,
+      guestLogsMuted: true,
+      lastUpdated: new Date(now).toISOString()
+    };
+  }
+  init(filePath) {
+    this.filePath = filePath;
+    this.syncMetrics();
+    this.persist();
+  }
+  setGuestLogsMuted(muted) {
+    this.state.guestLogsMuted = muted;
+    this.persist();
+  }
+  incrementError() {
+    this.state.errorCount++;
+    this.syncMetrics();
+    this.persist();
+  }
+  incrementWarning() {
+    this.state.warningCount++;
+    this.syncMetrics();
+    this.persist();
+  }
+  syncMetrics() {
+    if (typeof process !== "undefined" && typeof process.memoryUsage === "function") {
+      try {
+        const mem = process.memoryUsage();
+        this.state.rssMb = (mem.rss / 1024 / 1024).toFixed(1);
+        this.state.heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
+      } catch {
+      }
+    }
+  }
+  getState() {
+    this.syncMetrics();
+    return this.state;
+  }
+  persist() {
+    if (!this.filePath) return;
+    try {
+      this.syncMetrics();
+      this.state.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
+      const dir = require$$1.dirname(this.filePath);
+      if (!require$$1$1.existsSync(dir)) {
+        require$$1$1.mkdirSync(dir, { recursive: true });
+      }
+      require$$1$1.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
+    } catch {
+    }
+  }
+}
+const runtimeState = new RuntimeStateManager();
+let globalCounter = 0;
+class Logger {
+  domain;
+  options;
+  constructor(domain = "MAIN", options = {}) {
+    this.domain = domain;
+    this.options = {
+      minLevel: options.minLevel || "INFO",
+      muteGuestInStdout: options.muteGuestInStdout ?? true,
+      compactMode: options.compactMode ?? (typeof process !== "undefined" && (process.env?.AI_AGENT_MODE === "1" || process.env?.APPLY_AI_LOGS === "1")),
+      enableRedaction: options.enableRedaction ?? true,
+      enableFileSink: options.enableFileSink ?? true,
+      filePath: options.filePath || ""
+    };
+  }
+  setFileSink(filePath) {
+    this.options.filePath = filePath;
+    defaultFileSink.init(filePath);
+  }
+  lastEntryKey = "";
+  repeatCount = 0;
+  lastEntryTime = 0;
+  log(level, message, details, subsystem, correlationId, durationMs, source) {
+    let cleanMsg = message;
+    if (this.options.enableRedaction) {
+      cleanMsg = defaultNoiseFilter.redactSecrets(cleanMsg);
+    }
+    if (defaultNoiseFilter.isBenignNoise(cleanMsg)) {
+      return;
+    }
+    if (this.domain === "GUEST" && defaultNoiseFilter.isRateLimited(subsystem || "guest")) {
+      return;
+    }
+    const now = Date.now();
+    const entryKey = `${this.domain}:${level}:${cleanMsg}`;
+    if (entryKey === this.lastEntryKey && now - this.lastEntryTime < 1e3) {
+      this.repeatCount++;
+      return;
+    }
+    if (this.repeatCount > 0) {
+      const repeats = this.repeatCount;
+      this.repeatCount = 0;
+      this.log("DEBUG", `(Previous message repeated ${repeats} times)`);
+    }
+    this.lastEntryKey = entryKey;
+    this.lastEntryTime = now;
+    const entry = {
+      id: `${now}-${++globalCounter}`,
+      timestamp: now,
+      isoTime: new Date(now).toISOString(),
+      level,
+      domain: this.domain,
+      subsystem,
+      message: cleanMsg,
+      details,
+      correlationId,
+      durationMs,
+      source
+    };
+    flightRecorder.push(entry);
+    if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
+      runtimeState.incrementError();
+    } else if (level === "WARN") {
+      runtimeState.incrementWarning();
+    }
+    if (this.options.enableFileSink) {
+      defaultFileSink.write(defaultFormatter.formatJson(entry));
+    }
+    const entrySev = LOG_LEVEL_SEVERITY[level] || 0;
+    const minSev = LOG_LEVEL_SEVERITY[this.options.minLevel] || 0;
+    if (this.domain === "GUEST" && this.options.muteGuestInStdout && level !== "ERROR" && level !== "FATAL") {
+      return;
+    }
+    if (entrySev >= minSev) {
+      const output = this.options.compactMode ? defaultFormatter.formatCompactAi(entry) : defaultFormatter.formatInteractive(entry);
+      if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
+        console.error(output);
+      } else if (level === "WARN") {
+        console.warn(output);
+      } else {
+        console.log(output);
+      }
+    }
+  }
+  trace(msg, details, sub, source) {
+    this.log("TRACE", msg, details, sub, void 0, void 0, source);
+  }
+  debug(msg, details, sub, source) {
+    this.log("DEBUG", msg, details, sub, void 0, void 0, source);
+  }
+  info(msg, details, sub, source) {
+    this.log("INFO", msg, details, sub, void 0, void 0, source);
+  }
+  warn(msg, details, sub, source) {
+    this.log("WARN", msg, details, sub, void 0, void 0, source);
+  }
+  error(msg, details, sub, source) {
+    this.log("ERROR", msg, details, sub, void 0, void 0, source);
+  }
+  fatal(msg, details, sub, source) {
+    this.log("FATAL", msg, details, sub, void 0, void 0, source);
+  }
+  invariant(condition, breachMsg, details, sub) {
+    if (!condition) {
+      this.log("INVARIANT", `[INVARIANT BREACH] ${breachMsg}`, details, sub);
+    }
+  }
+  tx(name, correlationId, durationMs, error2) {
+    if (error2) {
+      this.log("ERROR", `[TX FAILED] ${name}`, error2, "IPC", correlationId, durationMs);
+    } else {
+      this.log("INFO", `[TX OK] ${name}`, void 0, "IPC", correlationId, durationMs);
+    }
+  }
+}
+const logger = new Logger("MAIN");
+const createLogger = (domain, opts) => new Logger(domain, opts);
+function printStartupBanner(version = "1.1.3", logFile = "apposition.log") {
+  const isDev2 = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
+  if (!isDev2) return;
+  console.log("");
+  console.log("  \x1B[1m\x1B[37mApposition " + version + " (Development Environment)\x1B[0m");
+  console.log("  \x1B[90mDatabase: Connected · Log File: " + logFile + " · Noise Filter: Active\x1B[0m");
+  console.log("");
+  console.log("  \x1B[1mTerminal Controls (Press single key):\x1B[0m");
+  console.log("    \x1B[1m[e]\x1B[0m \x1B[37mShow Errors\x1B[0m        \x1B[90m- View only what failed (press [y] to copy)\x1B[0m");
+  console.log("    \x1B[1m[w]\x1B[0m \x1B[37mShow Warnings\x1B[0m      \x1B[90m- View recent warnings without noisy spam\x1B[0m");
+  console.log("    \x1B[1m[f]\x1B[0m \x1B[37mRecent Actions\x1B[0m     \x1B[90m- See action history right before a crash\x1B[0m");
+  console.log("    \x1B[1m[s]\x1B[0m \x1B[37mSystem Health\x1B[0m      \x1B[90m- Check memory usage, uptime, and error counter\x1B[0m");
+  console.log("    \x1B[1m[d]\x1B[0m \x1B[37mDatabase Health\x1B[0m    \x1B[90m- Check SQLite size, tables, and WAL status\x1B[0m");
+  console.log("    \x1B[1m[r]\x1B[0m \x1B[37mSoft Reload\x1B[0m        \x1B[90m- Instantly reload window (<150ms)\x1B[0m");
+  console.log("    \x1B[1m[t]\x1B[0m \x1B[37mToggle Tab Logs\x1B[0m    \x1B[90m- Mute/unmute external website chatter\x1B[0m");
+  console.log("    \x1B[1m[o]\x1B[0m \x1B[37mOpen Log File\x1B[0m      \x1B[90m- Open apposition.log in your text editor\x1B[0m");
+  console.log("    \x1B[1m[c]\x1B[0m \x1B[37mClean Screen\x1B[0m       \x1B[90m- Clear terminal display & scrollback\x1B[0m");
+  console.log("    \x1B[1m[q]\x1B[0m \x1B[37mClean Quit\x1B[0m         \x1B[90m- Gracefully flush database and exit\x1B[0m");
+  console.log("    \x1B[1m[?]\x1B[0m \x1B[37mHelp Menu\x1B[0m          \x1B[90m- Show all available keyboard shortcuts\x1B[0m");
+  console.log("");
+}
+function executeCommand(key, logFilePath, toggleGuestCallback) {
+  const lower = key.toLowerCase().trim();
+  if (!lower) return;
+  if (lower === "e") {
+    const errors = flightRecorder.getErrors();
+    console.log(`
+\x1B[1m--- Recent Errors (${errors.length}) ---\x1B[0m`);
+    if (errors.length === 0) {
+      console.log("  \x1B[90mNo errors recorded in current session. All systems running cleanly.\x1B[0m\n");
+    } else {
+      for (const err of errors.slice(-10)) {
+        console.log(`  ${defaultFormatter.formatInteractive(err)}`);
+      }
+      console.log("");
+    }
+  } else if (lower === "w") {
+    const warns = flightRecorder.snapshot().filter((e) => e.level === "WARN");
+    console.log(`
+\x1B[1m--- Recent Warnings (${warns.length}) ---\x1B[0m`);
+    if (warns.length === 0) {
+      console.log("  \x1B[90mNo warnings in current session.\x1B[0m\n");
+    } else {
+      for (const w of warns.slice(-10)) {
+        console.log(`  ${defaultFormatter.formatInteractive(w)}`);
+      }
+      console.log("");
+    }
+  } else if (lower === "f") {
+    console.log("\n\x1B[1m--- Recent Actions History (Flight Recorder) ---\x1B[0m");
+    const dump = flightRecorder.dumpSummary(15);
+    console.log(dump || "  \x1B[90mAction buffer is empty.\x1B[0m");
+    console.log("");
+  } else if (lower === "s") {
+    const state = runtimeState.getState();
+    const uptimeSec = Math.floor((Date.now() - state.startedAt) / 1e3);
+    const mins = Math.floor(uptimeSec / 60);
+    const secs = uptimeSec % 60;
+    console.log("\n\x1B[1m--- System Health & Diagnostics ---\x1B[0m");
+    console.log(`  \x1B[37mRAM Usage:\x1B[0m ${state.rssMb} MB (Heap: ${state.heapMb} MB)`);
+    console.log(`  \x1B[37mUptime:\x1B[0m ${mins}m ${secs}s (PID: ${state.pid})`);
+    console.log(`  \x1B[37mErrors:\x1B[0m ${state.errorCount} | \x1B[37mWarnings:\x1B[0m ${state.warningCount}`);
+    console.log(`  \x1B[37mExternal Tab Noise:\x1B[0m ${state.guestLogsMuted ? "MUTED" : "ACTIVE"}
+`);
+  } else if (lower === "o") {
+    console.log(`
+\x1B[90mOpening log file: ${logFilePath}\x1B[0m
+`);
+    const openCmd = process.platform === "win32" ? `start "" "${logFilePath}"` : process.platform === "darwin" ? `open "${logFilePath}"` : `xdg-open "${logFilePath}"`;
+    require$$1$2.exec(openCmd, () => {
+    });
+  } else if (lower === "c") {
+    process.stdout.write("\x1B[2J\x1B[3J\x1B[H");
+    printStartupBanner("1.1.3", logFilePath);
+  } else if (lower === "h" || lower === "?") {
+    printStartupBanner("1.1.3", logFilePath);
+  }
+}
+function initInteractiveTerminal(logFilePath = "apposition.log", toggleGuestCallback) {
+  if (typeof process === "undefined" || !process.stdin) return;
   try {
-    const instance = new Database(dbPath);
+    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
+      process.stdin.setRawMode(true);
+    }
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      const text = String(chunk);
+      if (text === "" || text === "") {
+        process.exit();
+      }
+      for (const char of text.trim()) {
+        executeCommand(char, logFilePath, toggleGuestCallback);
+      }
+    });
+  } catch {
+  }
+}
+const ANTI_DETECTION_SCRIPT = String.raw`(function() {
+
+  try {
+    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+  } catch {}
+
+  try {
+    if (!navigator.plugins || navigator.plugins.length === 0) {
+      Object.defineProperty(navigator, 'plugins', {
+        get: () => [
+          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
+          { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client Executable' }
+        ]
+      });
+    }
+  } catch {}
+
+  try {
+    if (!navigator.languages || navigator.languages.length === 0) {
+      Object.defineProperty(navigator, 'languages', {
+        get: () => ['en-US', 'en']
+      });
+    }
+  } catch {}
+
+
+  try {
+    const ua = navigator.userAgent || '';
+    if (ua.includes('Electron') || ua.includes('Apposition')) {
+      const cleanUa = ua
+        .replace(/\s+Electron\/\S+/gi, '')
+        .replace(/\s+Apposition\w*\/\S+/gi, '')
+        .replace(/(\)\s+)\S+\s+(Chrome\/)/, '$1$2')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+      try {
+        Object.defineProperty(navigator, 'userAgent', {
+          get: () => cleanUa,
+          configurable: true,
+          enumerable: true
+        });
+      } catch {}
+      try {
+        Object.defineProperty(navigator, 'appVersion', {
+          get: () => cleanUa.replace(/^Mozilla\//, ''),
+          configurable: true,
+          enumerable: true
+        });
+      } catch {}
+    }
+
+    const isGoogleAuth =
+      typeof location !== 'undefined' &&
+      (location.hostname === 'accounts.google.com' ||
+        location.hostname === 'accounts.youtube.com' ||
+        (location.hostname.includes('google.com') &&
+          (location.pathname.startsWith('/signin') ||
+            location.pathname.startsWith('/o/oauth2') ||
+            location.pathname.startsWith('/ServiceLogin') ||
+            location.pathname.startsWith('/AccountChooser') ||
+            location.pathname.startsWith('/v3/signin') ||
+            location.pathname.startsWith('/gsi/'))) ||
+        ua.includes('Firefox'));
+
+    if (isGoogleAuth) {
+      try {
+        Object.defineProperty(navigator, 'userAgentData', {
+          get: () => undefined,
+          configurable: true,
+          enumerable: false
+        });
+      } catch {}
+      return;
+    }
+
+    const isMac = ua.includes('Macintosh') || ua.includes('Mac OS X');
+    const isLinux = ua.includes('Linux');
+    const platform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
+    const chromeMatch = ua.match(/Chrome\/([\d.]+)/);
+    const majorVersion = chromeMatch ? chromeMatch[1].split('.')[0] : '144';
+    const brands = [
+      { brand: 'Google Chrome', version: majorVersion },
+      { brand: 'Chromium', version: majorVersion },
+      { brand: 'Not/A)Brand', version: '24' }
+    ];
+    if (!navigator.userAgentData || !navigator.userAgentData.brands || !navigator.userAgentData.brands.some(b => b.brand === 'Google Chrome')) {
+      Object.defineProperty(navigator, 'userAgentData', {
+        get: () => ({
+          brands: brands,
+          mobile: false,
+          platform: platform,
+          getHighEntropyValues: (hints) => Promise.resolve({
+            brands: brands,
+            mobile: false,
+            platform: platform,
+            platformVersion: isMac ? '15.0.0' : isLinux ? '6.5.0' : '10.0.0',
+            architecture: 'x86',
+            bitness: '64',
+            model: ''
+          })
+        }),
+        configurable: true
+      });
+    }
+  } catch {}
+})();`;
+const DEFAULT_CHROME_VERSION$1 = "144.0.7550.80";
+function getHostPlatformName() {
+  if (typeof process !== "undefined" && process.platform) {
+    if (process.platform === "darwin") return "macOS";
+    if (process.platform === "linux") return "Linux";
+  }
+  return "Windows";
+}
+function getDefaultChromeUserAgent() {
+  const chromeVersion = typeof process !== "undefined" && process.versions?.chrome && Number(process.versions.chrome.split(".")[0]) >= 144 ? process.versions.chrome : DEFAULT_CHROME_VERSION$1;
+  const platform = getHostPlatformName();
+  if (platform === "macOS") {
+    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  }
+  if (platform === "Linux") {
+    return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+  }
+  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+}
+function generateClientHints$1(chromeVersion = DEFAULT_CHROME_VERSION$1, platform = getHostPlatformName()) {
+  const major = chromeVersion.split(".")[0] || "144";
+  const brand = "Google Chrome";
+  const secChUa = `"${brand}";v="${major}", "Chromium";v="${major}", "Not/A)Brand";v="24"`;
+  const secChUaFull = `"${brand}";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not/A)Brand";v="24.0.0.0"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+({
+  userAgent: getDefaultChromeUserAgent(),
+  clientHints: generateClientHints$1()
+});
+const activeOAuthPopupIds = /* @__PURE__ */ new Set();
+function registerOAuthPopup(webContentsId) {
+  activeOAuthPopupIds.add(webContentsId);
+}
+function unregisterOAuthPopup(webContentsId) {
+  activeOAuthPopupIds.delete(webContentsId);
+}
+function applyBrowserSwitches(app) {
+  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
+  app.userAgentFallback = getDefaultChromeUserAgent();
+  app.commandLine.appendSwitch("disable-background-timer-throttling");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("max-active-webgl-contexts", "32");
+  app.commandLine.appendSwitch("js-flags", "--max-old-space-size=4096");
+  app.commandLine.appendSwitch("hide-scrollbars");
+  if (process.platform === "darwin") {
+    app.commandLine.appendSwitch("disable-skia-graphite");
+  }
+  if (process.platform === "linux") {
+    app.commandLine.appendSwitch("ozone-platform-hint", "auto");
+    app.commandLine.appendSwitch("enable-features", "WaylandWindowDecorations");
+  }
+  app.commandLine.appendSwitch(
+    "disable-features",
+    "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
+  );
+  app.commandLine.appendSwitch(
+    "disable-blink-features",
+    "WebAuthentication,WebAuthenticationConditionalUI"
+  );
+  app.commandLine.appendSwitch(
+    "force-webrtc-ip-handling-policy",
+    "default_public_interface_only"
+  );
+}
+const isDevMode$2 = utils$2.is.dev || require$$1$3.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+const dbFileName = isDevMode$2 ? "apposition_state_dev.db" : "apposition_state.db";
+const dbPath = require$$1.join(require$$1$3.app.getPath("userData"), dbFileName);
+function applyPragmas(instance) {
+  try {
     instance.pragma("journal_mode = WAL");
     instance.pragma("synchronous = NORMAL");
     instance.pragma("busy_timeout = 5000");
+    instance.pragma("mmap_size = 268435456");
+    instance.pragma("temp_store = MEMORY");
+    instance.pragma("cache_size = -64000");
+  } catch (e) {
+    console.warn("[SQLite Pragmas] Non-critical pragma warning:", e);
+  }
+}
+function initDatabase() {
+  try {
+    const instance = new Database(dbPath);
+    applyPragmas(instance);
     return instance;
   } catch (error2) {
     console.error("[SQLite Error] Database failed to open, recovering:", error2);
-    if (require$$1$2.existsSync(dbPath)) {
+    if (require$$1$1.existsSync(dbPath)) {
       try {
-        require$$1$2.renameSync(dbPath, `${dbPath}.corrupt.${Date.now()}`);
+        require$$1$1.renameSync(dbPath, `${dbPath}.corrupt.${Date.now()}`);
       } catch (backupError) {
-        console.error(
-          "[SQLite Error] Failed to rename corrupt database:",
-          backupError
-        );
+        console.error("[SQLite Error] Failed to rename corrupt database:", backupError);
       }
     }
     try {
       const freshInstance = new Database(dbPath);
-      freshInstance.pragma("journal_mode = WAL");
-      freshInstance.pragma("synchronous = NORMAL");
-      freshInstance.pragma("busy_timeout = 5000");
+      applyPragmas(freshInstance);
       return freshInstance;
     } catch (fallbackErr) {
-      console.error(
-        "[SQLite Fatal] Could not create disk DB, using in-memory fallback:",
-        fallbackErr
-      );
+      console.error("[SQLite Fatal] Could not create disk DB, using in-memory fallback:", fallbackErr);
       const memInstance = new Database(":memory:");
-      memInstance.pragma("busy_timeout = 5000");
+      applyPragmas(memInstance);
       return memInstance;
     }
   }
@@ -353,744 +1095,16 @@ function getInitialAppState() {
     return null;
   }
 }
-const LOG_LEVEL_SEVERITY = {
-  TRACE: 10,
-  DEBUG: 20,
-  INFO: 30,
-  WARN: 40,
-  ERROR: 50,
-  INVARIANT: 60,
-  FATAL: 70
-};
-const BENIGN_NOISE_PATTERNS = [
-  /ResizeObserver loop (limit exceeded|completed with undelivered notifications)/i,
-  /net::ERR_BLOCKED_BY_CLIENT/i,
-  /Third-party cookie will be blocked/i,
-  /DevTools listening on/i,
-  /Autofill\.enable/i,
-  /Autofocus processing was blocked/i,
-  /%cElectron Security Warning/i,
-  /cleanups created outside/i,
-  /\[Featurebase SDK\]/i,
-  /checkForUpdates/i,
-  /Permissions-Policy header/i,
-  /Feature-Policy header/i,
-  /source-map.*404/i,
-  /favicon\.ico.*404/i,
-  /Failed to load resource.*net::ERR_FAILED/i,
-  /\[Violation\]/i,
-  /non-passive event listener/i
-];
-const SECRET_PATTERNS = [
-  [/polar_[a-zA-Z0-9_-]{20,}/g, "polar_[REDACTED]"],
-  [
-    /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
-    "[UUID-KEY-REDACTED]"
-  ],
-  [/Bearer\s+[a-zA-Z0-9._~+\\/-]+=*/gi, "Bearer [REDACTED]"],
-  [/password["']?\s*[:=]\s*["'][^"']+["']/gi, 'password: "[REDACTED]"'],
-  [/token["']?\s*[:=]\s*["'][a-zA-Z0-9._~+\\/-]{16,}["']/gi, 'token: "[REDACTED]"']
-];
-class NoiseFilter {
-  guestBuckets = /* @__PURE__ */ new Map();
-  maxPerWindow = 30;
-  windowMs = 1e3;
-  isBenignNoise(msg) {
-    if (!msg) return true;
-    for (const pattern of BENIGN_NOISE_PATTERNS) {
-      if (pattern.test(msg)) return true;
-    }
-    return false;
-  }
-  redactSecrets(raw) {
-    if (!raw || typeof raw !== "string") return raw;
-    let redacted = raw;
-    for (const [pattern, replacement] of SECRET_PATTERNS) {
-      redacted = redacted.replace(pattern, replacement);
-    }
-    return redacted;
-  }
-  isRateLimited(key) {
-    const now = Date.now();
-    let bucket = this.guestBuckets.get(key);
-    if (!bucket || now - bucket.lastReset > this.windowMs) {
-      bucket = { count: 1, lastReset: now };
-      this.guestBuckets.set(key, bucket);
-      return false;
-    }
-    bucket.count++;
-    return bucket.count > this.maxPerWindow;
-  }
-}
-const defaultNoiseFilter = new NoiseFilter();
-function cleanSourcePath(raw) {
-  if (!raw) return void 0;
-  let clean = raw.replace(/^https?:\/\/[^/]+\/@fs\//, "").replace(/^https?:\/\/[^/]+\//, "").replace(/\?.*$/, "");
-  const match = clean.match(/(?:src\/[^:]+|[^/]+\.[a-zA-Z0-9]+)$/);
-  return match ? match[0] : clean;
-}
-function filterStackTrace(raw) {
-  if (!raw || typeof raw !== "string") return raw;
-  const lines = raw.split("\n");
-  const filtered = lines.filter(
-    (line) => !line.includes("node_modules") && !line.includes("node:electron") && !line.includes("node:internal")
-  );
-  return filtered.length > 0 ? filtered.join("\n") : lines.slice(0, 3).join("\n");
-}
-class LogFormatter {
-  formatInteractive(entry) {
-    const timeStr = `\x1B[90m${entry.isoTime.substring(11, 23)}\x1B[0m`;
-    const domainText = entry.subsystem ? `[${entry.domain}:${entry.subsystem}]` : `[${entry.domain}]`;
-    const domainTag = `\x1B[1m\x1B[37m${domainText}\x1B[0m`;
-    let levelBadge = "";
-    if (entry.level === "ERROR") {
-      levelBadge = ` \x1B[1m\x1B[31mERROR\x1B[0m`;
-    } else if (entry.level === "FATAL") {
-      levelBadge = ` \x1B[1m\x1B[41m\x1B[37m FATAL \x1B[0m`;
-    } else if (entry.level === "WARN") {
-      levelBadge = ` \x1B[33mWARN\x1B[0m`;
-    } else if (entry.level === "INVARIANT") {
-      levelBadge = ` \x1B[1m\x1B[45m\x1B[37m INVARIANT \x1B[0m`;
-    }
-    let line = `${timeStr} ${domainTag}${levelBadge}: ${entry.message}`;
-    if (entry.durationMs !== void 0) {
-      if (entry.durationMs > 30) {
-        line += ` \x1B[33m(SLOW: ${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
-      } else {
-        line += ` \x1B[90m(${entry.durationMs.toFixed(1)}ms)\x1B[0m`;
-      }
-    }
-    if (entry.correlationId) {
-      line += ` \x1B[36m#${entry.correlationId}\x1B[0m`;
-    }
-    const cleanSrc = cleanSourcePath(entry.source?.file);
-    if (cleanSrc) {
-      line += ` \x1B[90m(${cleanSrc}${entry.source?.line ? `:${entry.source.line}` : ""})\x1B[0m`;
-    }
-    if (entry.details !== void 0) {
-      let detailsStr = "";
-      if (typeof entry.details === "string") {
-        detailsStr = filterStackTrace(entry.details);
-      } else if (typeof entry.details === "object") {
-        detailsStr = JSON.stringify(entry.details);
-      } else {
-        detailsStr = String(entry.details);
-      }
-      line += ` \x1B[90m| ${detailsStr}\x1B[0m`;
-    }
-    return line;
-  }
-  formatCompactAi(entry) {
-    const timeStr = entry.isoTime.substring(11, 19);
-    const domain = entry.subsystem ? `${entry.domain}:${entry.subsystem}` : entry.domain;
-    let out2 = `${timeStr} [${entry.level[0]}][${domain}] ${entry.message}`;
-    if (entry.durationMs !== void 0) {
-      out2 += ` ${entry.durationMs.toFixed(0)}ms`;
-    }
-    if (entry.correlationId) {
-      out2 += ` #${entry.correlationId}`;
-    }
-    const cleanSrc = cleanSourcePath(entry.source?.file);
-    if (cleanSrc) {
-      out2 += ` (${cleanSrc}:${entry.source?.line || 0})`;
-    }
-    if (entry.details !== void 0) {
-      out2 += ` :: ${JSON.stringify(entry.details)}`;
-    }
-    return out2;
-  }
-  formatJson(entry) {
-    return JSON.stringify(entry);
-  }
-}
-const defaultFormatter = new LogFormatter();
-class RingBuffer {
-  buffer;
-  pointer = 0;
-  isFull = false;
-  capacity;
-  constructor(capacity = 500) {
-    this.capacity = capacity;
-    this.buffer = new Array(capacity).fill(null);
-  }
-  push(entry) {
-    this.buffer[this.pointer] = entry;
-    this.pointer = (this.pointer + 1) % this.capacity;
-    if (this.pointer === 0) {
-      this.isFull = true;
-    }
-  }
-  snapshot() {
-    if (!this.isFull) {
-      return this.buffer.slice(0, this.pointer).filter(Boolean);
-    }
-    const tail = this.buffer.slice(this.pointer).filter(Boolean);
-    const head = this.buffer.slice(0, this.pointer).filter(Boolean);
-    return [...tail, ...head];
-  }
-  getErrors() {
-    return this.snapshot().filter(
-      (e) => e.level === "ERROR" || e.level === "FATAL" || e.level === "INVARIANT"
-    );
-  }
-  dumpSummary(limit = 20) {
-    const recent = this.snapshot().slice(-limit);
-    return recent.map(
-      (e) => `[${e.isoTime.substring(11, 23)}] [${e.level}][${e.domain}] ${e.message}${e.correlationId ? ` #${e.correlationId}` : ""}`
-    ).join("\n");
-  }
-  clear() {
-    this.buffer.fill(null);
-    this.pointer = 0;
-    this.isFull = false;
-  }
-}
-const flightRecorder = new RingBuffer(500);
-const MAX_LOG_SIZE_BYTES = 5 * 1024 * 1024;
-class AsyncFileSink {
-  stream = null;
-  queue = [];
-  flushTimer = null;
-  filePath = null;
-  isWriting = false;
-  init(filePath) {
-    try {
-      this.filePath = filePath;
-      const dir = require$$1$1.dirname(filePath);
-      if (!require$$1$2.existsSync(dir)) {
-        require$$1$2.mkdirSync(dir, { recursive: true });
-      }
-      if (require$$1$2.existsSync(filePath)) {
-        try {
-          const stats = require$$1$2.statSync(filePath);
-          if (stats.size > MAX_LOG_SIZE_BYTES) {
-            const oldPath = `${filePath}.old`;
-            if (require$$1$2.existsSync(oldPath)) {
-              require$$1$2.unlinkSync(oldPath);
-            }
-            require$$1$2.renameSync(filePath, oldPath);
-          }
-        } catch {
-        }
-      }
-      this.stream = require$$1$2.createWriteStream(filePath, { flags: "a", encoding: "utf8" });
-      this.stream.on("error", () => {
-        this.stream = null;
-      });
-      this.startTimer();
-      const sessionHeader = `
---- [APPOSITION LOG SESSION START: ${(/* @__PURE__ */ new Date()).toISOString()}] (PID ${typeof process !== "undefined" ? process.pid : "N/A"}) ---
-`;
-      this.write(sessionHeader);
-      if (typeof process !== "undefined") {
-        process.on("exit", () => {
-          this.close();
-        });
-      }
-    } catch {
-      this.stream = null;
-    }
-  }
-  write(line) {
-    this.queue.push(line + "\n");
-    if (this.queue.length >= 50) {
-      this.flush();
-    }
-  }
-  startTimer() {
-    if (this.flushTimer) return;
-    this.flushTimer = setInterval(() => {
-      this.flush();
-    }, 500);
-  }
-  flush() {
-    if (this.isWriting || !this.stream || this.queue.length === 0) return;
-    this.isWriting = true;
-    const batch = this.queue.join("");
-    this.queue = [];
-    try {
-      this.stream.write(batch, () => {
-        this.isWriting = false;
-      });
-    } catch {
-      this.isWriting = false;
-    }
-  }
-  close() {
-    if (this.flushTimer) {
-      clearInterval(this.flushTimer);
-      this.flushTimer = null;
-    }
-    if (this.stream) {
-      if (this.queue.length > 0) {
-        try {
-          this.stream.write(this.queue.join(""));
-        } catch {
-        }
-      }
-      this.stream.end();
-      this.stream = null;
-    }
-  }
-}
-const defaultFileSink = new AsyncFileSink();
-class RuntimeStateManager {
-  state;
-  filePath = null;
-  constructor() {
-    const now = Date.now();
-    this.state = {
-      version: "1.1.3",
-      pid: typeof process !== "undefined" ? process.pid : 0,
-      startedAt: now,
-      rssMb: "0.0",
-      heapMb: "0.0",
-      errorCount: 0,
-      warningCount: 0,
-      guestLogsMuted: true,
-      lastUpdated: new Date(now).toISOString()
-    };
-  }
-  init(filePath) {
-    this.filePath = filePath;
-    this.syncMetrics();
-    this.persist();
-  }
-  setGuestLogsMuted(muted) {
-    this.state.guestLogsMuted = muted;
-    this.persist();
-  }
-  incrementError() {
-    this.state.errorCount++;
-    this.syncMetrics();
-    this.persist();
-  }
-  incrementWarning() {
-    this.state.warningCount++;
-    this.syncMetrics();
-    this.persist();
-  }
-  syncMetrics() {
-    if (typeof process !== "undefined" && typeof process.memoryUsage === "function") {
-      try {
-        const mem = process.memoryUsage();
-        this.state.rssMb = (mem.rss / 1024 / 1024).toFixed(1);
-        this.state.heapMb = (mem.heapUsed / 1024 / 1024).toFixed(1);
-      } catch {
-      }
-    }
-  }
-  getState() {
-    this.syncMetrics();
-    return this.state;
-  }
-  persist() {
-    if (!this.filePath) return;
-    try {
-      this.syncMetrics();
-      this.state.lastUpdated = (/* @__PURE__ */ new Date()).toISOString();
-      const dir = require$$1$1.dirname(this.filePath);
-      if (!require$$1$2.existsSync(dir)) {
-        require$$1$2.mkdirSync(dir, { recursive: true });
-      }
-      require$$1$2.writeFileSync(this.filePath, JSON.stringify(this.state, null, 2), "utf8");
-    } catch {
-    }
-  }
-}
-const runtimeState = new RuntimeStateManager();
-let globalCounter = 0;
-class Logger {
-  domain;
-  options;
-  constructor(domain = "MAIN", options = {}) {
-    this.domain = domain;
-    this.options = {
-      minLevel: options.minLevel || "INFO",
-      muteGuestInStdout: options.muteGuestInStdout ?? true,
-      compactMode: options.compactMode ?? (typeof process !== "undefined" && (process.env?.AI_AGENT_MODE === "1" || process.env?.APPLY_AI_LOGS === "1")),
-      enableRedaction: options.enableRedaction ?? true,
-      enableFileSink: options.enableFileSink ?? true,
-      filePath: options.filePath || ""
-    };
-  }
-  setFileSink(filePath) {
-    this.options.filePath = filePath;
-    defaultFileSink.init(filePath);
-  }
-  lastEntryKey = "";
-  repeatCount = 0;
-  lastEntryTime = 0;
-  log(level, message, details, subsystem, correlationId, durationMs, source) {
-    let cleanMsg = message;
-    if (this.options.enableRedaction) {
-      cleanMsg = defaultNoiseFilter.redactSecrets(cleanMsg);
-    }
-    if (defaultNoiseFilter.isBenignNoise(cleanMsg)) {
-      return;
-    }
-    if (this.domain === "GUEST" && defaultNoiseFilter.isRateLimited(subsystem || "guest")) {
-      return;
-    }
-    const now = Date.now();
-    const entryKey = `${this.domain}:${level}:${cleanMsg}`;
-    if (entryKey === this.lastEntryKey && now - this.lastEntryTime < 1e3) {
-      this.repeatCount++;
-      return;
-    }
-    if (this.repeatCount > 0) {
-      const repeats = this.repeatCount;
-      this.repeatCount = 0;
-      this.log("DEBUG", `(Previous message repeated ${repeats} times)`);
-    }
-    this.lastEntryKey = entryKey;
-    this.lastEntryTime = now;
-    const entry = {
-      id: `${now}-${++globalCounter}`,
-      timestamp: now,
-      isoTime: new Date(now).toISOString(),
-      level,
-      domain: this.domain,
-      subsystem,
-      message: cleanMsg,
-      details,
-      correlationId,
-      durationMs,
-      source
-    };
-    flightRecorder.push(entry);
-    if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
-      runtimeState.incrementError();
-    } else if (level === "WARN") {
-      runtimeState.incrementWarning();
-    }
-    if (this.options.enableFileSink) {
-      defaultFileSink.write(defaultFormatter.formatJson(entry));
-    }
-    const entrySev = LOG_LEVEL_SEVERITY[level] || 0;
-    const minSev = LOG_LEVEL_SEVERITY[this.options.minLevel] || 0;
-    if (this.domain === "GUEST" && this.options.muteGuestInStdout && level !== "ERROR" && level !== "FATAL") {
-      return;
-    }
-    if (entrySev >= minSev) {
-      const output = this.options.compactMode ? defaultFormatter.formatCompactAi(entry) : defaultFormatter.formatInteractive(entry);
-      if (level === "ERROR" || level === "FATAL" || level === "INVARIANT") {
-        console.error(output);
-      } else if (level === "WARN") {
-        console.warn(output);
-      } else {
-        console.log(output);
-      }
-    }
-  }
-  trace(msg, details, sub, source) {
-    this.log("TRACE", msg, details, sub, void 0, void 0, source);
-  }
-  debug(msg, details, sub, source) {
-    this.log("DEBUG", msg, details, sub, void 0, void 0, source);
-  }
-  info(msg, details, sub, source) {
-    this.log("INFO", msg, details, sub, void 0, void 0, source);
-  }
-  warn(msg, details, sub, source) {
-    this.log("WARN", msg, details, sub, void 0, void 0, source);
-  }
-  error(msg, details, sub, source) {
-    this.log("ERROR", msg, details, sub, void 0, void 0, source);
-  }
-  fatal(msg, details, sub, source) {
-    this.log("FATAL", msg, details, sub, void 0, void 0, source);
-  }
-  invariant(condition, breachMsg, details, sub) {
-    if (!condition) {
-      this.log("INVARIANT", `[INVARIANT BREACH] ${breachMsg}`, details, sub);
-    }
-  }
-  tx(name, correlationId, durationMs, error2) {
-    if (error2) {
-      this.log("ERROR", `[TX FAILED] ${name}`, error2, "IPC", correlationId, durationMs);
-    } else {
-      this.log("INFO", `[TX OK] ${name}`, void 0, "IPC", correlationId, durationMs);
-    }
-  }
-}
-const logger = new Logger("MAIN");
-const createLogger = (domain, opts) => new Logger(domain, opts);
-function printStartupBanner(version = "1.1.3", logFile = "apposition.log") {
-  const isDev2 = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
-  if (!isDev2) return;
-  console.log("");
-  console.log("  \x1B[1m\x1B[37mApposition " + version + " (Development Environment)\x1B[0m");
-  console.log("  \x1B[90mDatabase: Connected · Log File: " + logFile + " · Noise Filter: Active\x1B[0m");
-  console.log("");
-  console.log("  \x1B[1mTerminal Controls (Press single key):\x1B[0m");
-  console.log("    \x1B[1m[e]\x1B[0m \x1B[37mShow Errors\x1B[0m        \x1B[90m- View only what failed (press [y] to copy)\x1B[0m");
-  console.log("    \x1B[1m[w]\x1B[0m \x1B[37mShow Warnings\x1B[0m      \x1B[90m- View recent warnings without noisy spam\x1B[0m");
-  console.log("    \x1B[1m[f]\x1B[0m \x1B[37mRecent Actions\x1B[0m     \x1B[90m- See action history right before a crash\x1B[0m");
-  console.log("    \x1B[1m[s]\x1B[0m \x1B[37mSystem Health\x1B[0m      \x1B[90m- Check memory usage, uptime, and error counter\x1B[0m");
-  console.log("    \x1B[1m[d]\x1B[0m \x1B[37mDatabase Health\x1B[0m    \x1B[90m- Check SQLite size, tables, and WAL status\x1B[0m");
-  console.log("    \x1B[1m[r]\x1B[0m \x1B[37mSoft Reload\x1B[0m        \x1B[90m- Instantly reload window (<150ms)\x1B[0m");
-  console.log("    \x1B[1m[t]\x1B[0m \x1B[37mToggle Tab Logs\x1B[0m    \x1B[90m- Mute/unmute external website chatter\x1B[0m");
-  console.log("    \x1B[1m[o]\x1B[0m \x1B[37mOpen Log File\x1B[0m      \x1B[90m- Open apposition.log in your text editor\x1B[0m");
-  console.log("    \x1B[1m[c]\x1B[0m \x1B[37mClean Screen\x1B[0m       \x1B[90m- Clear terminal display & scrollback\x1B[0m");
-  console.log("    \x1B[1m[q]\x1B[0m \x1B[37mClean Quit\x1B[0m         \x1B[90m- Gracefully flush database and exit\x1B[0m");
-  console.log("    \x1B[1m[?]\x1B[0m \x1B[37mHelp Menu\x1B[0m          \x1B[90m- Show all available keyboard shortcuts\x1B[0m");
-  console.log("");
-}
-function executeCommand(key, logFilePath, toggleGuestCallback) {
-  const lower = key.toLowerCase().trim();
-  if (!lower) return;
-  if (lower === "e") {
-    const errors = flightRecorder.getErrors();
-    console.log(`
-\x1B[1m--- Recent Errors (${errors.length}) ---\x1B[0m`);
-    if (errors.length === 0) {
-      console.log("  \x1B[90mNo errors recorded in current session. All systems running cleanly.\x1B[0m\n");
-    } else {
-      for (const err of errors.slice(-10)) {
-        console.log(`  ${defaultFormatter.formatInteractive(err)}`);
-      }
-      console.log("");
-    }
-  } else if (lower === "w") {
-    const warns = flightRecorder.snapshot().filter((e) => e.level === "WARN");
-    console.log(`
-\x1B[1m--- Recent Warnings (${warns.length}) ---\x1B[0m`);
-    if (warns.length === 0) {
-      console.log("  \x1B[90mNo warnings in current session.\x1B[0m\n");
-    } else {
-      for (const w of warns.slice(-10)) {
-        console.log(`  ${defaultFormatter.formatInteractive(w)}`);
-      }
-      console.log("");
-    }
-  } else if (lower === "f") {
-    console.log("\n\x1B[1m--- Recent Actions History (Flight Recorder) ---\x1B[0m");
-    const dump = flightRecorder.dumpSummary(15);
-    console.log(dump || "  \x1B[90mAction buffer is empty.\x1B[0m");
-    console.log("");
-  } else if (lower === "s") {
-    const state = runtimeState.getState();
-    const uptimeSec = Math.floor((Date.now() - state.startedAt) / 1e3);
-    const mins = Math.floor(uptimeSec / 60);
-    const secs = uptimeSec % 60;
-    console.log("\n\x1B[1m--- System Health & Diagnostics ---\x1B[0m");
-    console.log(`  \x1B[37mRAM Usage:\x1B[0m ${state.rssMb} MB (Heap: ${state.heapMb} MB)`);
-    console.log(`  \x1B[37mUptime:\x1B[0m ${mins}m ${secs}s (PID: ${state.pid})`);
-    console.log(`  \x1B[37mErrors:\x1B[0m ${state.errorCount} | \x1B[37mWarnings:\x1B[0m ${state.warningCount}`);
-    console.log(`  \x1B[37mExternal Tab Noise:\x1B[0m ${state.guestLogsMuted ? "MUTED" : "ACTIVE"}
-`);
-  } else if (lower === "o") {
-    console.log(`
-\x1B[90mOpening log file: ${logFilePath}\x1B[0m
-`);
-    const openCmd = process.platform === "win32" ? `start "" "${logFilePath}"` : process.platform === "darwin" ? `open "${logFilePath}"` : `xdg-open "${logFilePath}"`;
-    require$$1$3.exec(openCmd, () => {
-    });
-  } else if (lower === "c") {
-    process.stdout.write("\x1B[2J\x1B[3J\x1B[H");
-    printStartupBanner("1.1.3", logFilePath);
-  } else if (lower === "h" || lower === "?") {
-    printStartupBanner("1.1.3", logFilePath);
-  }
-}
-function initInteractiveTerminal(logFilePath = "apposition.log", toggleGuestCallback) {
-  if (typeof process === "undefined" || !process.stdin) return;
-  try {
-    if (process.stdin.isTTY && typeof process.stdin.setRawMode === "function") {
-      process.stdin.setRawMode(true);
-    }
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      const text = String(chunk);
-      if (text === "" || text === "") {
-        process.exit();
-      }
-      for (const char of text.trim()) {
-        executeCommand(char, logFilePath, toggleGuestCallback);
-      }
-    });
-  } catch {
-  }
-}
-const ANTI_DETECTION_SCRIPT = String.raw`(function() {
-
-  try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
-  } catch {}
-
-  try {
-    if (!navigator.plugins || navigator.plugins.length === 0) {
-      Object.defineProperty(navigator, 'plugins', {
-        get: () => [
-          { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-          { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
-          { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client Executable' }
-        ]
-      });
-    }
-  } catch {}
-
-  try {
-    if (!navigator.languages || navigator.languages.length === 0) {
-      Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
-      });
-    }
-  } catch {}
-
-
-  try {
-    const ua = navigator.userAgent || '';
-    if (ua.includes('Electron') || ua.includes('Apposition')) {
-      const cleanUa = ua
-        .replace(/\s+Electron\/\S+/gi, '')
-        .replace(/\s+Apposition\w*\/\S+/gi, '')
-        .replace(/(\)\s+)\S+\s+(Chrome\/)/, '$1$2')
-        .replace(/\s{2,}/g, ' ')
-        .trim();
-      try {
-        Object.defineProperty(navigator, 'userAgent', {
-          get: () => cleanUa,
-          configurable: true,
-          enumerable: true
-        });
-      } catch {}
-      try {
-        Object.defineProperty(navigator, 'appVersion', {
-          get: () => cleanUa.replace(/^Mozilla\//, ''),
-          configurable: true,
-          enumerable: true
-        });
-      } catch {}
-    }
-
-    const isGoogleAuth =
-      typeof location !== 'undefined' &&
-      (location.hostname === 'accounts.google.com' ||
-        location.hostname === 'accounts.youtube.com' ||
-        (location.hostname.includes('google.com') &&
-          (location.pathname.startsWith('/signin') ||
-            location.pathname.startsWith('/o/oauth2') ||
-            location.pathname.startsWith('/ServiceLogin') ||
-            location.pathname.startsWith('/AccountChooser') ||
-            location.pathname.startsWith('/v3/signin') ||
-            location.pathname.startsWith('/gsi/'))) ||
-        ua.includes('Firefox'));
-
-    if (isGoogleAuth) {
-      try {
-        Object.defineProperty(navigator, 'userAgentData', {
-          get: () => undefined,
-          configurable: true,
-          enumerable: false
-        });
-      } catch {}
-      return;
-    }
-
-    const isMac = ua.includes('Macintosh') || ua.includes('Mac OS X');
-    const isLinux = ua.includes('Linux');
-    const platform = isMac ? 'macOS' : isLinux ? 'Linux' : 'Windows';
-    const chromeMatch = ua.match(/Chrome\/([\d.]+)/);
-    const majorVersion = chromeMatch ? chromeMatch[1].split('.')[0] : '144';
-    const brands = [
-      { brand: 'Google Chrome', version: majorVersion },
-      { brand: 'Chromium', version: majorVersion },
-      { brand: 'Not/A)Brand', version: '24' }
-    ];
-    if (!navigator.userAgentData || !navigator.userAgentData.brands || !navigator.userAgentData.brands.some(b => b.brand === 'Google Chrome')) {
-      Object.defineProperty(navigator, 'userAgentData', {
-        get: () => ({
-          brands: brands,
-          mobile: false,
-          platform: platform,
-          getHighEntropyValues: (hints) => Promise.resolve({
-            brands: brands,
-            mobile: false,
-            platform: platform,
-            platformVersion: isMac ? '15.0.0' : isLinux ? '6.5.0' : '10.0.0',
-            architecture: 'x86',
-            bitness: '64',
-            model: ''
-          })
-        }),
-        configurable: true
-      });
-    }
-  } catch {}
-})();`;
-const DEFAULT_CHROME_VERSION$1 = "144.0.7550.80";
-function getHostPlatformName() {
-  if (typeof process !== "undefined" && process.platform) {
-    if (process.platform === "darwin") return "macOS";
-    if (process.platform === "linux") return "Linux";
-  }
-  return "Windows";
-}
-function getDefaultChromeUserAgent() {
-  const chromeVersion = typeof process !== "undefined" && process.versions?.chrome && Number(process.versions.chrome.split(".")[0]) >= 144 ? process.versions.chrome : DEFAULT_CHROME_VERSION$1;
-  const platform = getHostPlatformName();
-  if (platform === "macOS") {
-    return `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
-  }
-  if (platform === "Linux") {
-    return `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
-  }
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
-}
-function generateClientHints$1(chromeVersion = DEFAULT_CHROME_VERSION$1, platform = getHostPlatformName()) {
-  const major = chromeVersion.split(".")[0] || "144";
-  const brand = "Google Chrome";
-  const secChUa = `"${brand}";v="${major}", "Chromium";v="${major}", "Not/A)Brand";v="24"`;
-  const secChUaFull = `"${brand}";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not/A)Brand";v="24.0.0.0"`;
+function toPhysicalRect(r, dpr) {
   return {
-    "sec-ch-ua": secChUa,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": `"${platform}"`,
-    "sec-ch-ua-full-version-list": secChUaFull
+    x: Math.round(r.x * dpr),
+    y: Math.round(r.y * dpr),
+    width: Math.round(r.width * dpr),
+    height: Math.round(r.height * dpr)
   };
 }
-({
-  userAgent: getDefaultChromeUserAgent(),
-  clientHints: generateClientHints$1()
-});
-const activeOAuthPopupIds = /* @__PURE__ */ new Set();
-function registerOAuthPopup(webContentsId) {
-  activeOAuthPopupIds.add(webContentsId);
-}
-function unregisterOAuthPopup(webContentsId) {
-  activeOAuthPopupIds.delete(webContentsId);
-}
-function applyBrowserSwitches(app) {
-  process.env.ELECTRON_DISABLE_SECURITY_WARNINGS = "true";
-  app.userAgentFallback = getDefaultChromeUserAgent();
-  app.commandLine.appendSwitch("disable-background-timer-throttling");
-  app.commandLine.appendSwitch("disable-renderer-backgrounding");
-  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
-  app.commandLine.appendSwitch("max-active-webgl-contexts", "32");
-  app.commandLine.appendSwitch("js-flags", "--max-old-space-size=4096");
-  app.commandLine.appendSwitch("hide-scrollbars");
-  if (process.platform === "darwin") {
-    app.commandLine.appendSwitch("disable-skia-graphite");
-  }
-  if (process.platform === "linux") {
-    app.commandLine.appendSwitch("ozone-platform-hint", "auto");
-    app.commandLine.appendSwitch("enable-features", "WaylandWindowDecorations");
-  }
-  app.commandLine.appendSwitch(
-    "disable-features",
-    "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
-  );
-  app.commandLine.appendSwitch(
-    "disable-blink-features",
-    "WebAuthentication,WebAuthenticationConditionalUI"
-  );
-  app.commandLine.appendSwitch(
-    "force-webrtc-ip-handling-policy",
-    "default_public_interface_only"
-  );
+function isValidPhysicalRect(r) {
+  return Number.isFinite(r.x) && Number.isFinite(r.y) && Number.isFinite(r.width) && Number.isFinite(r.height) && r.width >= 0 && r.height >= 0 && r.width < 1e5 && r.height < 1e5 && r.x > -1e5 && r.y > -1e5;
 }
 const IPC_CHANNELS = {
   DB: {
@@ -1117,6 +1131,37 @@ const IPC_CHANNELS = {
     DELETE_NODE: "db.deleteNode",
     SAVE_TAB_LAYOUT: "db.saveTabLayout"
   },
+  VIEW: {
+    RELOAD: "view.reload",
+    CAPTURE_FULL_PAGE: "view.captureFullPage",
+    CAPTURE_VIEWPORT: "view.captureViewport",
+    REGISTER_WEB_CONTENTS: "view.registerWebContents",
+    CREATE_PANE: "view.createPane",
+    SET_BOUNDS: "view.setBounds",
+    DESTROY_PANE: "view.destroyPane",
+    NAVIGATE: "view.navigate",
+    FOCUS: "view.focusPane",
+    SET_AUDIO_MUTED: "view.setAudioMuted",
+    SET_DEVICE_EMULATION: "view.setDeviceEmulation",
+    SET_NETWORK_THROTTLE: "view.setNetworkThrottle",
+    EXTRACT_READER_MODE: "view.extractReaderMode",
+    PICK_COLOR: "view.pickColor"
+  },
+  SEARCH: {
+    FIND_IN_ALL_PANES: "search.findInAllPanes",
+    STOP_FIND: "search.stopFind"
+  },
+  MEMORY: {
+    GET_STATS: "memory.getStats",
+    SUSPEND_PANE: "memory.suspendPane",
+    RESUME_PANE: "memory.resumePane"
+  },
+  OVERLAY: {
+    FORWARD_POINTER: "overlay.forwardPointer",
+    CURSOR: "overlay.cursor",
+    SHOW: "overlay.show",
+    INTENT: "overlay.intent"
+  },
   LICENSING: {
     ACTIVATE: "licensing.activate",
     VALIDATE: "licensing.validate",
@@ -1131,17 +1176,24 @@ const IPC_CHANNELS = {
     OPEN_GOOGLE_AUTH: "auth.openGoogleAuth",
     EXPORT_VAULT: "vault.exportSession",
     IMPORT_VAULT: "vault.importSession"
+  },
+  EVENTS: {
+    VIEW_NAVIGATED: "view.navigated",
+    VIEW_MEDIA_STATUS: "view.media-status",
+    VIEW_CRASHED: "view.crashed",
+    CONTEXT_MENU_NATIVE: "view.context-menu-native",
+    VIEW_LOADED: "view.loaded"
   }
 };
 function getMachineKeyFilePath() {
-  const userDataPath = require$$1.app.getPath("userData");
-  return require$$1$1.join(userDataPath, "apposition_machine.key");
+  const userDataPath = require$$1$3.app.getPath("userData");
+  return require$$1.join(userDataPath, "apposition_machine.key");
 }
 function getOrCreateMachineKey() {
   const keyPath = getMachineKeyFilePath();
-  if (require$$1$2.existsSync(keyPath)) {
+  if (require$$1$1.existsSync(keyPath)) {
     try {
-      const hex = require$$1$2.readFileSync(keyPath, "utf8").trim();
+      const hex = require$$1$1.readFileSync(keyPath, "utf8").trim();
       if (hex.length === 64) {
         return Buffer.from(hex, "hex");
       }
@@ -1151,11 +1203,11 @@ function getOrCreateMachineKey() {
   }
   const newKey = crypto.randomBytes(32);
   try {
-    const userDataPath = require$$1.app.getPath("userData");
-    if (!require$$1$2.existsSync(userDataPath)) {
-      require$$1$2.mkdirSync(userDataPath, { recursive: true });
+    const userDataPath = require$$1$3.app.getPath("userData");
+    if (!require$$1$1.existsSync(userDataPath)) {
+      require$$1$1.mkdirSync(userDataPath, { recursive: true });
     }
-    require$$1$2.writeFileSync(keyPath, newKey.toString("hex"), "utf8");
+    require$$1$1.writeFileSync(keyPath, newKey.toString("hex"), "utf8");
   } catch (e) {
     console.error("Failed to write machine key", e);
   }
@@ -1466,14 +1518,14 @@ const viewRegistry = new ViewRegistryImpl();
 const activeViews = viewRegistry.activeViews;
 viewRegistry.webContentsIdToPaneId;
 const viewProfile = viewRegistry.viewProfiles;
-const stashedBounds = viewRegistry.stashedBounds;
+viewRegistry.stashedBounds;
 const hibernatedViews = viewRegistry.hibernatedViews;
 function configureSessionForProfile(profileId) {
   try {
     const profile = getProfileById(profileId);
     if (!profile) return;
     const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
-    const ses = require$$1.session.fromPartition(partition);
+    const ses = require$$1$3.session.fromPartition(partition);
     if (profile.proxy_server) {
       ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
         console.error(`Failed to set proxy for session ${profileId}:`, e);
@@ -1504,11 +1556,11 @@ function configureAllSessions() {
   }
 }
 function initDbIpc() {
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_PROFILES, () => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.GET_PROFILES, () => {
     configureAllSessions();
     return getProfiles();
   });
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.DB.CREATE_PROFILE,
     async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       const isPremium = await checkPremiumStatus();
@@ -1523,7 +1575,7 @@ function initDbIpc() {
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.DB.UPDATE_PROFILE,
     (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
       updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
@@ -1531,7 +1583,7 @@ function initDbIpc() {
       return { id, name, color, is_ephemeral, proxy_server, user_agent };
     }
   );
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_PROFILE, async (_, id) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.DELETE_PROFILE, async (_, id) => {
     for (const [paneId, profileId] of viewProfile.entries()) {
       if (profileId === id) {
         const view = activeViews.get(paneId);
@@ -1542,8 +1594,8 @@ function initDbIpc() {
           }
           activeViews.delete(paneId);
           viewProfile.delete(paneId);
-          require$$1.ipcMain.removeAllListeners(`view.updateProfile.${paneId}`);
-          const createHandler = require$$1.ipcMain.listeners("view.create")[0];
+          require$$1$3.ipcMain.removeAllListeners(`view.updateProfile.${paneId}`);
+          const createHandler = require$$1$3.ipcMain.listeners("view.create")[0];
           if (createHandler) {
             createHandler(null, paneId, currentUrl, "main");
           }
@@ -1558,15 +1610,15 @@ function initDbIpc() {
     }
     deleteProfile(id);
     try {
-      const ses = require$$1.session.fromPartition(isEphemeral ? id : `persist:${id}`);
+      const ses = require$$1$3.session.fromPartition(isEphemeral ? id : `persist:${id}`);
       await ses.clearStorageData();
     } catch (e) {
       console.error("[Profile Engine] Failed to wipe session data:", e);
     }
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name, icon) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name, icon) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const workspaces = getWorkspaces();
@@ -1576,29 +1628,29 @@ function initDbIpc() {
     }
     createWorkspace(id, name, icon);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name, icon) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name, icon) => {
     updateWorkspace(id, name, icon);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
     deleteWorkspace(id);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, (_, id, profileId) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, (_, id, profileId) => {
     setWorkspaceDefaultProfile(id, profileId);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, (_, id, profileId) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, (_, id, profileId) => {
     setTabDefaultProfile(id, profileId);
   });
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE,
     (_, workspaceId, profileId) => {
       updatePaneProfilesForWorkspace(workspaceId, profileId);
     }
   );
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, (_, tabId, profileId) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, (_, tabId, profileId) => {
     updatePaneProfilesForTab(tabId, profileId);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_TABS, (_, workspaceId) => getTabs(workspaceId));
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.CREATE_TAB, async (_, id, workspaceId, name) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.GET_TABS, (_, workspaceId) => getTabs(workspaceId));
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.CREATE_TAB, async (_, id, workspaceId, name) => {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const tabs = getTabs(workspaceId);
@@ -1609,42 +1661,42 @@ function initDbIpc() {
     createTab(id, workspaceId, name);
     return { id, workspaceId, name };
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name, customName) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name, customName) => {
     updateTab(id, name, customName);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
     deleteTab(id);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, (_, nodeId, targetTabId) => {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, (_, nodeId, targetTabId) => {
     moveNodeToTab(nodeId, targetTabId);
   });
-  require$$1.ipcMain.handle(IPC_CHANNELS.DB.GET_NODES, (_, tabId) => getNodesForTab(tabId));
-  require$$1.ipcMain.on(IPC_CHANNELS.DB.SAVE_NODE, (_, node2) => saveNode(node2));
-  require$$1.ipcMain.on(IPC_CHANNELS.DB.DELETE_NODE, (_, id) => deleteNode(id));
-  require$$1.ipcMain.on(
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.DB.GET_NODES, (_, tabId) => getNodesForTab(tabId));
+  require$$1$3.ipcMain.on(IPC_CHANNELS.DB.SAVE_NODE, (_, node2) => saveNode(node2));
+  require$$1$3.ipcMain.on(IPC_CHANNELS.DB.DELETE_NODE, (_, id) => deleteNode(id));
+  require$$1$3.ipcMain.on(
     IPC_CHANNELS.DB.SAVE_TAB_LAYOUT,
     (_, tabId, layoutState) => saveTabLayout(tabId, layoutState)
   );
 }
 function initLicensingIpc() {
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.LICENSING.ACTIVATE,
     (_, key) => activateLicenseKey(key)
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.LICENSING.VALIDATE,
     (_, key) => validateLicenseKey(key)
   );
-  require$$1.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.LICENSING.GET_STATE,
     () => getSavedLicenseState()
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.LICENSING.CHECK_PREMIUM,
     () => checkPremiumStatus()
   );
-  require$$1.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
 }
 const ALGORITHM = "aes-256-gcm";
 const KEY_LEN = 32;
@@ -1756,7 +1808,7 @@ function startAuthRelay(targetAuthUrl, profileId = "main", paneId) {
             const relay = activeRelays.get(state);
             if (relay) {
               const partition = relay.profileId === "main" ? "persist:main" : `persist:${relay.profileId}`;
-              const targetSession = require$$1.session.fromPartition(partition);
+              const targetSession = require$$1$3.session.fromPartition(partition);
               if (token) {
                 try {
                   const targetOrigin = new URL(targetAuthUrl).origin;
@@ -1833,7 +1885,7 @@ function startAuthRelay(targetAuthUrl, profileId = "main", paneId) {
         parsedUrl.searchParams.set("code_challenge", pkce.codeChallenge);
         parsedUrl.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
         const finalAuthUrl = parsedUrl.toString();
-        require$$1.shell.openExternal(finalAuthUrl);
+        require$$1$3.shell.openExternal(finalAuthUrl);
         resolve({ success: true, port, authUrl: finalAuthUrl });
       });
       server.on("error", (err) => {
@@ -1933,7 +1985,7 @@ function openGoogleAuthModal(options) {
     }
     const { url, profileId = "main", paneId, returnUrl, parentWebContentsId } = options;
     const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
-    const authWin = new require$$1.BrowserWindow({
+    const authWin = new require$$1$3.BrowserWindow({
       width: 520,
       height: 680,
       center: true,
@@ -1946,7 +1998,7 @@ function openGoogleAuthModal(options) {
       },
       backgroundColor: "#FFFFFF",
       show: false,
-      icon: require$$1$1.join(
+      icon: require$$1.join(
         __dirname,
         process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
       ),
@@ -1957,7 +2009,7 @@ function openGoogleAuthModal(options) {
         // world - the only way it is visible to Google's own scripts.
         // The preload contains nothing but the probe patch: no require,
         // no bridges, so exposure equals a page-level <script>.
-        preload: require$$1$1.join(__dirname, "../preload/authGuard.js"),
+        preload: require$$1.join(__dirname, "../preload/authGuard.js"),
         sandbox: true,
         contextIsolation: false
       }
@@ -1982,7 +2034,7 @@ function openGoogleAuthModal(options) {
         });
       }
       if (parentWebContentsId) {
-        const parentWc = require$$1.webContents.fromId(parentWebContentsId);
+        const parentWc = require$$1$3.webContents.fromId(parentWebContentsId);
         if (parentWc && !parentWc.isDestroyed()) {
           try {
             if (returnUrl) {
@@ -2019,13 +2071,13 @@ function openGoogleAuthModal(options) {
   }
 }
 function initAuthIpc() {
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
     async (_event, origin, profileId) => {
       try {
         if (!origin) return { success: false, error: "Missing origin" };
         const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
-        const targetSession = require$$1.session.fromPartition(partition);
+        const targetSession = require$$1$3.session.fromPartition(partition);
         await targetSession.clearStorageData({
           origin,
           storages: [
@@ -2042,25 +2094,25 @@ function initAuthIpc() {
       }
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.START_RELAY,
     async (_event, targetUrl, profileId, paneId) => {
       if (!targetUrl) return { success: false, error: "Missing URL" };
       return startAuthRelay(targetUrl, profileId || "main", paneId);
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH,
     async (_event, options) => {
       return openGoogleAuthModal(options);
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.EXPORT_VAULT,
     async (_event, profileId, secretKey) => {
       try {
         const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
-        const targetSession = require$$1.session.fromPartition(partition);
+        const targetSession = require$$1$3.session.fromPartition(partition);
         const cookies = await targetSession.cookies.get({});
         const encrypted = encryptSessionPayload(
           { profileId, cookies, exportedAt: Date.now() },
@@ -2073,7 +2125,7 @@ function initAuthIpc() {
       }
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.IMPORT_VAULT,
     async (_event, encryptedPayload, secretKey) => {
       try {
@@ -2082,7 +2134,7 @@ function initAuthIpc() {
           return { success: false, error: "Invalid session payload or key" };
         }
         const partition = decrypted.profileId === "main" ? "persist:main" : `persist:${decrypted.profileId}`;
-        const targetSession = require$$1.session.fromPartition(partition);
+        const targetSession = require$$1$3.session.fromPartition(partition);
         for (const cookie of decrypted.cookies) {
           const scheme = cookie.secure ? "https" : "http";
           const domain = cookie.domain?.startsWith(".") ? cookie.domain.slice(1) : cookie.domain;
@@ -2221,7 +2273,7 @@ const AUTH_SURFACE_URL = "https://accounts.google.com";
 async function purgeGoogleAuthCookies(profileId) {
   try {
     const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
-    const ses = require$$1.session.fromPartition(partition);
+    const ses = require$$1$3.session.fromPartition(partition);
     const stale = await ses.cookies.get({ url: AUTH_SURFACE_URL });
     await Promise.all(
       stale.map(
@@ -2429,11 +2481,11 @@ function configureViewAndSession(paneId, view, profileId) {
     }
     partitionString = isEphemeral ? profileId : `persist:${profileId}`;
   }
-  const ses = partitionString ? require$$1.session.fromPartition(partitionString) : require$$1.session.defaultSession;
+  const ses = partitionString ? require$$1$3.session.fromPartition(partitionString) : require$$1$3.session.defaultSession;
   if (isEphemeral) ses.clearCache().catch(() => {
   });
   configureSessionProxy(ses, proxyServer, profileId);
-  ses.setUserAgent(userAgent && userAgent.trim() ? userAgent.trim() : require$$1.app.userAgentFallback);
+  ses.setUserAgent(userAgent && userAgent.trim() ? userAgent.trim() : require$$1$3.app.userAgentFallback);
   ses.setPermissionRequestHandler((_wc, permission, callback) => {
     const allowed = [
       "notifications",
@@ -2501,9 +2553,9 @@ function createOrUpdateView(paneId, url, profileId = "main") {
     }
     partitionString = isEphemeral ? profileId : `persist:${profileId}`;
   }
-  const view = new require$$1.WebContentsView({
+  const view = new require$$1$3.WebContentsView({
     webPreferences: {
-      preload: require$$1$1.join(__dirname, "../preload/pane.js"),
+      preload: require$$1.join(__dirname, "../preload/pane.js"),
       partition: partitionString,
       sandbox: true,
       contextIsolation: true
@@ -2514,6 +2566,9 @@ function createOrUpdateView(paneId, url, profileId = "main") {
     global.mainWindow.contentView.addChildView(view);
   }
   view.setBackgroundColor("#FFFFFF");
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
   view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
   configureViewAndSession(paneId, view, profileId);
   if (url) {
@@ -2569,13 +2624,13 @@ function destroyAllViews() {
   }
 }
 function initViewLifecycleIpc() {
-  require$$1.ipcMain.on("view.create", (_event, paneId, url, profileId) => {
+  require$$1$3.ipcMain.on("view.create", (_event, paneId, url, profileId) => {
     createOrUpdateView(paneId, url, profileId);
   });
-  require$$1.ipcMain.on("view.destroy", (_event, paneId) => {
+  require$$1$3.ipcMain.on("view.destroy", (_event, paneId) => {
     destroyView(paneId);
   });
-  require$$1.ipcMain.on("view.updateProfile", (_event, paneId, newProfileId) => {
+  require$$1$3.ipcMain.on("view.updateProfile", (_event, paneId, newProfileId) => {
     updateViewProfile(paneId, newProfileId);
   });
 }
@@ -2603,7 +2658,7 @@ const captureViewSafely = async (view) => {
   return "";
 };
 function initCaptureIpc() {
-  require$$1.ipcMain.on("view.screenshot", async (event, paneId) => {
+  require$$1$3.ipcMain.on("view.screenshot", async (event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       try {
@@ -2627,7 +2682,7 @@ function initCaptureIpc() {
       }
     }
   });
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     "view.capture",
     async (_event, paneId) => {
       const view = activeViews.get(paneId);
@@ -2637,7 +2692,7 @@ function initCaptureIpc() {
       return dataURL;
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     "view.captureAllActive",
     async () => {
       const captures = {};
@@ -2652,7 +2707,7 @@ function initCaptureIpc() {
       return captures;
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     "view.hibernateAllActive",
     async () => {
       const captures = {};
@@ -2691,7 +2746,7 @@ function initCaptureIpc() {
       return captures;
     }
   );
-  require$$1.ipcMain.handle(
+  require$$1$3.ipcMain.handle(
     "view.hibernate",
     async (_event, paneId) => {
       const view = activeViews.get(paneId);
@@ -2718,20 +2773,14 @@ function initCaptureIpc() {
     }
   );
 }
-const viewLogger = createLogger("VIEW");
+createLogger("VIEW");
 function initViewIpc() {
-  require$$1.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
+  require$$1$3.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
     if (paneId && typeof wcId === "number") {
       viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
     }
   });
-  require$$1.ipcMain.on("view.reload", (event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.reload();
-    }
-  });
-  require$$1.ipcMain.on("pane.clicked", (event) => {
+  require$$1$3.ipcMain.on("pane.clicked", (event) => {
     for (const [paneId, view] of activeViews) {
       if (view.webContents === event.sender) {
         if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
@@ -2741,120 +2790,57 @@ function initViewIpc() {
       }
     }
   });
-  require$$1.ipcMain.on("view.openDevTools", (event, paneId) => {
+  require$$1$3.ipcMain.on("view.openDevTools", (_event, paneId) => {
     const view = activeViews.get(paneId);
     if (!view || view.webContents.isDestroyed()) return;
-    if (view.webContents.isDevToolsOpened()) {
-      return;
-    }
+    if (view.webContents.isDevToolsOpened()) return;
     activeViews.forEach((v) => {
       if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
         v.webContents.closeDevTools();
       }
     });
-    if (global.mainWindow && !global.mainWindow.isDestroyed() && global.mainWindow.webContents.isDevToolsOpened()) {
-      global.mainWindow.webContents.closeDevTools();
-    }
-    view.webContents.once("devtools-closed", () => {
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("view.devtools-closed");
-      }
-    });
     view.webContents.openDevTools({ mode: "undocked" });
   });
-  require$$1.ipcMain.on("view.closeDevTools", (event, paneId) => {
+  require$$1$3.ipcMain.on("view.closeDevTools", (_event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.closeDevTools();
     }
   });
-  require$$1.ipcMain.on("view.hideDevTools", (event) => {
+  require$$1$3.ipcMain.on("view.hideDevTools", () => {
     activeViews.forEach((v) => {
       if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
     });
   });
-  require$$1.ipcMain.on("view.setBounds", (event, paneId, bounds) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed() && bounds) {
-      view.setBounds(bounds);
-    }
-  });
-  require$$1.ipcMain.on("view.batchSetBounds", (event, boundsMap) => {
-    if (!boundsMap || typeof boundsMap !== "object") return;
-    for (const [paneId, bounds] of Object.entries(boundsMap)) {
-      const view = activeViews.get(paneId);
-      if (view && !view.webContents.isDestroyed() && bounds) {
-        view.setBounds(bounds);
-      }
-    }
-  });
-  require$$1.ipcMain.on("view.loadURL", (event, paneId, url, options) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      if (options?.clearHistory) {
-        view.webContents.clearHistory();
-      }
-      view.webContents.loadURL(url);
-    }
-  });
-  require$$1.ipcMain.on("view.focus", (event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.focus();
-    } else if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.focus();
-      global.mainWindow.webContents.focus();
-    }
-  });
-  require$$1.ipcMain.on("view.goBack", (event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoBack()) {
-      view.webContents.goBack();
-    }
-  });
-  require$$1.ipcMain.on("view.goForward", (event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed() && view.webContents.navigationHistory.canGoForward()) {
-      view.webContents.goForward();
-    }
-  });
-  require$$1.ipcMain.on("view.toggleMute", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setAudioMuted(!view.webContents.isAudioMuted());
-    }
-  });
-  require$$1.ipcMain.on("view.zoomIn", (_, paneId) => {
+  require$$1$3.ipcMain.on("view.zoomIn", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       const level = view.webContents.getZoomLevel();
       view.webContents.setZoomLevel(level + 0.5);
     }
   });
-  require$$1.ipcMain.on("view.zoomOut", (_, paneId) => {
+  require$$1$3.ipcMain.on("view.zoomOut", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       const level = view.webContents.getZoomLevel();
       view.webContents.setZoomLevel(level - 0.5);
     }
   });
-  require$$1.ipcMain.on("view.zoomReset", (_, paneId) => {
+  require$$1$3.ipcMain.on("view.zoomReset", (_, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setZoomLevel(0);
     }
   });
-  require$$1.ipcMain.on("view.sleep", (event, paneId) => {
+  require$$1$3.ipcMain.on("view.sleep", (_event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setBackgroundThrottling(true);
       view.webContents.setAudioMuted(true);
-      view.webContents.executeJavaScript(`console.log("Pane sleeping")`).catch(() => {
-      });
       view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
     }
   });
-  require$$1.ipcMain.on("view.wake", (event, paneId, bounds) => {
+  require$$1$3.ipcMain.on("view.wake", (_event, paneId, bounds) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.setBackgroundThrottling(false);
@@ -2862,58 +2848,144 @@ function initViewIpc() {
       if (bounds) view.setBounds(bounds);
     }
   });
-  require$$1.ipcMain.on("view.hideAll", () => {
-    stashedBounds.clear();
-    for (const [paneId, view] of activeViews) {
-      if (view.webContents.isDestroyed()) continue;
-      stashedBounds.set(paneId, view.getBounds());
-      view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-    }
-  });
-  require$$1.ipcMain.on("view.restoreAll", () => {
-    for (const [paneId, bounds] of stashedBounds) {
-      const view = activeViews.get(paneId);
-      if (view && !view.webContents.isDestroyed()) {
-        view.setBounds(bounds);
-      }
-    }
-    stashedBounds.clear();
-  });
-  require$$1.ipcMain.removeAllListeners("auth:trigger-autofill");
-  require$$1.ipcMain.on("auth:trigger-autofill", (event, paneId) => {
+  require$$1$3.ipcMain.removeAllListeners("auth:trigger-autofill");
+  require$$1$3.ipcMain.on("auth:trigger-autofill", (_event, paneId) => {
     const view = activeViews.get(paneId);
     if (view && !view.webContents.isDestroyed()) {
       view.webContents.send("auth:trigger-autofill");
     }
   });
-  require$$1.ipcMain.handle(
-    "view.getSearchSuggestions",
-    async (_event, query) => {
-      try {
-        const response = await fetch(
-          `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query)}`
-        );
-        if (!response.ok) throw new Error(`HTTP error ${response.status}`);
-        const data = await response.json();
-        return data && Array.isArray(data[1]) ? data[1] : [];
-      } catch (e) {
-        viewLogger.debug("Search suggestions fetch failed", e?.message || e);
-        return [];
-      }
-    }
-  );
 }
 function initViewManager() {
   initViewLifecycleIpc();
   initCaptureIpc();
   initViewIpc();
 }
+const APP_OVERLAY_ID = "__appOverlay";
+function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
+  if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const px = cssX * scale;
+  const py = cssY * scale;
+  let hit;
+  for (const [paneId, r] of s.panes) {
+    const inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
+    if (inside) hit = { paneId, cssLeft: r.cssLeft, cssTop: r.cssTop };
+  }
+  return hit;
+}
+function devicePixelRatioFor(win) {
+  try {
+    if (win.isDestroyed()) return 1;
+    const factor = require$$1$3.screen.getDisplayMatching(win.getBounds()).scaleFactor;
+    return Number.isFinite(factor) && factor > 0 ? factor : 1;
+  } catch {
+    return 1;
+  }
+}
+const composers = /* @__PURE__ */ new Map();
+function registerComposer(win) {
+  const existing = composers.get(win.id);
+  if (existing) return existing;
+  const state = {
+    views: /* @__PURE__ */ new Map(),
+    hidden: /* @__PURE__ */ new Set(),
+    stack: { panes: /* @__PURE__ */ new Map(), transientOrder: [] },
+    paneCss: /* @__PURE__ */ new Map()
+  };
+  composers.set(win.id, state);
+  win.once("closed", () => composers.delete(win.id));
+  return state;
+}
+function attach(win, v, index) {
+  if (win.isDestroyed()) return;
+  const children = win.contentView.children;
+  if (children.includes(v)) return;
+  const at = Math.max(0, Math.min(index ?? children.length, children.length));
+  win.contentView.addChildView(v, at);
+}
+function detach(win, v) {
+  if (win.isDestroyed()) return;
+  if (win.contentView.children.includes(v)) win.contentView.removeChildView(v);
+}
+function setAppOverlay(win, view) {
+  const s = registerComposer(win);
+  if (!view) {
+    const prev = s.views.get(APP_OVERLAY_ID);
+    if (prev) detach(win, prev);
+    s.views.delete(APP_OVERLAY_ID);
+    s.stack.appOverlayId = void 0;
+    return;
+  }
+  s.views.set(APP_OVERLAY_ID, view);
+  attach(win, view);
+  s.stack.appOverlayId = APP_OVERLAY_ID;
+}
+function setTransientOverlay(win, id, view) {
+  const s = registerComposer(win);
+  s.views.set(id, view);
+  attach(win, view);
+  if (!s.stack.transientOrder.includes(id)) s.stack.transientOrder.push(id);
+  s.hidden.delete(id);
+}
+function hideTransient(win, id) {
+  const s = registerComposer(win);
+  s.hidden.add(id);
+  const at = s.stack.transientOrder.indexOf(id);
+  if (at !== -1) s.stack.transientOrder.splice(at, 1);
+}
+function placePane(win, paneId, view, rect) {
+  const s = registerComposer(win);
+  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
+  s.stack.panes.set(paneId, r);
+  s.views.set(paneId, view);
+  const dpr = devicePixelRatioFor(win);
+  const w = r.width / dpr;
+  const h = r.height / dpr;
+  const overlay = s.views.get(APP_OVERLAY_ID);
+  const children = win.isDestroyed() ? [] : win.contentView.children;
+  attach(win, view, overlay ? children.indexOf(overlay) : children.length);
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
+  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
+  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
+}
+function removePane(win, paneId) {
+  const s = registerComposer(win);
+  const view = s.views.get(paneId);
+  if (view) detach(win, view);
+  s.views.delete(paneId);
+  s.hidden.delete(paneId);
+  s.stack.panes.delete(paneId);
+  s.paneCss.delete(paneId);
+}
+function hitTestPaneAt(win, cssX, cssY, dpr = devicePixelRatioFor(win)) {
+  const s = registerComposer(win);
+  const hit = hitTestPaneAtPhysical(s.stack, cssX, cssY, dpr);
+  if (!hit) return void 0;
+  const view = s.views.get(hit.paneId);
+  if (!view) return void 0;
+  return { ...hit, view };
+}
+function reRoundAllPanes(win) {
+  const s = registerComposer(win);
+  const dpr = devicePixelRatioFor(win);
+  for (const [paneId, css] of s.paneCss) {
+    const view = s.views.get(paneId);
+    if (!view || s.hidden.has(paneId)) continue;
+    if (!isValidPhysicalRect(css)) continue;
+    view.setBounds(css);
+    const phys = toPhysicalRect(css, dpr);
+    s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
+  }
+}
 const tearWindows = /* @__PURE__ */ new Map();
 function initTearWindowIpc() {
-  require$$1.ipcMain.on("tear-update", (_event, paneId, x, y) => {
+  require$$1$3.ipcMain.on("tear-update", (_event, paneId, x, y) => {
     let win = tearWindows.get(paneId);
     if (!win) {
-      win = new require$$1.BrowserWindow({
+      win = new require$$1$3.BrowserWindow({
         width: 400,
         height: 300,
         x: x - 200,
@@ -2921,14 +2993,14 @@ function initTearWindowIpc() {
         frame: false,
         transparent: true,
         alwaysOnTop: true,
-        webPreferences: { preload: require$$1$1.join(__dirname, "../preload/index.js") }
+        webPreferences: { preload: require$$1.join(__dirname, "../preload/index.js") }
       });
       win.__isTearWindow = true;
       win.setOpacity(0.8);
       if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
         win.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#tear-${paneId}`);
       } else {
-        win.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"), {
+        win.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
           hash: `tear-${paneId}`
         });
       }
@@ -2938,17 +3010,17 @@ function initTearWindowIpc() {
       if (!win.isVisible()) win.show();
     }
   });
-  require$$1.ipcMain.on("tear-hide", (_event, paneId) => {
+  require$$1$3.ipcMain.on("tear-hide", (_event, paneId) => {
     const win = tearWindows.get(paneId);
     if (win && win.isVisible()) win.hide();
   });
-  require$$1.ipcMain.on("tear-commit", (_event, paneId) => {
+  require$$1$3.ipcMain.on("tear-commit", (_event, paneId) => {
     const win = tearWindows.get(paneId);
     if (win) {
       const bounds = win.getBounds();
       win.destroy();
       tearWindows.delete(paneId);
-      const finalWin = new require$$1.BrowserWindow({
+      const finalWin = new require$$1$3.BrowserWindow({
         ...bounds,
         titleBarStyle: "hidden",
         titleBarOverlay: {
@@ -2957,7 +3029,7 @@ function initTearWindowIpc() {
           height: 40
         },
         webPreferences: {
-          preload: require$$1$1.join(__dirname, "../preload/index.js"),
+          preload: require$$1.join(__dirname, "../preload/index.js"),
           webviewTag: true,
           safeDialogs: true
         }
@@ -2968,107 +3040,94 @@ function initTearWindowIpc() {
           `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
         );
       } else {
-        finalWin.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"), {
+        finalWin.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
           hash: `standalone-${paneId}`
         });
       }
     }
   });
 }
-const rendererLogger = createLogger("RENDERER");
-const windowLogger = createLogger("WINDOW");
+function resolvePreload(name) {
+  return require$$1$3.app.isPackaged ? require$$1.join(process.resourcesPath, "app/out/preload", name) : require$$1.join(require$$1$3.app.getAppPath(), "out/preload", name);
+}
+function resolveAppIcon() {
+  const ico = require$$1.join(require$$1$3.app.getAppPath(), "build/icon.ico");
+  const png = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.png");
+  return process.platform === "win32" ? ico : png;
+}
 function createWindow() {
-  const mainWindow = new require$$1.BrowserWindow({
+  const win = new require$$1$3.BrowserWindow({
     width: 1200,
     height: 800,
-    show: false,
-    frame: false,
-    titleBarStyle: "hidden",
-    trafficLightPosition: { x: 16, y: 16 },
+    icon: resolveAppIcon(),
+    transparent: false,
     backgroundColor: "#F7F7F5",
-    icon: process.platform === "darwin" ? void 0 : require$$1$1.join(
-      __dirname,
-      process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
-    ),
+    frame: false,
+    show: false,
     webPreferences: {
-      preload: require$$1$1.join(__dirname, "../preload/index.js"),
+      preload: resolvePreload("index.js"),
+      contextIsolation: true,
       sandbox: false,
-      webviewTag: true
+      backgroundThrottling: false
     }
   });
-  mainWindow.__isMainWindow = true;
-  global.mainWindow = mainWindow;
-  global.overlayWindow = mainWindow;
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    mainWindow.webContents.send("open-in-new-pane", url);
-    return { action: "deny" };
+  win.__isMainWindow = true;
+  global.mainWindow = win;
+  global.overlayWindow = win;
+  registerComposer(win);
+  return win;
+}
+function createAppOverlay(win) {
+  const view = new require$$1$3.WebContentsView({
+    webPreferences: {
+      preload: resolvePreload("index.js"),
+      contextIsolation: true,
+      sandbox: false
+    }
   });
-  mainWindow.webContents.on(
-    "console-message",
-    (_event, level, message, line, sourceId) => {
-      const source = sourceId ? { file: sourceId, line } : void 0;
-      if (level >= 3) {
-        rendererLogger.error(message, void 0, void 0, source);
-      } else if (level === 2) {
-        rendererLogger.warn(message, void 0, void 0, source);
-      } else if (level === 1) {
-        rendererLogger.info(message, void 0, void 0, source);
-      } else {
-        rendererLogger.debug(message, void 0, void 0, source);
-      }
-    }
-  );
-  mainWindow.webContents.on(
-    "did-fail-load",
-    (_event, errorCode, errorDescription, validatedURL) => {
-      windowLogger.error(
-        `MainWindow load failure [Code ${errorCode}]: ${errorDescription}`,
-        { validatedURL }
-      );
-      if (!utils$2.is.dev) {
-        setTimeout(() => {
-          if (!mainWindow.isDestroyed()) {
-            mainWindow.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"));
-          }
-        }, 500);
-      }
-    }
-  );
-  let isShown = false;
-  const showWindow = () => {
-    if (!isShown && !mainWindow.isDestroyed()) {
-      isShown = true;
-      mainWindow.maximize();
-      mainWindow.show();
-    }
-  };
-  mainWindow.once("ready-to-show", showWindow);
-  setTimeout(showWindow, 1500);
+  view.setBackgroundColor("#00000000");
   if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-    mainWindow.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+    view.webContents.loadURL(process.env["ELECTRON_RENDERER_URL"]);
   } else {
-    mainWindow.loadFile(require$$1$1.join(__dirname, "../renderer/index.html"));
+    view.webContents.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+  }
+  setAppOverlay(win, view);
+  global.appOverlayView = view;
+  global.overlayWindow = win;
+  syncAppOverlayBounds(win);
+  view.webContents.once("dom-ready", () => {
+    view.webContents.send("app:env", { nativeViews: true });
+  });
+  return view;
+}
+function syncAppOverlayBounds(win) {
+  if (!win || win.isDestroyed()) return;
+  const view = global.appOverlayView;
+  if (!view || view.webContents.isDestroyed()) return;
+  const [w, h] = win.getContentSize();
+  if (w > 0 && h > 0) {
+    view.setBounds({ x: 0, y: 0, width: w, height: h });
   }
 }
 function initWindowManagerIpc() {
-  require$$1.ipcMain.on("window.minimize", () => {
+  require$$1$3.ipcMain.on("window.minimize", () => {
     global.mainWindow?.minimize();
   });
-  require$$1.ipcMain.on("window.focus-main", () => {
+  require$$1$3.ipcMain.on("window.focus-main", () => {
     global.mainWindow?.focus();
     global.mainWindow?.webContents.focus();
   });
-  require$$1.ipcMain.on("app.openInternalDevTools", () => {
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.openDevTools({ mode: "undocked" });
+  require$$1$3.ipcMain.on("app.openInternalDevTools", () => {
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+      global.appOverlayView.webContents.openDevTools({ mode: "undocked" });
     }
   });
-  require$$1.ipcMain.on("app.closeInternalDevTools", () => {
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.closeDevTools();
+  require$$1$3.ipcMain.on("app.closeInternalDevTools", () => {
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+      global.appOverlayView.webContents.closeDevTools();
     }
   });
-  require$$1.ipcMain.on("window.maximize", () => {
+  require$$1$3.ipcMain.on("window.maximize", () => {
     const win = global.mainWindow;
     if (win) {
       if (win.isMaximized()) {
@@ -3078,7 +3137,7 @@ function initWindowManagerIpc() {
       }
     }
   });
-  require$$1.ipcMain.on("window.close", () => {
+  require$$1$3.ipcMain.on("window.close", () => {
     global.mainWindow?.close();
   });
   initTearWindowIpc();
@@ -3092,7 +3151,7 @@ function handleWebContentsWindowOpen(webContents) {
     );
     if (decision.type === "SYSTEM_AUTH_RELAY") {
       startAuthRelay(details.url).catch(() => {
-        require$$1.shell.openExternal(details.url);
+        require$$1$3.shell.openExternal(details.url);
       });
       return { action: "deny" };
     }
@@ -3111,7 +3170,7 @@ function handleWebContentsWindowOpen(webContents) {
           },
           backgroundColor: "#FFFFFF",
           show: true,
-          icon: require$$1$1.join(
+          icon: require$$1.join(
             __dirname,
             process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
           ),
@@ -3119,7 +3178,7 @@ function handleWebContentsWindowOpen(webContents) {
           webPreferences: {
             // EXPERIMENT (uncommitted): document-start passkey suppression,
             // same main-world preload rationale as googleAuthModal.ts.
-            preload: require$$1$1.join(__dirname, "../preload/authGuard.js"),
+            preload: require$$1.join(__dirname, "../preload/authGuard.js"),
             sandbox: true,
             contextIsolation: false
           }
@@ -3137,7 +3196,7 @@ function handleWebContentsWindowOpen(webContents) {
       return { action: "deny" };
     }
     if (decision.type === "OPEN_SYSTEM_BROWSER") {
-      require$$1.shell.openExternal(decision.url);
+      require$$1$3.shell.openExternal(decision.url);
       return { action: "deny" };
     }
     return { action: "deny" };
@@ -3149,7 +3208,10 @@ function handleBeforeInputEvent(webContents, event, input) {
   const keyLower = input.key ? input.key.toLowerCase() : "";
   const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
   const isReload = isMod && keyLower === "r" || input.key === "F5";
-  const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
+  const isNum = keyLower >= "0" && keyLower <= "9";
+  const isZoom = isMod && (input.key === "=" || input.key === "+" || input.key === "-" || input.key === "0");
+  const isTabJump = isMod && input.key === "Tab";
+  const isAppShortcut = input.alt && isArrow || isMod && isArrow || isMod && (keyLower === "w" || keyLower === "t" || keyLower === "k" || keyLower === "l" || keyLower === "d" || keyLower === "f" || keyLower === "p" || keyLower === "n" || keyLower === "m" || keyLower === "e" || keyLower === "[" || keyLower === "]" || keyLower === "\\" || keyLower === "/") || input.alt && (keyLower === "d" || keyLower === "f" || keyLower === "p" || input.code === "Space") || isMod && isNum || input.alt && isNum || isZoom || isTabJump || input.key === "F11" || input.key === "F12" || isReload;
   if (isAppShortcut) {
     event.preventDefault();
   }
@@ -3177,8 +3239,12 @@ function handleBeforeInputEvent(webContents, event, input) {
     isInputFocused: false,
     eventId: sharedId
   };
-  if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-    global.mainWindow.webContents.send("forwarded-key", payload);
+  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
+  if (ov && !ov.isDestroyed()) {
+    if (isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
+      ov.focus();
+    }
+    ov.send("forwarded-key", payload);
   }
 }
 const patchedSessions = /* @__PURE__ */ new WeakSet();
@@ -3238,13 +3304,13 @@ function configureSessionSecurity(session) {
   );
 }
 function initSessionSecurity() {
-  if (require$$1.session.defaultSession) {
-    configureSessionSecurity(require$$1.session.defaultSession);
+  if (require$$1$3.session.defaultSession) {
+    configureSessionSecurity(require$$1$3.session.defaultSession);
   }
-  require$$1.app.on("session-created", (session) => {
+  require$$1$3.app.on("session-created", (session) => {
     configureSessionSecurity(session);
   });
-  require$$1.app.on("browser-window-created", (_, popupWin) => {
+  require$$1$3.app.on("browser-window-created", (_, popupWin) => {
     const isAppWindow = popupWin === global.mainWindow || popupWin === global.overlayWindow || popupWin.__isMainWindow || popupWin.__isTearWindow;
     if (isAppWindow) return;
     popupWin.webContents.on("will-navigate", (_e, navUrl) => {
@@ -3270,7 +3336,7 @@ function initSessionSecurity() {
       });
     });
   });
-  require$$1.app.on("web-contents-created", (_, webContents) => {
+  require$$1$3.app.on("web-contents-created", (_, webContents) => {
     configureSessionSecurity(webContents.session);
     webContents.on("dom-ready", () => {
       webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
@@ -3314,7 +3380,7 @@ function initSessionSecurity() {
       }
     });
   });
-  require$$1.app.on("child-process-gone", (_event, details) => {
+  require$$1$3.app.on("child-process-gone", (_event, details) => {
     if (details.type === "GPU" && details.reason === "crashed") {
       console.warn("GPU Process Crashed. Electron will restart it.");
     }
@@ -3329,13 +3395,13 @@ async function flushAllSessions() {
     ]);
     for (const part of partitions) {
       try {
-        const ses = require$$1.session.fromPartition(part);
+        const ses = require$$1$3.session.fromPartition(part);
         await ses.flushStorageData();
       } catch (err) {
         logger.debug(`Flush failed for ${part}`, err);
       }
     }
-    await require$$1.session.defaultSession.flushStorageData();
+    await require$$1$3.session.defaultSession.flushStorageData();
   } catch (e) {
     logger.warn("Failed to flush session storage", e);
   }
@@ -3345,7 +3411,7 @@ function monitorPartitionCookies(partition) {
   if (monitoredPartitions.has(partition)) return;
   monitoredPartitions.add(partition);
   try {
-    const ses = require$$1.session.fromPartition(partition);
+    const ses = require$$1$3.session.fromPartition(partition);
     ses.cookies.on("changed", (_event, cookie, cause, removed) => {
       if (!removed && cause === "explicit") {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
@@ -3363,7 +3429,7 @@ function monitorPartitionCookies(partition) {
 }
 function initSessionPersistenceHooks() {
   try {
-    require$$1.powerMonitor.on("suspend", async () => {
+    require$$1$3.powerMonitor.on("suspend", async () => {
       logger.info("System suspending - flushing session data to disk");
       await flushAllSessions();
     });
@@ -3382,8 +3448,8 @@ function initSessionPersistenceHooks() {
   }
 }
 function initNetworkOptimizer() {
-  const defaultSession = require$$1.session.defaultSession;
-  require$$1.ipcMain.on("net.prefetch", (_, rawUrl) => {
+  const defaultSession = require$$1$3.session.defaultSession;
+  require$$1$3.ipcMain.on("net.prefetch", (_, rawUrl) => {
     if (!rawUrl) return;
     try {
       let hostname = rawUrl;
@@ -3428,18 +3494,18 @@ const handleDeepLink = (url) => {
 function initDeepLinking() {
   if (process.defaultApp) {
     if (process.argv.length >= 2) {
-      require$$1.app.setAsDefaultProtocolClient("apposition", process.execPath, [
+      require$$1$3.app.setAsDefaultProtocolClient("apposition", process.execPath, [
         require$$1__namespace.resolve(process.argv[1])
       ]);
     }
   } else {
-    require$$1.app.setAsDefaultProtocolClient("apposition");
+    require$$1$3.app.setAsDefaultProtocolClient("apposition");
   }
-  const gotTheLock2 = require$$1.app.requestSingleInstanceLock();
+  const gotTheLock2 = require$$1$3.app.requestSingleInstanceLock();
   if (!gotTheLock2) {
-    require$$1.app.quit();
+    require$$1$3.app.quit();
   } else {
-    require$$1.app.on("second-instance", (_event, commandLine) => {
+    require$$1$3.app.on("second-instance", (_event, commandLine) => {
       if (global.mainWindow) {
         if (global.mainWindow.isMinimized()) global.mainWindow.restore();
         global.mainWindow.focus();
@@ -3447,7 +3513,7 @@ function initDeepLinking() {
       const url = commandLine.find((arg) => arg.startsWith("apposition://"));
       handleDeepLink(url);
     });
-    require$$1.app.on("open-url", (event, url) => {
+    require$$1$3.app.on("open-url", (event, url) => {
       event.preventDefault();
       if (global.mainWindow) {
         if (global.mainWindow.isMinimized()) global.mainWindow.restore();
@@ -3901,7 +3967,7 @@ var hasRequiredGracefulFs;
 function requireGracefulFs() {
   if (hasRequiredGracefulFs) return gracefulFs;
   hasRequiredGracefulFs = 1;
-  var fs2 = require$$1$2;
+  var fs2 = require$$1$1;
   var polyfills2 = requirePolyfills();
   var legacy = requireLegacyStreams();
   var clone = requireClone();
@@ -4376,7 +4442,7 @@ var hasRequiredUtils$1;
 function requireUtils$1() {
   if (hasRequiredUtils$1) return utils$1;
   hasRequiredUtils$1 = 1;
-  const path = require$$1$1;
+  const path = require$$1;
   utils$1.checkPath = function checkPath(pth) {
     if (process.platform === "win32") {
       const pathHasInvalidWinCharacters = /[<>:"|?*]/.test(pth.replace(path.parse(pth).root, ""));
@@ -4484,7 +4550,7 @@ function requireStat() {
   if (hasRequiredStat) return stat;
   hasRequiredStat = 1;
   const fs2 = /* @__PURE__ */ requireFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const util2 = require$$4$1;
   function getStats(src2, dest, opts) {
     const statFunc = opts.dereference ? (file2) => fs2.stat(file2, { bigint: true }) : (file2) => fs2.lstat(file2, { bigint: true });
@@ -4615,7 +4681,7 @@ function requireCopy$1() {
   if (hasRequiredCopy$1) return copy_1;
   hasRequiredCopy$1 = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const mkdirs2 = requireMkdirs().mkdirs;
   const pathExists = requirePathExists().pathExists;
   const utimesMillis = requireUtimes().utimesMillis;
@@ -4812,7 +4878,7 @@ function requireCopySync() {
   if (hasRequiredCopySync) return copySync_1;
   hasRequiredCopySync = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const mkdirsSync = requireMkdirs().mkdirsSync;
   const utimesMillisSync = requireUtimes().utimesMillisSync;
   const stat2 = /* @__PURE__ */ requireStat();
@@ -4958,7 +5024,7 @@ function requireRimraf() {
   if (hasRequiredRimraf) return rimraf_1;
   hasRequiredRimraf = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const assert = require$$5;
   const isWindows = process.platform === "win32";
   function defaults(options) {
@@ -5216,7 +5282,7 @@ function requireEmpty() {
   hasRequiredEmpty = 1;
   const u = requireUniversalify().fromPromise;
   const fs2 = /* @__PURE__ */ requireFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const remove = /* @__PURE__ */ requireRemove();
   const emptyDir = u(async function emptyDir2(dir) {
@@ -5254,7 +5320,7 @@ function requireFile() {
   if (hasRequiredFile) return file;
   hasRequiredFile = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1$1;
+  const path = require$$1;
   const fs2 = requireGracefulFs();
   const mkdir = /* @__PURE__ */ requireMkdirs();
   function createFile(file2, callback) {
@@ -5316,7 +5382,7 @@ function requireLink() {
   if (hasRequiredLink) return link;
   hasRequiredLink = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1$1;
+  const path = require$$1;
   const fs2 = requireGracefulFs();
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const pathExists = requirePathExists().pathExists;
@@ -5377,7 +5443,7 @@ var hasRequiredSymlinkPaths;
 function requireSymlinkPaths() {
   if (hasRequiredSymlinkPaths) return symlinkPaths_1;
   hasRequiredSymlinkPaths = 1;
-  const path = require$$1$1;
+  const path = require$$1;
   const fs2 = requireGracefulFs();
   const pathExists = requirePathExists().pathExists;
   function symlinkPaths(srcpath, dstpath, callback) {
@@ -5489,7 +5555,7 @@ function requireSymlink() {
   if (hasRequiredSymlink) return symlink;
   hasRequiredSymlink = 1;
   const u = requireUniversalify().fromCallback;
-  const path = require$$1$1;
+  const path = require$$1;
   const fs2 = /* @__PURE__ */ requireFs();
   const _mkdirs = /* @__PURE__ */ requireMkdirs();
   const mkdirs2 = _mkdirs.mkdirs;
@@ -5617,7 +5683,7 @@ function requireJsonfile$1() {
   try {
     _fs = requireGracefulFs();
   } catch (_) {
-    _fs = require$$1$2;
+    _fs = require$$1$1;
   }
   const universalify2 = requireUniversalify();
   const { stringify, stripBom } = requireUtils();
@@ -5703,7 +5769,7 @@ function requireOutputFile() {
   hasRequiredOutputFile = 1;
   const u = requireUniversalify().fromCallback;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const mkdir = /* @__PURE__ */ requireMkdirs();
   const pathExists = requirePathExists().pathExists;
   function outputFile(file2, data, encoding, callback) {
@@ -5787,7 +5853,7 @@ function requireMove$1() {
   if (hasRequiredMove$1) return move_1;
   hasRequiredMove$1 = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const copy2 = requireCopy().copy;
   const remove = requireRemove().remove;
   const mkdirp = requireMkdirs().mkdirp;
@@ -5858,7 +5924,7 @@ function requireMoveSync() {
   if (hasRequiredMoveSync) return moveSync_1;
   hasRequiredMoveSync = 1;
   const fs2 = requireGracefulFs();
-  const path = require$$1$1;
+  const path = require$$1;
   const copySync = requireCopy().copySync;
   const removeSync = requireRemove().removeSync;
   const mkdirpSync = requireMkdirs().mkdirpSync;
@@ -6911,7 +6977,7 @@ function requireHttpExecutor() {
   httpExecutor.safeStringifyJson = safeStringifyJson;
   const crypto_1 = crypto;
   const debug_12 = requireSrc();
-  const fs_1 = require$$1$2;
+  const fs_1 = require$$1$1;
   const stream_1 = require$$0$1;
   const url_1 = require$$2;
   const CancellationToken_1 = requireCancellationToken();
@@ -15319,10 +15385,10 @@ function requireDownloadedUpdateHelper() {
   DownloadedUpdateHelper.DownloadedUpdateHelper = void 0;
   DownloadedUpdateHelper.createTempUpdateFile = createTempUpdateFile;
   const crypto_1 = crypto;
-  const fs_1 = require$$1$2;
+  const fs_1 = require$$1$1;
   const isEqual = requireLodash_isequal();
   const fs_extra_1 = /* @__PURE__ */ requireLib();
-  const path = require$$1$1;
+  const path = require$$1;
   let DownloadedUpdateHelper$1 = class DownloadedUpdateHelper {
     constructor(cacheDir) {
       this.cacheDir = cacheDir;
@@ -15481,7 +15547,7 @@ function requireAppAdapter() {
   hasRequiredAppAdapter = 1;
   Object.defineProperty(AppAdapter, "__esModule", { value: true });
   AppAdapter.getAppCacheDir = getAppCacheDir;
-  const path = require$$1$1;
+  const path = require$$1;
   const os_1 = os;
   function getAppCacheDir() {
     const homedir = (0, os_1.homedir)();
@@ -15503,10 +15569,10 @@ function requireElectronAppAdapter() {
   hasRequiredElectronAppAdapter = 1;
   Object.defineProperty(ElectronAppAdapter, "__esModule", { value: true });
   ElectronAppAdapter.ElectronAppAdapter = void 0;
-  const path = require$$1$1;
+  const path = require$$1;
   const AppAdapter_1 = requireAppAdapter();
   let ElectronAppAdapter$1 = class ElectronAppAdapter {
-    constructor(app = require$$1.app) {
+    constructor(app = require$$1$3.app) {
       this.app = app;
     }
     whenReady() {
@@ -15555,7 +15621,7 @@ function requireElectronHttpExecutor() {
     const builder_util_runtime_1 = requireOut();
     exports.NET_SESSION_NAME = "electron-updater";
     function getNetSession() {
-      return require$$1.session.fromPartition(exports.NET_SESSION_NAME, {
+      return require$$1$3.session.fromPartition(exports.NET_SESSION_NAME, {
         cache: false
       });
     }
@@ -15596,7 +15662,7 @@ function requireElectronHttpExecutor() {
         if (this.cachedSession == null) {
           this.cachedSession = getNetSession();
         }
-        const request = require$$1.net.request({
+        const request = require$$1$3.net.request({
           ...options,
           session: this.cachedSession
         });
@@ -16463,7 +16529,7 @@ function requirePrivateGitHubProvider() {
   PrivateGitHubProvider.PrivateGitHubProvider = void 0;
   const builder_util_runtime_1 = requireOut();
   const js_yaml_1 = requireJsYaml();
-  const path = require$$1$1;
+  const path = require$$1;
   const url_1 = require$$2;
   const util_1 = requireUtil();
   const GitHubProvider_1 = requireGitHubProvider();
@@ -16738,7 +16804,7 @@ function requireDataSplitter() {
   DataSplitter.DataSplitter = void 0;
   DataSplitter.copyData = copyData;
   const builder_util_runtime_1 = requireOut();
-  const fs_1 = require$$1$2;
+  const fs_1 = require$$1$1;
   const stream_1 = require$$0$1;
   const downloadPlanBuilder_1 = requireDownloadPlanBuilder();
   const DOUBLE_CRLF = Buffer.from("\r\n\r\n");
@@ -17166,7 +17232,7 @@ function requireDifferentialDownloader() {
   DifferentialDownloader.DifferentialDownloader = void 0;
   const builder_util_runtime_1 = requireOut();
   const fs_extra_1 = /* @__PURE__ */ requireLib();
-  const fs_1 = require$$1$2;
+  const fs_1 = require$$1$1;
   const DataSplitter_1 = requireDataSplitter();
   const url_1 = require$$2;
   const downloadPlanBuilder_1 = requireDownloadPlanBuilder();
@@ -17477,7 +17543,7 @@ function requireAppUpdater() {
   const fs_extra_1 = /* @__PURE__ */ requireLib();
   const js_yaml_1 = requireJsYaml();
   const lazy_val_1 = requireMain$1();
-  const path = require$$1$1;
+  const path = require$$1;
   const semver_1 = requireSemver();
   const DownloadedUpdateHelper_1 = requireDownloadedUpdateHelper();
   const ElectronAppAdapter_1 = requireElectronAppAdapter();
@@ -17684,7 +17750,7 @@ function requireAppUpdater() {
         }
         void it.downloadPromise.then(() => {
           const notificationContent = AppUpdater2.formatDownloadNotification(it.updateInfo.version, this.app.name, downloadNotification);
-          new require$$1.Notification(notificationContent).show();
+          new require$$1$3.Notification(notificationContent).show();
         });
         return it;
       });
@@ -18096,8 +18162,8 @@ function requireBaseUpdater() {
   hasRequiredBaseUpdater = 1;
   Object.defineProperty(BaseUpdater, "__esModule", { value: true });
   BaseUpdater.BaseUpdater = void 0;
-  const child_process_1 = require$$1$3;
-  const path = require$$1$1;
+  const child_process_1 = require$$1$2;
+  const path = require$$1;
   const AppUpdater_1 = requireAppUpdater();
   let BaseUpdater$1 = class BaseUpdater extends AppUpdater_1.AppUpdater {
     constructor(options, app) {
@@ -18110,7 +18176,7 @@ function requireBaseUpdater() {
       const isInstalled = this.install(isSilent, isSilent ? isForceRunAfter : this.autoRunAppAfterInstall);
       if (isInstalled) {
         setImmediate(() => {
-          require$$1.autoUpdater.emit("before-quit-for-update");
+          require$$1$3.autoUpdater.emit("before-quit-for-update");
           this.app.quit();
         });
       } else {
@@ -18283,10 +18349,10 @@ function requireAppImageUpdater() {
   Object.defineProperty(AppImageUpdater, "__esModule", { value: true });
   AppImageUpdater.AppImageUpdater = void 0;
   const builder_util_runtime_1 = requireOut();
-  const child_process_1 = require$$1$3;
+  const child_process_1 = require$$1$2;
   const fs_extra_1 = /* @__PURE__ */ requireLib();
-  const fs_1 = require$$1$2;
-  const path = require$$1$1;
+  const fs_1 = require$$1$1;
+  const path = require$$1;
   const BaseUpdater_1 = requireBaseUpdater();
   const FileWithEmbeddedBlockMapDifferentialDownloader_1 = requireFileWithEmbeddedBlockMapDifferentialDownloader();
   const Provider_1 = requireProvider();
@@ -18728,17 +18794,17 @@ function requireMacUpdater() {
   MacUpdater.MacUpdater = void 0;
   const builder_util_runtime_1 = requireOut();
   const fs_extra_1 = /* @__PURE__ */ requireLib();
-  const fs_1 = require$$1$2;
-  const path = require$$1$1;
+  const fs_1 = require$$1$1;
+  const path = require$$1;
   const http_1 = require$$4;
   const AppUpdater_1 = requireAppUpdater();
   const Provider_1 = requireProvider();
-  const child_process_1 = require$$1$3;
+  const child_process_1 = require$$1$2;
   const crypto_1 = crypto;
   let MacUpdater$1 = class MacUpdater2 extends AppUpdater_1.AppUpdater {
     constructor(options, app) {
       super(options, app);
-      this.nativeUpdater = require$$1.autoUpdater;
+      this.nativeUpdater = require$$1$3.autoUpdater;
       this.squirrelDownloadedUpdate = false;
       this.nativeUpdater.on("error", (it) => {
         this._logger.warn(it);
@@ -18974,9 +19040,9 @@ function requireWindowsExecutableCodeSignatureVerifier() {
   Object.defineProperty(windowsExecutableCodeSignatureVerifier, "__esModule", { value: true });
   windowsExecutableCodeSignatureVerifier.verifySignature = verifySignature;
   const builder_util_runtime_1 = requireOut();
-  const child_process_1 = require$$1$3;
+  const child_process_1 = require$$1$2;
   const os$1 = os;
-  const path = require$$1$1;
+  const path = require$$1;
   function preparePowerShellExec(command, timeout) {
     const executable = `set "PSModulePath=" & chcp 65001 >NUL & powershell.exe`;
     const args = ["-NoProfile", "-NonInteractive", "-InputFormat", "None", "-Command", command];
@@ -19088,7 +19154,7 @@ function requireNsisUpdater() {
   Object.defineProperty(NsisUpdater, "__esModule", { value: true });
   NsisUpdater.NsisUpdater = void 0;
   const builder_util_runtime_1 = requireOut();
-  const path = require$$1$1;
+  const path = require$$1;
   const BaseUpdater_1 = requireBaseUpdater();
   const FileWithEmbeddedBlockMapDifferentialDownloader_1 = requireFileWithEmbeddedBlockMapDifferentialDownloader();
   const types_1 = requireTypes();
@@ -19210,7 +19276,7 @@ function requireNsisUpdater() {
         if (errorCode === "UNKNOWN" || errorCode === "EACCES") {
           callUsingElevation();
         } else if (errorCode === "ENOENT") {
-          require$$1.shell.openPath(installerPath).catch((err) => this.dispatchError(err));
+          require$$1$3.shell.openPath(installerPath).catch((err) => this.dispatchError(err));
         } else {
           this.dispatchError(e);
         }
@@ -19269,7 +19335,7 @@ function requireMain() {
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.NsisUpdater = exports.MacUpdater = exports.RpmUpdater = exports.PacmanUpdater = exports.DebUpdater = exports.AppImageUpdater = exports.Provider = exports.NoOpLogger = exports.AppUpdater = exports.BaseUpdater = void 0;
     const fs_extra_1 = /* @__PURE__ */ requireLib();
-    const path = require$$1$1;
+    const path = require$$1;
     var BaseUpdater_1 = requireBaseUpdater();
     Object.defineProperty(exports, "BaseUpdater", { enumerable: true, get: function() {
       return BaseUpdater_1.BaseUpdater;
@@ -19356,7 +19422,7 @@ var mainExports = requireMain();
 const updateLogger = createLogger("UPDATE");
 function initAutoUpdater() {
   mainExports.autoUpdater.logger = null;
-  require$$1.ipcMain.handle("updater.check", async () => {
+  require$$1$3.ipcMain.handle("updater.check", async () => {
     try {
       await mainExports.autoUpdater.checkForUpdates();
       return { success: true };
@@ -19367,7 +19433,7 @@ function initAutoUpdater() {
   mainExports.autoUpdater.on("error", (err) => {
     updateLogger.warn("AutoUpdater error", err?.message || err);
   });
-  if (require$$1.app.isPackaged) {
+  if (require$$1$3.app.isPackaged) {
     try {
       mainExports.autoUpdater.checkForUpdatesAndNotify().catch(() => {
       });
@@ -19389,35 +19455,35 @@ function initAutoUpdater() {
   });
 }
 function initDiagnosticsIpc(logFilePath, isDevMode2) {
-  require$$1.ipcMain.handle("diagnostics.getHealth", () => {
+  require$$1$3.ipcMain.handle("diagnostics.getHealth", () => {
     return {
       uptimeSec: Math.floor(process.uptime()),
       ...runtimeState.getState()
     };
   });
-  require$$1.ipcMain.handle("diagnostics.getErrors", () => {
+  require$$1$3.ipcMain.handle("diagnostics.getErrors", () => {
     return flightRecorder.getErrors();
   });
-  require$$1.ipcMain.handle("diagnostics.getFlightRecorder", () => {
+  require$$1$3.ipcMain.handle("diagnostics.getFlightRecorder", () => {
     return flightRecorder.snapshot();
   });
-  require$$1.ipcMain.handle("diagnostics.toggleGuestNoise", () => {
+  require$$1$3.ipcMain.handle("diagnostics.toggleGuestNoise", () => {
     const next = !runtimeState.getState().guestLogsMuted;
     runtimeState.setGuestLogsMuted(next);
     return next;
   });
-  require$$1.ipcMain.handle("diagnostics.openLogFile", () => {
-    require$$1.shell.openPath(logFilePath);
+  require$$1$3.ipcMain.handle("diagnostics.openLogFile", () => {
+    require$$1$3.shell.openPath(logFilePath);
   });
 }
 function initDevCommandBridge(isDevMode2) {
   if (!isDevMode2) return;
-  const cmdPath = require$$1$1.join(require$$1.app.getPath("userData"), ".apposition-command.json");
+  const cmdPath = require$$1.join(require$$1$3.app.getPath("userData"), ".apposition-command.json");
   const checkCommand = () => {
-    if (!require$$1$2.existsSync(cmdPath)) return;
+    if (!require$$1$1.existsSync(cmdPath)) return;
     try {
-      const data = JSON.parse(require$$1$2.readFileSync(cmdPath, "utf8"));
-      require$$1$2.unlinkSync(cmdPath);
+      const data = JSON.parse(require$$1$1.readFileSync(cmdPath, "utf8"));
+      require$$1$1.unlinkSync(cmdPath);
       if (data.command === "reload") {
         if (global.mainWindow && !global.mainWindow.isDestroyed()) {
           logger.info("Soft reloading main window via dev command");
@@ -19425,14 +19491,14 @@ function initDevCommandBridge(isDevMode2) {
         }
       } else if (data.command === "quit") {
         logger.info("Gracefully quitting via dev command");
-        require$$1.app.quit();
+        require$$1$3.app.quit();
       }
     } catch {
     }
   };
   try {
-    const dir = require$$1.app.getPath("userData");
-    require$$1$2.watch(dir, (_event, filename) => {
+    const dir = require$$1$3.app.getPath("userData");
+    require$$1$1.watch(dir, (_event, filename) => {
       if (filename && filename.includes(".apposition-command.json")) {
         checkCommand();
       }
@@ -19486,7 +19552,7 @@ function initMainSentry(isDevMode2) {
   try {
     Sentry__namespace.init({
       dsn: SENTRY_DSN,
-      release: `apposition@${require$$1.app.getVersion()}`,
+      release: `apposition@${require$$1$3.app.getVersion()}`,
       environment: "production",
       enabled: !isDevMode2,
       sampleRate: 1,
@@ -19508,73 +19574,963 @@ function captureMainException(err, context) {
   } catch {
   }
 }
-applyBrowserSwitches(require$$1.app);
-const isDevMode = utils$2.is.dev || require$$1.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+function toCdpButton(button, isMove = false, buttons = 0) {
+  if (isMove) {
+    if ((buttons & 1) !== 0) return "left";
+    if ((buttons & 2) !== 0) return "right";
+    if ((buttons & 4) !== 0) return "middle";
+    return "none";
+  }
+  if (button === 0) return "left";
+  if (button === 1) return "middle";
+  if (button === 2) return "right";
+  return "none";
+}
+function toCdpModifiers(modifiers) {
+  return typeof modifiers === "number" && Number.isFinite(modifiers) ? modifiers : 0;
+}
+function initPointerForwarder(getWindow) {
+  require$$1$3.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
+    const win = getWindow();
+    if (!win) return;
+    const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
+    if (!hit) return;
+    const view = composers.get(win.id)?.views.get(hit.paneId);
+    if (!view) return;
+    const dbg = ensureDebugger(view);
+    if (!dbg) return;
+    const localX = Math.round(msg.x - hit.cssLeft);
+    const localY = Math.round(msg.y - hit.cssTop);
+    if (msg.type === "wheel") {
+      dbg.sendCommand("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: localX,
+        y: localY,
+        deltaX: msg.deltaX,
+        deltaY: msg.deltaY,
+        modifiers: toCdpModifiers(msg.modifiers),
+        pointerType: "mouse"
+      }).catch(() => {
+      });
+    } else {
+      if (msg.type === "mousedown") {
+        view.webContents.focus();
+        global.appOverlayView?.webContents.send("pane.focused", hit.paneId);
+      }
+      const isMove = msg.type === "mousemove";
+      dbg.sendCommand("Input.dispatchMouseEvent", {
+        type: msg.type === "mousedown" ? "mousePressed" : msg.type === "mouseup" ? "mouseReleased" : "mouseMoved",
+        x: localX,
+        y: localY,
+        button: toCdpButton(msg.button, isMove, msg.buttons),
+        buttons: msg.buttons,
+        clickCount: isMove ? 0 : msg.clickCount || (msg.type === "mousedown" ? 1 : 0),
+        modifiers: toCdpModifiers(msg.modifiers),
+        pointerType: "mouse"
+      }).catch(() => {
+      });
+    }
+  });
+}
+function ensureDebugger(view) {
+  if (view.webContents.debugger.isAttached()) return view.webContents.debugger;
+  try {
+    view.webContents.debugger.attach("1.3");
+  } catch {
+    return void 0;
+  }
+  return view.webContents.debugger;
+}
+let overlayPreloadPath = "";
+const transientSpecs = /* @__PURE__ */ new Map();
+function initOverlayProjector(getWindow, preloadPath = "") {
+  overlayPreloadPath = preloadPath;
+  require$$1$3.ipcMain.on(IPC_CHANNELS.OVERLAY.SHOW, (_e, specs) => {
+    const win = getWindow();
+    if (!win) return;
+    const desired = new Set(specs.map((s) => s.id));
+    const state = composers.get(win.id);
+    if (!state) return;
+    let specsForWin = transientSpecs.get(win.id);
+    if (!specsForWin) {
+      specsForWin = /* @__PURE__ */ new Map();
+      transientSpecs.set(win.id, specsForWin);
+    }
+    for (const spec of specs) {
+      const view = ensureView(win, state, spec);
+      positionView(view, spec);
+      view.setVisible(true);
+      specsForWin.set(spec.id, spec);
+    }
+    for (const id of [...state.stack.transientOrder]) {
+      if (!desired.has(id)) {
+        hideView(win, state, id);
+        specsForWin.delete(id);
+      }
+    }
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.OVERLAY.INTENT, (_e, intent) => {
+    global.appOverlayView?.webContents.send("app:overlay-intent", intent);
+  });
+}
+function ensureView(win, state, spec) {
+  const existing = state.views.get(spec.id);
+  if (existing && !existing.webContents.isDestroyed()) return existing;
+  const view = new require$$1$3.WebContentsView({
+    webPreferences: {
+      preload: overlayPreloadPath,
+      contextIsolation: true,
+      sandbox: false,
+      partition: "persist:overlay"
+    }
+  });
+  view.webContents.loadURL("app://overlay/index.html");
+  setTransientOverlay(win, spec.id, view);
+  return view;
+}
+function positionView(view, spec) {
+  const rect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
+  if (isValidPhysicalRect(rect)) view.setBounds(rect);
+}
+function hideView(win, state, id) {
+  hideTransient(win, id);
+  const v = state.views.get(id);
+  if (v) {
+    v.setVisible(false);
+    v.setBounds({ x: -1e4, y: -1e4, width: 1, height: 1 });
+  }
+}
+function repositionTransientOverlays(win) {
+  const specsForWin = transientSpecs.get(win.id);
+  if (!specsForWin) return;
+  const state = composers.get(win.id);
+  if (!state) return;
+  for (const [id, spec] of specsForWin) {
+    const v = state.views.get(id);
+    if (v) {
+      positionView(v, spec);
+      v.setVisible(true);
+    }
+  }
+}
+function bindGuestCursor(wc) {
+  wc.on("cursor-changed", (_e, type2) => {
+    global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type2);
+  });
+}
+async function captureWebContentsCdp(wc, options = { fullPage: true, copyToClipboard: true }) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  const dbg = wc.debugger;
+  let attached = false;
+  try {
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+      attached = true;
+    }
+    await dbg.sendCommand("Page.enable");
+    let screenshotData;
+    if (options.fullPage) {
+      screenshotData = await dbg.sendCommand("Page.captureScreenshot", {
+        format: options.format || "png",
+        quality: options.quality || 95,
+        captureBeyondViewport: true,
+        fromSurface: true
+      });
+    } else {
+      screenshotData = await dbg.sendCommand("Page.captureScreenshot", {
+        format: options.format || "png",
+        quality: options.quality || 95,
+        fromSurface: true
+      });
+    }
+    const buffer = Buffer.from(screenshotData.data, "base64");
+    const image = require$$1$3.nativeImage.createFromBuffer(buffer);
+    if (options.copyToClipboard) {
+      require$$1$3.clipboard.writeImage(image);
+    }
+    let filePath = options.savePath;
+    if (!filePath && !options.copyToClipboard) {
+      const fileName = `screenshot-${Date.now()}.${options.format || "png"}`;
+      filePath = require$$1.join(require$$1$3.app.getPath("pictures"), fileName);
+      await promises.writeFile(filePath, buffer);
+    } else if (filePath) {
+      await promises.writeFile(filePath, buffer);
+    }
+    return {
+      success: true,
+      dataUrl: image.toDataURL(),
+      filePath
+    };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  } finally {
+    if (attached && dbg.isAttached()) {
+      try {
+        dbg.detach();
+      } catch {
+      }
+    }
+  }
+}
+class MultiPaneSearchCoordinator {
+  activeQuery = "";
+  paneResults = /* @__PURE__ */ new Map();
+  findInPanes(panes2, query, options = {}) {
+    const trimmed = (query || "").trim();
+    if (!trimmed) {
+      this.stopFind(panes2, "clearSelection");
+      return;
+    }
+    this.activeQuery = trimmed;
+    const hasTarget = Boolean(options.targetPaneId && panes2.has(options.targetPaneId));
+    for (const [paneId, wc] of panes2.entries()) {
+      if (!wc.isDestroyed()) {
+        if (hasTarget && paneId !== options.targetPaneId) {
+          wc.stopFindInPage("clearSelection");
+          this.paneResults.delete(paneId);
+          continue;
+        }
+        const reqId = wc.findInPage(trimmed, {
+          forward: options.forward ?? true,
+          findNext: options.findNext ?? false,
+          matchCase: options.matchCase ?? false
+        });
+        const current = this.paneResults.get(paneId);
+        this.paneResults.set(paneId, {
+          activeMatch: current?.activeMatch || 0,
+          total: current?.total || 0,
+          requestId: reqId
+        });
+      }
+    }
+  }
+  handlePaneResult(paneId, result) {
+    const total = typeof result.matches === "number" ? result.matches : typeof result.numberOfMatches === "number" ? result.numberOfMatches : 0;
+    const active = result.activeMatchOrdinal || 0;
+    const reqId = result.requestId || 0;
+    const existing = this.paneResults.get(paneId);
+    if (existing && reqId > 0 && existing.requestId > 0 && reqId < existing.requestId) {
+      return this.aggregateResults();
+    }
+    this.paneResults.set(paneId, {
+      activeMatch: active,
+      total,
+      requestId: reqId || existing?.requestId || 0
+    });
+    return this.aggregateResults();
+  }
+  aggregateResults() {
+    let totalMatches = 0;
+    let currentMatchOrdinal = 0;
+    let activePaneWithMatch;
+    const paneBreakdown = {};
+    for (const [id, res] of this.paneResults.entries()) {
+      paneBreakdown[id] = { activeMatch: res.activeMatch, total: res.total };
+      totalMatches += res.total;
+      if (res.activeMatch > 0) {
+        currentMatchOrdinal = res.activeMatch;
+        activePaneWithMatch = id;
+      }
+    }
+    if (totalMatches > 0 && currentMatchOrdinal === 0) {
+      currentMatchOrdinal = 1;
+    }
+    return {
+      totalMatches,
+      currentMatchOrdinal,
+      paneBreakdown,
+      activePaneId: activePaneWithMatch
+    };
+  }
+  stopFind(panes2, action = "clearSelection") {
+    this.activeQuery = "";
+    this.paneResults.clear();
+    for (const [, wc] of panes2.entries()) {
+      if (!wc.isDestroyed()) {
+        wc.stopFindInPage(action);
+      }
+    }
+  }
+}
+const multiPaneSearch = new MultiPaneSearchCoordinator();
+class PaneWarmSleepService {
+  suspendedPanes = /* @__PURE__ */ new Set();
+  suspendPaneView(win, paneId, view) {
+    if (this.suspendedPanes.has(paneId)) return false;
+    try {
+      win.contentView.removeChildView(view);
+      this.suspendedPanes.add(paneId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  resumePaneView(win, paneId, view, insertIndex = 0) {
+    if (!this.suspendedPanes.has(paneId)) return false;
+    try {
+      win.contentView.addChildView(view, insertIndex);
+      this.suspendedPanes.delete(paneId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  isPaneSuspended(paneId) {
+    return this.suspendedPanes.has(paneId);
+  }
+  async getPaneMemoryMetrics(panes2) {
+    const stats = [];
+    for (const [paneId, view] of panes2.entries()) {
+      if (view.webContents.isDestroyed()) continue;
+      stats.push({
+        paneId,
+        url: view.webContents.getURL(),
+        title: view.webContents.getTitle(),
+        isWarmSuspended: this.suspendedPanes.has(paneId)
+      });
+    }
+    return stats;
+  }
+}
+const warmSleepService = new PaneWarmSleepService();
+const DEVICE_CONFIGS = {
+  iphone_16_pro: {
+    width: 393,
+    height: 852,
+    scale: 3,
+    mobile: true,
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+  },
+  ipad_air: {
+    width: 820,
+    height: 1180,
+    scale: 2,
+    mobile: true,
+    ua: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+  },
+  pixel_9: {
+    width: 412,
+    height: 924,
+    scale: 2.625,
+    mobile: true,
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+  }
+};
+async function setPaneDeviceEmulation(wc, device) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  const dbg = wc.debugger;
+  try {
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+    }
+    if (device === "reset") {
+      await dbg.sendCommand("Emulation.clearDeviceMetricsOverride");
+      await dbg.sendCommand("Network.setUserAgentOverride", { userAgent: "" });
+      return { success: true };
+    }
+    const cfg = DEVICE_CONFIGS[device];
+    if (!cfg) return { success: false, error: "Unknown device type" };
+    await dbg.sendCommand("Emulation.setDeviceMetricsOverride", {
+      width: cfg.width,
+      height: cfg.height,
+      deviceScaleFactor: cfg.scale,
+      mobile: cfg.mobile
+    });
+    await dbg.sendCommand("Network.setUserAgentOverride", {
+      userAgent: cfg.ua
+    });
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+const THROTTLE_PROFILES = {
+  offline: { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
+  slow_3g: {
+    offline: false,
+    latency: 400,
+    downloadThroughput: 400 * 1024 / 8,
+    uploadThroughput: 400 * 1024 / 8
+  },
+  fast_3g: {
+    offline: false,
+    latency: 150,
+    downloadThroughput: 1.6 * 1024 * 1024 / 8,
+    uploadThroughput: 750 * 1024 / 8
+  },
+  fast_4g: {
+    offline: false,
+    latency: 20,
+    downloadThroughput: 20 * 1024 * 1024 / 8,
+    uploadThroughput: 10 * 1024 * 1024 / 8
+  }
+};
+async function setPaneNetworkThrottling(wc, profile) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  const dbg = wc.debugger;
+  try {
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+    }
+    await dbg.sendCommand("Network.enable");
+    if (profile === "reset") {
+      await dbg.sendCommand("Network.emulateNetworkConditions", {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1
+      });
+      return { success: true };
+    }
+    const cfg = THROTTLE_PROFILES[profile];
+    if (!cfg) return { success: false, error: "Unknown profile" };
+    await dbg.sendCommand("Network.emulateNetworkConditions", cfg);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+async function extractPaneReaderContent(wc) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  try {
+    const script = `
+      (() => {
+        try {
+          const doc = document.cloneNode(true);
+          const removeSelectors = [
+            "script", "style", "noscript", "iframe", "svg", "button", "input",
+            "header", "footer", "nav", "aside", ".advertisement", ".ad",
+            ".cookie-banner", "#cookie-banner", ".popup", ".newsletter-signup"
+          ];
+          removeSelectors.forEach(sel => {
+            doc.querySelectorAll(sel).forEach(el => el.remove());
+          });
+
+          const title = document.querySelector("h1")?.innerText || document.title || "";
+          const byline = document.querySelector("meta[name='author']")?.getAttribute("content") ||
+                         document.querySelector(".byline, [rel='author']")?.innerText || "";
+          
+          let mainEl = doc.querySelector("article, main, .article-body, #article-body, .post-content, .entry-content");
+          if (!mainEl) {
+            mainEl = doc.body;
+          }
+
+          const text = mainEl.innerText || "";
+          const words = text.trim().split(/\\s+/).length;
+          const readingTimeMinutes = Math.max(1, Math.ceil(words / 200));
+
+          return {
+            title: title.trim(),
+            byline: byline.trim(),
+            excerpt: text.slice(0, 180).trim() + "...",
+            contentHtml: mainEl.innerHTML,
+            readingTimeMinutes,
+            url: window.location.href,
+          };
+        } catch (e) {
+          return null;
+        }
+      })();
+    `;
+    const article = await wc.executeJavaScript(script, true);
+    if (!article) return { success: false, error: "Could not extract article content" };
+    return { success: true, article };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+async function pickColorFromPane(wc, x, y) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  try {
+    const img = await wc.capturePage({
+      x: Math.max(0, Math.floor(x)),
+      y: Math.max(0, Math.floor(y)),
+      width: 1,
+      height: 1
+    });
+    const bitmap = img.toBitmap();
+    if (bitmap.length < 4) {
+      return { success: false, error: "Empty pixel buffer" };
+    }
+    const b = bitmap[0];
+    const g = bitmap[1];
+    const r = bitmap[2];
+    const toHex = (n) => n.toString(16).padStart(2, "0").toUpperCase();
+    const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    require$$1$3.clipboard.writeText(hex);
+    return {
+      success: true,
+      hex,
+      rgb: { r, g, b }
+    };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+function extractUnreadBadgeFromTitle(title) {
+  if (!title || typeof title !== "string") {
+    return { count: 0, hasUnread: false, rawTitle: "" };
+  }
+  const clean = title.trim();
+  const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
+  if (parenMatch && parenMatch[1]) {
+    const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  if (clean.startsWith("*") || clean.startsWith("•") || clean.startsWith("●")) {
+    return {
+      count: 1,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  const wordMatch = clean.match(/([0-9]+)\s+(unread|new|notifications?)/i);
+  if (wordMatch && wordMatch[1]) {
+    const num = parseInt(wordMatch[1], 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  return { count: 0, hasUnread: false, rawTitle: clean };
+}
+const DEFAULT_COMMUNICATOR_APPS = [
+  { id: "slack", name: "Slack", url: "https://app.slack.com/client", icon: "slack", partition: "persist:main", unreadCount: 0 },
+  { id: "gmail", name: "Gmail", url: "https://mail.google.com", icon: "gmail", partition: "persist:main", unreadCount: 0 },
+  { id: "whatsapp", name: "WhatsApp", url: "https://web.whatsapp.com", icon: "whatsapp", partition: "persist:main", unreadCount: 0 },
+  { id: "discord", name: "Discord", url: "https://discord.com/app", icon: "discord", partition: "persist:main", unreadCount: 0 },
+  { id: "telegram", name: "Telegram", url: "https://web.telegram.org", icon: "telegram", partition: "persist:main", unreadCount: 0 },
+  { id: "linear", name: "Linear", url: "https://linear.app/inbox", icon: "linear", partition: "persist:main", unreadCount: 0 },
+  { id: "notion", name: "Notion", url: "https://www.notion.so", icon: "notion", partition: "persist:main", unreadCount: 0 }
+];
+class CommunicatorService {
+  apps = [...DEFAULT_COMMUNICATOR_APPS];
+  views = /* @__PURE__ */ new Map();
+  activeAppId = "slack";
+  isDrawerOpen = false;
+  getApps() {
+    return this.apps;
+  }
+  getTotalUnreadCount() {
+    return this.apps.reduce((sum, app) => sum + app.unreadCount, 0);
+  }
+  updateAppUnread(appId, info) {
+    const app = this.apps.find((a) => a.id === appId);
+    if (app) {
+      const prevCount = app.unreadCount;
+      app.unreadCount = info.count;
+      global.appOverlayView?.webContents.send("communicator.unread-updated", {
+        appId,
+        unreadCount: info.count,
+        totalUnread: this.getTotalUnreadCount()
+      });
+      if (info.count > prevCount && info.count > 0) {
+        global.appOverlayView?.webContents.send("pane.notification-posted", {
+          appId,
+          appName: app.name,
+          title: `New message in ${app.name}`,
+          snippet: `You have ${info.count} unread messages`
+        });
+      }
+    }
+  }
+  getOrCreateView(appId, customPartition, customUrl) {
+    if (this.views.has(appId)) return this.views.get(appId);
+    const app = this.apps.find((a) => a.id === appId);
+    const targetUrl = customUrl || app?.url;
+    const targetPartition = customPartition || app?.partition || "persist:main";
+    if (!targetUrl) return void 0;
+    const view = new require$$1$3.WebContentsView({
+      webPreferences: {
+        preload: resolvePreload("pane.js"),
+        partition: targetPartition,
+        contextIsolation: true,
+        sandbox: false
+      }
+    });
+    view.setBackgroundColor("#ffffff");
+    if (typeof view.setBorderRadius === "function") {
+      view.setBorderRadius(12);
+    }
+    view.webContents.on("dom-ready", () => {
+      try {
+        const bounds = view.getBounds();
+        const targetZoom = Math.min(1, Math.max(0.72, (bounds.width || 600) / 760));
+        view.webContents.setZoomFactor(targetZoom);
+      } catch {
+      }
+    });
+    view.webContents.on("page-title-updated", () => {
+      const title = view.webContents.getTitle();
+      const info = extractUnreadBadgeFromTitle(title);
+      this.updateAppUnread(appId, info);
+    });
+    view.webContents.loadURL(targetUrl);
+    this.views.set(appId, view);
+    return view;
+  }
+  showDrawerView(win, appId, rect, partition, url) {
+    this.activeAppId = appId;
+    this.isDrawerOpen = true;
+    const view = this.getOrCreateView(appId, partition, url);
+    if (!view) return;
+    try {
+      if (!win.contentView.children.includes(view)) {
+        win.contentView.addChildView(view);
+      }
+    } catch {
+    }
+    try {
+      view.setBounds(rect);
+      const targetZoom = Math.min(1, Math.max(0.68, rect.width / 820));
+      const currentZoom = view.webContents.getZoomFactor();
+      if (Math.abs(currentZoom - targetZoom) > 0.02) {
+        view.webContents.setZoomFactor(targetZoom);
+      }
+    } catch {
+    }
+  }
+  hideDrawerView(win) {
+    this.isDrawerOpen = false;
+    for (const [, view] of this.views.entries()) {
+      try {
+        win.contentView.removeChildView(view);
+      } catch {
+      }
+    }
+  }
+}
+const communicatorService = new CommunicatorService();
+function initPaneSuperpowerIpc(panes2, getWindow) {
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    if (!view) return { success: false, error: "Pane not found" };
+    return captureWebContentsCdp(view.webContents, { fullPage: true, copyToClipboard: true });
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_VIEWPORT, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    if (!view) return { success: false, error: "Pane not found" };
+    return captureWebContentsCdp(view.webContents, { fullPage: false, copyToClipboard: true });
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, (_e, query, opts) => {
+    const wcMap = /* @__PURE__ */ new Map();
+    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
+    multiPaneSearch.findInPanes(wcMap, query, opts);
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.SEARCH.STOP_FIND, (_e, action) => {
+    const wcMap = /* @__PURE__ */ new Map();
+    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
+    multiPaneSearch.stopFind(wcMap, action);
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.MEMORY.GET_STATS, async () => warmSleepService.getPaneMemoryMetrics(panes2));
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.MEMORY.SUSPEND_PANE, async (_e, paneId) => {
+    const win = getWindow();
+    const view = panes2.get(paneId);
+    return win && view ? warmSleepService.suspendPaneView(win, paneId, view) : false;
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.MEMORY.RESUME_PANE, async (_e, paneId) => {
+    const win = getWindow();
+    const view = panes2.get(paneId);
+    return win && view ? warmSleepService.resumePaneView(win, paneId, view) : false;
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION, async (_e, paneId, dev) => {
+    const view = panes2.get(paneId);
+    return view ? setPaneDeviceEmulation(view.webContents, dev) : { success: false, error: "Pane not found" };
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, async (_e, paneId, prof) => {
+    const view = panes2.get(paneId);
+    return view ? setPaneNetworkThrottling(view.webContents, prof) : { success: false, error: "Pane not found" };
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    return view ? extractPaneReaderContent(view.webContents) : { success: false, error: "Pane not found" };
+  });
+  require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.PICK_COLOR, async (_e, paneId, x, y) => {
+    const view = panes2.get(paneId);
+    return view ? pickColorFromPane(view.webContents, x, y) : { success: false, error: "Pane not found" };
+  });
+  require$$1$3.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
+    const win = getWindow();
+    if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
+  });
+  require$$1$3.ipcMain.on("communicator.hideDrawer", () => {
+    const win = getWindow();
+    if (win) communicatorService.hideDrawerView(win);
+  });
+  require$$1$3.ipcMain.on("pane.notification-posted", (e, data) => {
+    const senderWc = e.sender;
+    const title = senderWc?.getTitle() || "App";
+    global.appOverlayView?.webContents.send("pane.notification-posted", {
+      appId: data.appId || "comm_app",
+      appName: data.appName || title.split(" - ")[0] || "Message",
+      title: data.title || "New Notification",
+      snippet: data.body || data.snippet || ""
+    });
+  });
+  require$$1$3.ipcMain.handle("view.getSearchSuggestions", async (_e, query) => {
+    if (!query || query.trim().length < 2) return [];
+    try {
+      const res = await fetch(
+        `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query.trim())}`
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data[1]) ? data[1].slice(0, 5) : [];
+    } catch {
+      return [];
+    }
+  });
+}
+class AudioArbiterService {
+  activeSpeakers = /* @__PURE__ */ new Set();
+  autoDuckedPanes = /* @__PURE__ */ new Set();
+  autoDuckingEnabled = true;
+  handleMediaStarted(paneId, wc, allPanes) {
+    if (wc.isDestroyed()) return;
+    this.activeSpeakers.add(paneId);
+    if (!this.autoDuckingEnabled) return;
+    for (const [otherId, otherView] of allPanes.entries()) {
+      if (otherId !== paneId && !otherView.webContents.isDestroyed()) {
+        try {
+          if (!otherView.webContents.isAudioMuted()) {
+            otherView.webContents.setAudioMuted(true);
+            this.autoDuckedPanes.add(otherId);
+          }
+        } catch {
+        }
+      }
+    }
+  }
+  handleMediaStopped(paneId, allPanes) {
+    this.activeSpeakers.delete(paneId);
+    if (this.activeSpeakers.size === 0) {
+      for (const duckedId of this.autoDuckedPanes) {
+        const view = allPanes.get(duckedId);
+        if (view && !view.webContents.isDestroyed()) {
+          try {
+            view.webContents.setAudioMuted(false);
+          } catch {
+          }
+        }
+      }
+      this.autoDuckedPanes.clear();
+    }
+  }
+  handlePaneDestroyed(paneId) {
+    this.activeSpeakers.delete(paneId);
+    this.autoDuckedPanes.delete(paneId);
+  }
+}
+const audioArbiter = new AudioArbiterService();
+const AUTH_URL_FRAGMENTS = ["accounts.google.com", "google.com/gsi", "firebaseapp.com", "/login", "auth"];
+const panes = /* @__PURE__ */ new Map();
+function isAuthUrl(url) {
+  const u = url.toLowerCase();
+  return AUTH_URL_FRAGMENTS.some((f) => u.includes(f));
+}
+function forwardGuestEvents(win, paneId, view, partition) {
+  const ov = () => global.appOverlayView?.webContents;
+  const wc = view.webContents;
+  const nav = () => {
+    const title = wc.getTitle();
+    const unread = extractUnreadBadgeFromTitle(title);
+    ov()?.send("pane.unread-badge", { paneId, ...unread });
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_NAVIGATED, {
+      paneId,
+      url: wc.getURL(),
+      title,
+      canGoBack: wc.navigationHistory?.canGoBack?.() ?? false,
+      canGoForward: wc.navigationHistory?.canGoForward?.() ?? false
+    });
+  };
+  wc.on("did-navigate", nav);
+  wc.on("did-navigate-in-page", nav);
+  wc.on("page-title-updated", nav);
+  wc.on("did-start-loading", () => ov()?.send("pane.load-start", { paneId }));
+  wc.on("did-stop-loading", () => ov()?.send("pane.loaded", { paneId }));
+  wc.on(
+    "render-process-gone",
+    (_e, d) => ov()?.send(IPC_CHANNELS.EVENTS.VIEW_CRASHED, { paneId, reason: d?.reason ?? "crashed", exitCode: d?.exitCode ?? 0 })
+  );
+  wc.on("media-started-playing", () => {
+    audioArbiter.handleMediaStarted(paneId, wc, panes);
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: true });
+  });
+  wc.on("media-paused", () => {
+    audioArbiter.handleMediaStopped(paneId, panes);
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: false });
+  });
+  wc.on("did-first-visually-non-empty-paint", () => ov()?.send(IPC_CHANNELS.EVENTS.VIEW_LOADED, { paneId }));
+  wc.on(
+    "context-menu",
+    (_e, p) => ov()?.send(IPC_CHANNELS.EVENTS.CONTEXT_MENU_NATIVE, {
+      paneId,
+      x: p?.x ?? 0,
+      y: p?.y ?? 0,
+      linkURL: p?.linkURL ?? "",
+      srcURL: p?.srcURL ?? "",
+      pageURL: p?.pageURL ?? wc.getURL()
+    })
+  );
+  wc.on("found-in-page", (_e, r) => {
+    const agg = multiPaneSearch.handlePaneResult(paneId, r);
+    ov()?.send("pane.found-in-page", {
+      ...r,
+      paneId,
+      activePaneId: agg.activePaneId,
+      activeMatchOrdinal: agg.currentMatchOrdinal,
+      matches: agg.totalMatches,
+      paneBreakdown: agg.paneBreakdown
+    });
+  });
+  wc.on("before-input-event", (event, input) => handleBeforeInputEvent(wc, event, input));
+  wc.setWindowOpenHandler((details) => {
+    if (isAuthUrl(details.url)) {
+      wc.loadURL(details.url);
+      return { action: "deny" };
+    }
+    const currentUrl = wc.getURL();
+    if (details.url === currentUrl || details.url.startsWith(currentUrl + "#")) {
+      wc.loadURL(details.url);
+      return { action: "deny" };
+    }
+    ov()?.send("pane.spawn-request", { sourcePaneId: paneId, url: details.url, partition });
+    return { action: "deny" };
+  });
+}
+function createPane(win, req) {
+  if (panes.has(req.paneId)) destroyPane(win, req.paneId);
+  const view = new require$$1$3.WebContentsView({
+    webPreferences: {
+      preload: resolvePreload("pane.js"),
+      partition: req.partition,
+      contextIsolation: true,
+      sandbox: false,
+      webgl: true,
+      spellcheck: false,
+      backgroundThrottling: false
+    }
+  });
+  if (req.userAgent) view.webContents.setUserAgent(req.userAgent);
+  view.setBackgroundColor("#ffffff");
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
+  view.webContents.session.setPermissionRequestHandler(
+    (_, perm, cb) => cb(["clipboard-read", "clipboard-sanitized-write", "media", "display-capture", "fullscreen"].includes(perm))
+  );
+  bindGuestCursor(view.webContents);
+  forwardGuestEvents(win, req.paneId, view, req.partition);
+  panes.set(req.paneId, view);
+  global.appOverlayView?.webContents.send(IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS, req.paneId, view.webContents.id);
+  const dpr = devicePixelRatioFor(win);
+  const phys = toPhysicalRect(req.rect, dpr);
+  placePane(win, req.paneId, view, { ...phys, cssLeft: req.rect.x, cssTop: req.rect.y });
+  if (isValidPhysicalRect(req.rect)) view.setBounds(req.rect);
+  if (req.url && req.url.trim().length > 0) view.webContents.loadURL(req.url);
+}
+function setPaneBounds(win, paneId, rect) {
+  const view = panes.get(paneId);
+  if (!view || !isValidPhysicalRect(rect)) return;
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
+  view.setBounds(rect);
+  const dpr = devicePixelRatioFor(win);
+  const phys = toPhysicalRect(rect, dpr);
+  placePane(win, paneId, view, { ...phys, cssLeft: rect.x, cssTop: rect.y });
+}
+function destroyPane(win, paneId) {
+  const view = panes.get(paneId);
+  if (!view) return;
+  audioArbiter.handlePaneDestroyed(paneId);
+  removePane(win, paneId);
+  panes.delete(paneId);
+  if (!view.webContents.isDestroyed()) view.webContents.close();
+}
+function findPaneIdBySender(senderId) {
+  for (const [id, view] of panes.entries()) {
+    if (view.webContents.id === senderId) return id;
+  }
+  return void 0;
+}
+function initPaneLifecycle(getWindow) {
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.CREATE_PANE, (_e, req) => {
+    const w = getWindow();
+    if (w) createPane(w, req);
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.SET_BOUNDS, (_e, paneId, rect) => {
+    const w = getWindow();
+    if (w) setPaneBounds(w, paneId, rect);
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.DESTROY_PANE, (_e, paneId) => {
+    const w = getWindow();
+    if (w) destroyPane(w, paneId);
+  });
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.NAVIGATE, (_e, id, url) => url?.trim() && panes.get(id)?.webContents.loadURL(url));
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.FOCUS, (_e, id) => panes.get(id)?.webContents.focus());
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, (_e, id, muted) => panes.get(id)?.webContents.setAudioMuted(muted));
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.RELOAD, (_e, id) => panes.get(id)?.webContents.reload());
+  require$$1$3.ipcMain.on("view.zoomIn", (_e, id) => {
+    const v = panes.get(id);
+    if (v) v.webContents.setZoomLevel(v.webContents.getZoomLevel() + 0.5);
+  });
+  require$$1$3.ipcMain.on("view.zoomOut", (_e, id) => {
+    const v = panes.get(id);
+    if (v) v.webContents.setZoomLevel(v.webContents.getZoomLevel() - 0.5);
+  });
+  require$$1$3.ipcMain.on("view.zoomReset", (_e, id) => panes.get(id)?.webContents.setZoomLevel(0));
+  require$$1$3.ipcMain.on("view.findInPage", (_e, id, text, opts) => panes.get(id)?.webContents.findInPage(text, opts));
+  require$$1$3.ipcMain.on("view.stopFindInPage", (_e, id, action) => panes.get(id)?.webContents.stopFindInPage(action));
+  require$$1$3.ipcMain.on("pane.media-timestamp", (e, payload) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id) global.appOverlayView?.webContents.send("app:media-timestamp", { paneId: id, ...payload });
+  });
+  require$$1$3.ipcMain.on("pane.scroll-position", (e, payload) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id) global.appOverlayView?.webContents.send("app:scroll-position", { paneId: id, ...payload });
+  });
+  require$$1$3.ipcMain.on("pane.focus-change", (e, isFocused) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id) global.appOverlayView?.webContents.send("pane.focus-change", { paneId: id, isFocused });
+  });
+  require$$1$3.ipcMain.on("pane.clicked", (e) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id) global.appOverlayView?.webContents.send("pane.clicked", id);
+  });
+  initPaneSuperpowerIpc(panes, getWindow);
+}
+function unregisterAppShortcuts() {
+  require$$1$3.globalShortcut.unregisterAll();
+}
+applyBrowserSwitches(require$$1$3.app);
+const isDevMode = utils$2.is.dev || require$$1$3.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
 initMainSentry(isDevMode);
 if (isDevMode) {
-  require$$1.app.setName("Apposition Dev");
+  require$$1$3.app.setName("Apposition Dev");
   try {
-    require$$1.app.setPath("userData", require$$1$1.join(require$$1.app.getPath("appData"), "AppositionDev"));
+    require$$1$3.app.setPath("userData", require$$1.join(require$$1$3.app.getPath("appData"), "AppositionDev"));
   } catch {
   }
 } else {
-  require$$1.app.setName("Apposition");
+  require$$1$3.app.setName("Apposition");
 }
-const gotTheLock = require$$1.app.requestSingleInstanceLock();
+const gotTheLock = require$$1$3.app.requestSingleInstanceLock();
 if (!gotTheLock) {
-  require$$1.app.quit();
+  require$$1$3.app.quit();
 } else {
-  const logFile = require$$1$1.join(require$$1.app.getPath("userData"), "apposition.log");
-  logger.setFileSink(logFile);
-  runtimeState.init(require$$1$1.join(require$$1.app.getPath("userData"), ".apposition-runtime.json"));
-  if (isDevMode) {
-    printStartupBanner(require$$1.app.getVersion(), logFile);
-    initInteractiveTerminal(logFile);
-  }
-  process.on("uncaughtException", (err) => {
-    runtimeState.incrementError();
-    logger.fatal("Uncaught Exception in Main Process", err?.stack || err);
-    captureMainException(err);
-  });
-  process.on("unhandledRejection", (reason) => {
-    runtimeState.incrementError();
-    logger.error("Unhandled Rejection in Main Process", reason);
-    captureMainException(reason);
-  });
-  require$$1.app.on("second-instance", () => {
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-      global.mainWindow.focus();
-    }
-  });
-  initDeepLinking();
-  require$$1.app.whenReady().then(() => {
+  let boot = function() {
     initAutoUpdater();
-    require$$1.Menu.setApplicationMenu(null);
-    if (isDevMode) {
-      utils$2.electronApp.setAppUserModelId("com.jvondev.apposition.dev");
-    } else {
-      utils$2.electronApp.setAppUserModelId("com.jvondev.apposition.app");
-    }
-    require$$1.app.on("browser-window-focus", () => {
-      require$$1.globalShortcut.register("Alt+Space", () => {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("forwarded-key", {
-            key: " ",
-            code: "Space",
-            control: false,
-            meta: false,
-            shift: false,
-            alt: true,
-            isInputFocused: false
-          });
-        }
-      });
-    });
-    require$$1.app.on("browser-window-blur", () => {
-      require$$1.globalShortcut.unregister("Alt+Space");
-    });
-    require$$1.nativeTheme.themeSource = "light";
+    require$$1$3.Menu.setApplicationMenu(null);
+    utils$2.electronApp.setAppUserModelId(
+      isDevMode ? "com.jvondev.apposition.dev" : "com.jvondev.apposition.app"
+    );
+    require$$1$3.nativeTheme.themeSource = "light";
     gcDeletedSessions();
     initNetworkOptimizer();
     initSessionSecurity();
@@ -19587,38 +20543,84 @@ if (!gotTheLock) {
     initDiagnosticsIpc(logFile);
     initDevCommandBridge(isDevMode);
     const guestLogger = createLogger("GUEST");
-    require$$1.ipcMain.handle("pane.ping", () => "pong");
-    require$$1.ipcMain.on("pane.log", (_event, level, ...args) => {
+    require$$1$3.ipcMain.handle("pane.ping", () => "pong");
+    require$$1$3.ipcMain.on("pane.log", (_event, level, ...args) => {
       const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
-      if (level === "ERROR") {
-        guestLogger.error(msg);
-      } else if (level === "WARN") {
-        guestLogger.warn(msg);
-      } else {
-        guestLogger.debug(msg);
+      if (level === "ERROR") guestLogger.error(msg);
+      else if (level === "WARN") guestLogger.warn(msg);
+      else guestLogger.debug(msg);
+    });
+    require$$1$3.ipcMain.handle("metrics.memory", () => {
+      return Promise.resolve(process.getProcessMemoryInfo());
+    });
+    require$$1$3.ipcMain.on("window.openExternal", (_, url) => {
+      require$$1$3.shell.openExternal(url);
+    });
+    const win = createWindow();
+    const overlay = createAppOverlay(win);
+    initPointerForwarder(() => global.mainWindow || void 0);
+    initOverlayProjector(() => global.mainWindow || void 0, resolvePreload("index.js"));
+    initPaneLifecycle(() => global.mainWindow || void 0);
+    let isShown = false;
+    const showWindow = () => {
+      if (!isShown && !win.isDestroyed()) {
+        isShown = true;
+        win.maximize();
+        win.show();
+        syncAppOverlayBounds(win);
       }
+    };
+    overlay.webContents.once("dom-ready", showWindow);
+    setTimeout(showWindow, 1200);
+    win.on("resize", () => {
+      syncAppOverlayBounds(win);
+      reRoundAllPanes(win);
     });
-    require$$1.ipcMain.handle(
-      "metrics.memory",
-      () => {
-        return Promise.resolve(process.getProcessMemoryInfo());
-      }
-    );
-    require$$1.ipcMain.on("window.openExternal", (_, url) => {
-      require$$1.shell.openExternal(url);
+    require$$1$3.screen.on("display-metrics-changed", () => {
+      syncAppOverlayBounds(win);
+      reRoundAllPanes(win);
+      repositionTransientOverlays(win);
     });
-    createWindow();
-    require$$1.app.on("activate", function() {
-      if (require$$1.BrowserWindow.getAllWindows().length === 0) createWindow();
+    win.on("closed", () => {
+      unregisterAppShortcuts();
+      composers.delete(win.id);
     });
+    require$$1$3.app.on("activate", function() {
+      if (require$$1$3.BrowserWindow.getAllWindows().length === 0) boot();
+    });
+  };
+  const logFile = require$$1.join(require$$1$3.app.getPath("userData"), "apposition.log");
+  logger.setFileSink(logFile);
+  runtimeState.init(require$$1.join(require$$1$3.app.getPath("userData"), ".apposition-runtime.json"));
+  if (isDevMode) {
+    printStartupBanner(require$$1$3.app.getVersion(), logFile);
+    initInteractiveTerminal(logFile);
+  }
+  process.on("uncaughtException", (err) => {
+    runtimeState.incrementError();
+    logger.fatal("Uncaught Exception in Main Process", err?.stack || err);
+    captureMainException(err);
   });
-  require$$1.app.on("before-quit", async (e) => {
+  process.on("unhandledRejection", (reason) => {
+    runtimeState.incrementError();
+    logger.error("Unhandled Rejection in Main Process", reason);
+    captureMainException(reason);
+  });
+  require$$1$3.app.on("second-instance", () => {
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+      global.mainWindow.focus();
+    }
+  });
+  initDeepLinking();
+  require$$1$3.app.whenReady().then(boot);
+  require$$1$3.app.on("before-quit", async () => {
     try {
       await flushAllSessions();
     } catch {
     }
   });
-  require$$1.app.on("will-quit", () => {
+  require$$1$3.app.on("will-quit", () => {
     try {
       destroyAllViews();
     } catch {
@@ -19626,7 +20628,7 @@ if (!gotTheLock) {
     closeDb();
     defaultFileSink.close();
   });
-  require$$1.app.on("window-all-closed", async () => {
+  require$$1$3.app.on("window-all-closed", async () => {
     try {
       await flushAllSessions();
       destroyAllViews();
@@ -19634,6 +20636,6 @@ if (!gotTheLock) {
     }
     closeDb();
     defaultFileSink.close();
-    require$$1.app.exit(0);
+    if (process.platform !== "darwin") require$$1$3.app.quit();
   });
 }

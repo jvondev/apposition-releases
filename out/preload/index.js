@@ -40,8 +40,31 @@ const IPC_CHANNELS = {
   VIEW: {
     RELOAD: "view.reload",
     SCREENSHOT: "view.screenshot",
+    CAPTURE_FULL_PAGE: "view.captureFullPage",
+    CAPTURE_VIEWPORT: "view.captureViewport",
     GET_SEARCH_SUGGESTIONS: "view.getSearchSuggestions",
-    REGISTER_WEB_CONTENTS: "view.registerWebContents"
+    REGISTER_WEB_CONTENTS: "view.registerWebContents",
+    CREATE_PANE: "view.createPane",
+    SET_BOUNDS: "view.setBounds",
+    DESTROY_PANE: "view.destroyPane",
+    NAVIGATE: "view.navigate",
+    FOCUS: "view.focusPane",
+    SET_AUDIO_MUTED: "view.setAudioMuted",
+    SET_DEVICE_EMULATION: "view.setDeviceEmulation",
+    SET_NETWORK_THROTTLE: "view.setNetworkThrottle",
+    EXTRACT_READER_MODE: "view.extractReaderMode",
+    PICK_COLOR: "view.pickColor"
+  },
+  SEARCH: {
+    FIND_IN_ALL_PANES: "search.findInAllPanes",
+    STOP_FIND: "search.stopFind"
+  },
+  MEMORY: {
+    GET_STATS: "memory.getStats"
+  },
+  OVERLAY: {
+    FORWARD_POINTER: "overlay.forwardPointer",
+    CURSOR: "overlay.cursor"
   },
   LICENSING: {
     ACTIVATE: "licensing.activate",
@@ -172,7 +195,13 @@ function createIpcClient(ipcRenderer) {
         IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS,
         paneId,
         wcId
-      )
+      ),
+      createPane: (req) => ipcRenderer.send(IPC_CHANNELS.VIEW.CREATE_PANE, req),
+      setBounds: (paneId, rect) => ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, rect),
+      destroyPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.VIEW.DESTROY_PANE, paneId),
+      navigate: (paneId, url) => ipcRenderer.send(IPC_CHANNELS.VIEW.NAVIGATE, paneId, url),
+      focus: (paneId) => ipcRenderer.send(IPC_CHANNELS.VIEW.FOCUS, paneId),
+      setAudioMuted: (paneId, muted) => ipcRenderer.send(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, paneId, muted)
     },
     licensing: {
       activate: (key) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.ACTIVATE, key),
@@ -336,6 +365,11 @@ function createIpcEvents(ipcRenderer) {
       const handler = (_, data) => callback(data);
       ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
+    },
+    onAccelerator: (callback) => {
+      const handler = (_, accelerator) => callback(accelerator);
+      ipcRenderer.on("app:accelerator", handler);
+      return () => ipcRenderer.removeListener("app:accelerator", handler);
     }
   };
 }
@@ -515,6 +549,171 @@ const webviewHelpers = {
     }
   }
 };
+const CURSOR_ALLOWLIST = {
+  default: true,
+  pointer: true,
+  text: true,
+  crosshair: true,
+  wait: true,
+  help: true,
+  move: true,
+  "e-resize": true,
+  "n-resize": true,
+  "ne-resize": true,
+  "nw-resize": true,
+  "s-resize": true,
+  "se-resize": true,
+  "sw-resize": true,
+  "w-resize": true,
+  "ns-resize": true,
+  "ew-resize": true,
+  "nesw-resize": true,
+  "nwse-resize": true,
+  "col-resize": true,
+  "row-resize": true,
+  grab: true,
+  grabbing: true,
+  "not-allowed": true,
+  "zoom-in": true,
+  "zoom-out": true,
+  cell: true,
+  copy: true,
+  alias: true,
+  "context-menu": true,
+  none: true,
+  progress: true
+};
+function modifiers(e) {
+  return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
+}
+function isChrome(x, y) {
+  const el = document.elementFromPoint(x, y);
+  if (!el) return false;
+  return !!el.closest("[data-overlay-chrome]");
+}
+function buildForwardMsg(type, e) {
+  const x = e.clientX;
+  const y = e.clientY;
+  const mods = modifiers(e);
+  if (type === "wheel") {
+    const w = e;
+    return {
+      type,
+      x,
+      y,
+      button: e.button,
+      buttons: e.buttons,
+      deltaX: w.deltaX,
+      deltaY: w.deltaY,
+      modifiers: mods
+    };
+  }
+  return {
+    type,
+    x,
+    y,
+    button: e.button,
+    buttons: e.buttons,
+    clickCount: e.detail,
+    modifiers: mods
+  };
+}
+let gapInstalled = false;
+let isDraggingGuest = false;
+function installGapPointerForwarding() {
+  if (gapInstalled) return;
+  gapInstalled = true;
+  window.addEventListener(
+    "pointerdown",
+    (ev) => {
+      if (isChrome(ev.clientX, ev.clientY)) return;
+      isDraggingGuest = true;
+      ev.preventDefault();
+      electron.ipcRenderer.send(
+        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+        buildForwardMsg("mousedown", ev)
+      );
+    },
+    { capture: true, passive: false }
+  );
+  window.addEventListener(
+    "pointermove",
+    (ev) => {
+      if (isDraggingGuest) {
+        ev.preventDefault();
+        electron.ipcRenderer.send(
+          IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+          buildForwardMsg("mousemove", ev)
+        );
+        return;
+      }
+      if (isChrome(ev.clientX, ev.clientY)) {
+        if (document.documentElement.style.cursor !== "default") {
+          document.documentElement.style.cursor = "default";
+        }
+        return;
+      }
+      electron.ipcRenderer.send(
+        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+        buildForwardMsg("mousemove", ev)
+      );
+    },
+    { capture: true, passive: true }
+  );
+  window.addEventListener(
+    "pointerup",
+    (ev) => {
+      if (isDraggingGuest) {
+        isDraggingGuest = false;
+        ev.preventDefault();
+        electron.ipcRenderer.send(
+          IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+          buildForwardMsg("mouseup", ev)
+        );
+        return;
+      }
+      if (isChrome(ev.clientX, ev.clientY)) return;
+      electron.ipcRenderer.send(
+        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+        buildForwardMsg("mouseup", ev)
+      );
+    },
+    { capture: true, passive: false }
+  );
+  window.addEventListener(
+    "wheel",
+    (ev) => {
+      if (isChrome(ev.clientX, ev.clientY)) return;
+      ev.preventDefault();
+      electron.ipcRenderer.send(
+        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+        buildForwardMsg("wheel", ev)
+      );
+    },
+    { capture: true, passive: false }
+  );
+  window.addEventListener(
+    "contextmenu",
+    (ev) => {
+      if (isChrome(ev.clientX, ev.clientY)) return;
+      ev.preventDefault();
+      electron.ipcRenderer.send(
+        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
+        buildForwardMsg("mouseup", ev)
+      );
+    },
+    { capture: true, passive: false }
+  );
+}
+let cursorInstalled = false;
+function installCursorMirror() {
+  if (cursorInstalled) return;
+  cursorInstalled = true;
+  electron.ipcRenderer.on(IPC_CHANNELS.OVERLAY.CURSOR, (_e, type) => {
+    document.documentElement.style.cursor = CURSOR_ALLOWLIST[type] === true ? type : "default";
+  });
+}
+electron.ipcRenderer.setMaxListeners(100);
 const panePreloadUrl = `file://${path.join(__dirname, "pane.js").replace(/\\/g, "/")}`;
 const chromeVersion = process.versions.chrome && Number(process.versions.chrome.split(".")[0]) >= 144 ? process.versions.chrome : "144.0.7550.80";
 const defaultUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
@@ -523,6 +722,7 @@ const events = createIpcEvents(electron.ipcRenderer);
 const api = {
   panePreloadUrl,
   defaultUserAgent,
+  isNativeViews: true,
   // Flat DB access
   getInitialAppState: client.db.getInitialAppState,
   getWorkspaces: client.db.getWorkspaces,
@@ -598,9 +798,15 @@ const api = {
       }
     }
   },
-  viewSetBounds: (_paneId, _bounds) => {
+  viewSetBounds: (paneId, bounds) => {
+    electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, bounds);
   },
-  viewBatchSetBounds: (_boundsMap) => {
+  viewBatchSetBounds: (boundsMap) => {
+    if (boundsMap && typeof boundsMap === "object") {
+      for (const [paneId, bounds] of Object.entries(boundsMap)) {
+        electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, bounds);
+      }
+    }
   },
   viewHideAll: () => {
   },
@@ -639,6 +845,26 @@ const api = {
     electron.ipcRenderer.send("view.updateProfile", paneId, profileId);
   },
   registerWebContents: (paneId, wcId) => client.view.registerWebContents(paneId, wcId),
+  view: {
+    createPane: (req) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.CREATE_PANE, req),
+    setBounds: (paneId, bounds) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, bounds),
+    destroyPane: (paneId) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.DESTROY_PANE, paneId),
+    navigate: (paneId, url) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.NAVIGATE, paneId, url),
+    focus: (paneId) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.FOCUS, paneId),
+    setAudioMuted: (paneId, muted) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, paneId, muted),
+    captureFullPage: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, paneId),
+    captureViewport: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.CAPTURE_VIEWPORT, paneId),
+    setDeviceEmulation: (paneId, device) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION, paneId, device),
+    setNetworkThrottle: (paneId, profile) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, paneId, profile),
+    extractReaderMode: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, paneId),
+    pickColor: (paneId, x, y) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.PICK_COLOR, paneId, x, y)
+  },
+  // Multi-Pane Cross-Split Search & Memory Optimizer
+  findInAllPanes: (query, opts) => electron.ipcRenderer.send(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, query, opts),
+  stopFind: (action) => electron.ipcRenderer.send(IPC_CHANNELS.SEARCH.STOP_FIND, action),
+  getPaneMemoryStats: () => electron.ipcRenderer.invoke(IPC_CHANNELS.MEMORY.GET_STATS),
+  showCommunicatorDrawer: (appId, rect, partition, url) => electron.ipcRenderer.send("communicator.showDrawer", appId, rect, partition, url),
+  hideCommunicatorDrawer: () => electron.ipcRenderer.send("communicator.hideDrawer"),
   // Push Event Subscriptions
   onNavigated: events.onViewNavigated,
   onFaviconUpdated: events.onViewFaviconUpdated,
@@ -653,6 +879,7 @@ const api = {
   onMaximizePaneWc: events.onMaximizePaneWc,
   onClosePaneWc: events.onClosePaneWc,
   onPaneReloadedWc: events.onPaneReloadedWc,
+  onAccelerator: events.onAccelerator,
   onWorkspaceDeepLink: events.onWorkspaceDeepLink,
   onOpenInNewPane: events.onOpenInNewPane,
   onViewLoadStart: events.onViewLoadStart,
@@ -666,7 +893,11 @@ const api = {
   onViewNavigated: (callback) => {
     const handler = (e) => callback(e.detail);
     window.addEventListener("app:webview-navigated", handler);
-    return () => window.removeEventListener("app:webview-navigated", handler);
+    const unsub = events.onViewNavigated(callback);
+    return () => {
+      window.removeEventListener("app:webview-navigated", handler);
+      unsub();
+    };
   },
   onViewLoaded: (callback) => {
     const handler = (e) => callback(e.detail);
@@ -690,7 +921,12 @@ const api = {
   onPaneFocused: (callback) => {
     const handler = (e) => callback(e.detail);
     window.addEventListener("app:webview-focused", handler);
-    return () => window.removeEventListener("app:webview-focused", handler);
+    const ipcHandler = (_, id) => callback(id);
+    electron.ipcRenderer.on("pane.focused", ipcHandler);
+    return () => {
+      window.removeEventListener("app:webview-focused", handler);
+      electron.ipcRenderer.removeListener("pane.focused", ipcHandler);
+    };
   },
   onToast: (callback) => {
     const handler = (e) => callback(e.detail);
@@ -707,6 +943,25 @@ const api = {
     return () => window.removeEventListener("app:webview-context-menu", handler);
   }
 };
+electron.ipcRenderer.on("app:env", (_e, env) => {
+  api.isNativeViews = !!env.nativeViews;
+  if (api.isNativeViews) {
+    installGapPointerForwarding();
+    installCursorMirror();
+  }
+});
+electron.ipcRenderer.on("communicator.unread-updated", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("communicator.unread-updated", { detail: data }));
+});
+electron.ipcRenderer.on("pane.notification-posted", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("pane.notification-posted", { detail: data }));
+});
+electron.ipcRenderer.on("pane.unread-badge", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("pane.unread-badge", { detail: data }));
+});
+electron.ipcRenderer.on("pane.found-in-page", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("pane.found-in-page", { detail: data }));
+});
 if (process.contextIsolated) {
   try {
     electron.contextBridge.exposeInMainWorld("electron", preload.electronAPI);
@@ -717,4 +972,8 @@ if (process.contextIsolated) {
 } else {
   window.electron = preload.electronAPI;
   window.api = api;
+}
+if (api.isNativeViews === true) {
+  installGapPointerForwarding();
+  installCursorMirror();
 }
