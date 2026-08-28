@@ -30,7 +30,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
 
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
@@ -44,7 +44,8 @@ jobs:
             npx electron-builder --linux -c electron-builder.yml -c.npmRebuild=false --publish never
           fi
           if [ "${{ matrix.platform }}" = "mac" ]; then
-            npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never
+            sudo mdutil -a -i off || true
+            npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never || (sleep 10 && npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never)
           fi
           if [ "${{ matrix.platform }}" = "win" ]; then
             npx electron-builder --win --x64 --arm64 -c electron-builder.yml -c.npmRebuild=false --publish never
