@@ -4140,54 +4140,48 @@ function useWorkspaceManager() {
     window.api?.getProfiles().then((p) => {
       if (p) setLayoutStore("profiles", p);
     }).catch(console.error);
-    window.api?.getInitialAppState?.().then((init5) => {
+    window.api?.getInitialAppState?.().then(async (init5) => {
       if (init5 && init5.workspaces && init5.workspaces.length > 0) {
         state.setWorkspaces(init5.workspaces);
         const lastWs = safeGetLocal("last_active_workspace");
         const activeWs = (init5.workspaces.find((w) => w.id === lastWs) ? lastWs : init5.activeWorkspaceId) || "ws_personal";
         state.setActiveWorkspace(activeWs);
-        const tabList = init5.tabs || [];
-        if (tabList.length > 0) {
-          state.setTabs(tabList);
-          const lastTab = safeGetLocal(`last_active_tab_${activeWs}`);
-          const activeTab = (tabList.find((t) => t.id === lastTab) ? lastTab : tabList[0].id) || `tab_${activeWs}_main`;
-          state.setActiveTabId(activeTab);
-          loadNodesForTab(activeTab, tabList);
-        } else {
-          const defaultTabId = `tab_${activeWs}_main`;
-          window.api?.createTab?.(defaultTabId, activeWs, "Main").then(() => {
-            const newTabs = [
-              {
-                id: defaultTabId,
-                workspace_id: activeWs,
-                name: "Main",
-                order_idx: 0
-              }
-            ];
-            state.setTabs(newTabs);
-            state.setActiveTabId(defaultTabId);
-            loadNodesForTab(defaultTabId, newTabs);
-          });
-        }
-      } else {
-        const defaultWs = "ws_personal";
-        window.api?.createWorkspace?.(defaultWs, "Personal").then(() => {
-          const defaultTabId = `tab_${defaultWs}_main`;
-          const initWs = [{ id: defaultWs, name: "Personal" }];
-          const initTabs = [
+        let tabList = activeWs === init5.activeWorkspaceId ? init5.tabs || [] : await window.api?.getTabs?.(activeWs) || [];
+        if (tabList.length === 0) {
+          const defaultTabId = `tab_${activeWs}_${Date.now().toString(36)}`;
+          await window.api?.createTab?.(defaultTabId, activeWs, "Main");
+          tabList = await window.api?.getTabs?.(activeWs) || [
             {
               id: defaultTabId,
-              workspace_id: defaultWs,
+              workspace_id: activeWs,
               name: "Main",
               order_idx: 0
             }
           ];
-          state.setWorkspaces(initWs);
-          state.setActiveWorkspace(defaultWs);
-          state.setTabs(initTabs);
-          state.setActiveTabId(defaultTabId);
-          loadNodesForTab(defaultTabId, initTabs);
-        });
+        }
+        state.setTabs(tabList);
+        const lastTab = safeGetLocal(`last_active_tab_${activeWs}`);
+        const activeTab = (tabList.find((t) => t.id === lastTab) ? lastTab : tabList[0].id) || `tab_${activeWs}_main`;
+        state.setActiveTabId(activeTab);
+        loadNodesForTab(activeTab, tabList);
+      } else {
+        const defaultWs = "ws_personal";
+        await window.api?.createWorkspace?.(defaultWs, "Personal");
+        const defaultTabId = `tab_${defaultWs}_main`;
+        const initWs = [{ id: defaultWs, name: "Personal" }];
+        const initTabs = [
+          {
+            id: defaultTabId,
+            workspace_id: defaultWs,
+            name: "Main",
+            order_idx: 0
+          }
+        ];
+        state.setWorkspaces(initWs);
+        state.setActiveWorkspace(defaultWs);
+        state.setTabs(initTabs);
+        state.setActiveTabId(defaultTabId);
+        loadNodesForTab(defaultTabId, initTabs);
       }
     }).catch(console.error);
     window.api?.onNavigated?.((data) => {
@@ -17936,7 +17930,7 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$O = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$n = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$O = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$B = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$t = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$n = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {

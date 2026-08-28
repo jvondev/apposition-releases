@@ -987,7 +987,7 @@ function createTab(id, workspaceId, name, customName = null) {
   const maxOrderRow = db.prepare("SELECT MAX(order_idx) as m FROM tabs WHERE workspace_id = ?").get(workspaceId);
   const maxOrder = maxOrderRow?.m || 0;
   db.prepare(
-    "INSERT INTO tabs (id, workspace_id, name, custom_name, order_idx) VALUES (?, ?, ?, ?, ?)"
+    "INSERT OR REPLACE INTO tabs (id, workspace_id, name, custom_name, order_idx) VALUES (?, ?, ?, ?, ?)"
   ).run(id, workspaceId, name, customName, maxOrder + 1);
 }
 function setTabDefaultProfile(id, profileId) {
@@ -1050,7 +1050,7 @@ function getWorkspaces() {
 }
 function createWorkspace(id, name, icon) {
   const stmt = db.prepare(
-    "INSERT INTO workspaces (id, name, icon, created_at) VALUES (?, ?, ?, ?)"
+    "INSERT OR REPLACE INTO workspaces (id, name, icon, created_at) VALUES (?, ?, ?, ?)"
   );
   stmt.run(id, name, icon || null, Date.now());
   createTab(`tab_${id}_main`, id, "Main");
@@ -1079,11 +1079,16 @@ function setWorkspaceDefaultProfile(id, profileId) {
     id
   );
 }
-function getInitialAppState() {
+function getInitialAppState(workspaceId) {
   try {
     const workspaces = getWorkspaces();
-    const activeWsId = workspaces[0]?.id || "ws_personal";
-    const tabs = getTabs(activeWsId);
+    const activeWsId = workspaceId || workspaces[0]?.id || "ws_personal";
+    let tabs = getTabs(activeWsId);
+    if (!tabs || tabs.length === 0) {
+      const defaultTabId = `tab_${activeWsId}_main`;
+      createTab(defaultTabId, activeWsId, "Main");
+      tabs = getTabs(activeWsId);
+    }
     return {
       workspaces,
       activeWorkspaceId: activeWsId,
