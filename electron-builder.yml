@@ -1,5 +1,9 @@
 appId: com.jvondev.apposition.app
 productName: Apposition
+compression: maximum
+asar: true
+asarUnpack:
+  - "**/*.node"
 directories:
   buildResources: assets
   output: dist
@@ -22,14 +26,8 @@ mac:
   target:
     - target: dmg
       arch:
-        - x64
         - arm64
-        - universal
-    - target: zip
-      arch:
         - x64
-        - arm64
-        - universal
   icon: assets/icon.png
   identity: null
   gatekeeperAssess: false
@@ -54,7 +52,6 @@ win:
     - target: nsis
       arch:
         - x64
-        - arm64
   icon: assets/icon.ico
 
 nsis:
@@ -70,6 +67,7 @@ nsis:
   include: build/installer.nsh
   installerIcon: assets/icon.ico
   uninstallerIcon: assets/icon.ico
+  differentialPackage: true
 
 linux:
   category: Utility;Network;WebBrowser;
@@ -78,15 +76,7 @@ linux:
     - target: AppImage
       arch:
         - x64
-        - arm64
     - target: deb
-      arch:
-        - x64
-        - arm64
-    - target: rpm
-      arch:
-        - x64
-    - target: tar.gz
       arch:
         - x64
   icon: assets/icon.png

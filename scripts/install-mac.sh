@@ -30,8 +30,16 @@ fi
 
 echo "• Latest version: ${VERSION}"
 
-# 3. Find DMG download URL
-DMG_URL=$(echo "$LATEST_RELEASE" | grep "browser_download_url" | grep -i "\.dmg\"" | head -n 1 | cut -d '"' -f 4)
+# 3. Find DMG download URL matching architecture
+if [ "$ARCH" = "arm64" ]; then
+    DMG_URL=$(echo "$LATEST_RELEASE" | grep "browser_download_url" | grep -i "arm64.*\.dmg\"" | head -n 1 | cut -d '"' -f 4)
+fi
+if [ -z "$DMG_URL" ]; then
+    DMG_URL=$(echo "$LATEST_RELEASE" | grep "browser_download_url" | grep -i "\.dmg\"" | grep -v -i "arm64" | head -n 1 | cut -d '"' -f 4)
+fi
+if [ -z "$DMG_URL" ]; then
+    DMG_URL=$(echo "$LATEST_RELEASE" | grep "browser_download_url" | grep -i "\.dmg\"" | head -n 1 | cut -d '"' -f 4)
+fi
 
 if [ -z "$DMG_URL" ]; then
     echo "❌ Error: No .dmg asset found for release ${VERSION}."
