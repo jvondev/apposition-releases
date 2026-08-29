@@ -4136,15 +4136,19 @@ function useWorkspaceManager() {
     handleCreateTab: navigation.handleCreateTab,
     switchTab: navigation.switchTab
   });
-  onMount(() => {
-    window.api?.getProfiles().then((p) => {
+  onMount(async () => {
+    try {
+      const p = await window.api?.getProfiles?.();
       if (p) setLayoutStore("profiles", p);
-    }).catch(console.error);
-    window.api?.getInitialAppState?.().then(async (init5) => {
+    } catch (e) {
+      console.error("Failed to load profiles:", e);
+    }
+    try {
+      const init5 = await window.api?.getInitialAppState?.();
       if (init5 && init5.workspaces && init5.workspaces.length > 0) {
         state.setWorkspaces(init5.workspaces);
         const lastWs = safeGetLocal("last_active_workspace");
-        const activeWs = (init5.workspaces.find((w) => w.id === lastWs) ? lastWs : init5.activeWorkspaceId) || "ws_personal";
+        const activeWs = (init5.workspaces.find((w) => w.id === lastWs) ? lastWs : init5.activeWorkspaceId) || init5.workspaces[0].id;
         state.setActiveWorkspace(activeWs);
         let tabList = activeWs === init5.activeWorkspaceId ? init5.tabs || [] : await window.api?.getTabs?.(activeWs) || [];
         if (tabList.length === 0) {
@@ -4161,12 +4165,13 @@ function useWorkspaceManager() {
         }
         state.setTabs(tabList);
         const lastTab = safeGetLocal(`last_active_tab_${activeWs}`);
-        const activeTab = (tabList.find((t) => t.id === lastTab) ? lastTab : tabList[0].id) || `tab_${activeWs}_main`;
+        const activeTab = (tabList.find((t) => t.id === lastTab) ? lastTab : tabList[0].id) || tabList[0].id;
         state.setActiveTabId(activeTab);
         loadNodesForTab(activeTab, tabList);
       } else {
         const defaultWs = "ws_personal";
-        await window.api?.createWorkspace?.(defaultWs, "Personal");
+        await window.api?.createWorkspace?.(defaultWs, "Personal").catch(() => {
+        });
         const defaultTabId = `tab_${defaultWs}_main`;
         const initWs = [{ id: defaultWs, name: "Personal" }];
         const initTabs = [
@@ -4183,7 +4188,25 @@ function useWorkspaceManager() {
         state.setActiveTabId(defaultTabId);
         loadNodesForTab(defaultTabId, initTabs);
       }
-    }).catch(console.error);
+    } catch (e) {
+      console.error("Failed to load initial app state, self-healing:", e);
+      const defaultWs = "ws_personal";
+      const defaultTabId = `tab_${defaultWs}_main`;
+      const initWs = [{ id: defaultWs, name: "Personal" }];
+      const initTabs = [
+        {
+          id: defaultTabId,
+          workspace_id: defaultWs,
+          name: "Main",
+          order_idx: 0
+        }
+      ];
+      state.setWorkspaces(initWs);
+      state.setActiveWorkspace(defaultWs);
+      state.setTabs(initTabs);
+      state.setActiveTabId(defaultTabId);
+      loadNodesForTab(defaultTabId, initTabs);
+    }
     window.api?.onNavigated?.((data) => {
       const payload = data?.paneId ? data : data?.detail || data;
       if (payload?.paneId && layoutStore.nodes[payload.paneId]) {
@@ -17861,7 +17884,7 @@ function AppDock(props) {
           return props.ws.isCreatingWorkspace();
         },
         setIsCreatingWorkspace: (isCreating, rect) => {
-          if (isCreating && !layoutStore.isPremium && props.ws.workspaces().length >= 1) {
+          if (isCreating && !layoutStore.isPremium && props.ws.workspaces().length >= 2) {
             if (rect) setLayoutStore("paywallAnchor", {
               top: rect.top,
               left: rect.left,
@@ -23869,7 +23892,7 @@ function usePaywallController() {
   const getReasonText = () => {
     switch (layoutStore.paywallReason) {
       case "workspace":
-        return "You have reached the free limit of 1 workspace.";
+        return "You have reached the free limit of 2 workspaces.";
       case "tab":
         return "You have reached the free limit of 3 tabs per workspace.";
       case "profile":
@@ -24824,11 +24847,11 @@ function useWakeRegions() {
 function useAppLifecycle(ws) {
   onMount(async () => {
     try {
-      const storedProfiles = await window.api.getProfiles();
+      const storedProfiles = await window.api?.getProfiles?.();
       setLayoutStore("profiles", storedProfiles || []);
-      const isPremium = await window.api.checkPremiumStatus();
-      setLayoutStore("isPremium", isPremium);
-      const licenseState = await window.api.getLicenseState();
+      const isPremium = await window.api?.checkPremiumStatus?.();
+      setLayoutStore("isPremium", Boolean(isPremium));
+      const licenseState = await window.api?.getLicenseState?.();
       if (licenseState) setLayoutStore("licenseState", licenseState);
     } catch (err) {
       console.error("Failed to load initial data", err);

@@ -1044,7 +1044,6 @@ function getWorkspaces() {
   const count = db.prepare("SELECT COUNT(*) as c FROM workspaces").get();
   if (count.c === 0) {
     createWorkspace("ws_personal", "Personal");
-    createWorkspace("ws_drafts", "Drafts");
   }
   return db.prepare("SELECT * FROM workspaces ORDER BY created_at ASC").all();
 }
@@ -1627,8 +1626,8 @@ function initDbIpc() {
     const isPremium = await checkPremiumStatus();
     if (!isPremium) {
       const workspaces = getWorkspaces();
-      if (workspaces.length >= 1) {
-        throw new Error("Free tier limits exceeded: Max 1 workspace.");
+      if (workspaces.length >= 2) {
+        throw new Error("Free tier limits exceeded: Max 2 workspaces.");
       }
     }
     createWorkspace(id, name, icon);
@@ -3053,10 +3052,10 @@ function initTearWindowIpc() {
   });
 }
 function resolvePreload(name) {
-  return require$$1$3.app.isPackaged ? require$$1.join(process.resourcesPath, "app/out/preload", name) : require$$1.join(require$$1$3.app.getAppPath(), "out/preload", name);
+  return require$$1.join(__dirname, "../preload", name);
 }
 function resolveAppIcon() {
-  const ico = require$$1.join(require$$1$3.app.getAppPath(), "build/icon.ico");
+  const ico = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.ico");
   const png = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.png");
   return process.platform === "win32" ? ico : png;
 }
