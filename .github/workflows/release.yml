@@ -41,14 +41,14 @@ jobs:
       - name: Build App Packages
         run: |
           if [ "${{ matrix.platform }}" = "linux" ]; then
-            npx electron-builder --linux -c electron-builder.yml -c.npmRebuild=false --publish never
+            npx electron-builder --linux --x64 -c electron-builder.yml -c.npmRebuild=false --publish never
           fi
           if [ "${{ matrix.platform }}" = "mac" ]; then
             sudo mdutil -a -i off || true
-            npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never || (sleep 10 && npx electron-builder --mac --universal -c electron-builder.yml -c.npmRebuild=false --publish never)
+            npx electron-builder --mac --arm64 --x64 -c electron-builder.yml -c.npmRebuild=false --publish never || (sleep 10 && npx electron-builder --mac --arm64 --x64 -c electron-builder.yml -c.npmRebuild=false --publish never)
           fi
           if [ "${{ matrix.platform }}" = "win" ]; then
-            npx electron-builder --win --x64 --arm64 -c electron-builder.yml -c.npmRebuild=false --publish never
+            npx electron-builder --win --x64 -c electron-builder.yml -c.npmRebuild=false --publish never
           fi
         shell: bash
         env:
@@ -63,9 +63,6 @@ jobs:
             dist/*.dmg
             dist/*.AppImage
             dist/*.deb
-            dist/*.rpm
-            dist/*.tar.gz
-            dist/*.zip
             dist/*.yml
             dist/*.blockmap
         env:
