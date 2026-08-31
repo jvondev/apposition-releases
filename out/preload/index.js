@@ -704,6 +704,12 @@ function installGapPointerForwarding() {
     },
     { capture: true, passive: false }
   );
+  window.addEventListener("blur", () => {
+    isDraggingGuest = false;
+  });
+  window.addEventListener("pointercancel", () => {
+    isDraggingGuest = false;
+  });
 }
 let cursorInstalled = false;
 function installCursorMirror() {
@@ -865,6 +871,21 @@ const api = {
   getPaneMemoryStats: () => electron.ipcRenderer.invoke(IPC_CHANNELS.MEMORY.GET_STATS),
   showCommunicatorDrawer: (appId, rect, partition, url) => electron.ipcRenderer.send("communicator.showDrawer", appId, rect, partition, url),
   hideCommunicatorDrawer: () => electron.ipcRenderer.send("communicator.hideDrawer"),
+  communicator: {
+    getState: () => electron.ipcRenderer.invoke("communicator.getState"),
+    createStack: (id, name, icon) => electron.ipcRenderer.invoke("communicator.createStack", id, name, icon),
+    updateStack: (id, name, icon) => electron.ipcRenderer.invoke("communicator.updateStack", id, name, icon),
+    deleteStack: (id) => electron.ipcRenderer.invoke("communicator.deleteStack", id),
+    createApp: (id, stackId, profileId, name, url, icon) => electron.ipcRenderer.invoke("communicator.createApp", id, stackId, profileId, name, url, icon),
+    updateApp: (id, updates) => electron.ipcRenderer.invoke("communicator.updateApp", id, updates),
+    deleteApp: (id) => electron.ipcRenderer.invoke("communicator.deleteApp", id),
+    saveProvider: (provider) => electron.ipcRenderer.invoke("communicator.saveProvider", provider),
+    deleteProvider: (id) => electron.ipcRenderer.invoke("communicator.deleteProvider", id),
+    captureSnapshot: (appId) => electron.ipcRenderer.invoke("communicator.captureSnapshot", appId),
+    showDrawer: (appId, rect, partition, url) => electron.ipcRenderer.send("communicator.showDrawer", appId, rect, partition, url),
+    hideDrawer: () => electron.ipcRenderer.send("communicator.hideDrawer"),
+    destroyView: (appId) => electron.ipcRenderer.send("communicator.destroyView", appId)
+  },
   // Push Event Subscriptions
   onNavigated: events.onViewNavigated,
   onFaviconUpdated: events.onViewFaviconUpdated,

@@ -753,6 +753,9 @@ function applyBrowserSwitches(app) {
   app.commandLine.appendSwitch("disable-background-timer-throttling");
   app.commandLine.appendSwitch("disable-renderer-backgrounding");
   app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("enable-gpu-rasterization");
+  app.commandLine.appendSwitch("enable-zero-copy");
+  app.commandLine.appendSwitch("ignore-gpu-blocklist");
   app.commandLine.appendSwitch("max-active-webgl-contexts", "32");
   app.commandLine.appendSwitch("js-flags", "--max-old-space-size=4096");
   app.commandLine.appendSwitch("hide-scrollbars");
@@ -1099,6 +1102,153 @@ function getInitialAppState(workspaceId) {
     return null;
   }
 }
+function initCommunicatorTables() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS communicator_stacks (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      icon TEXT NOT NULL DEFAULT '📁',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS communicator_apps (
+      id TEXT PRIMARY KEY,
+      stack_id TEXT NOT NULL,
+      profile_id TEXT NOT NULL DEFAULT 'main',
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      icon TEXT NOT NULL DEFAULT 'globe',
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (stack_id) REFERENCES communicator_stacks(id) ON DELETE CASCADE,
+      FOREIGN KEY (profile_id) REFERENCES profiles(id) ON DELETE SET DEFAULT
+    );
+
+    CREATE TABLE IF NOT EXISTS communicator_providers (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      default_url TEXT NOT NULL,
+      icon TEXT NOT NULL,
+      category TEXT NOT NULL DEFAULT 'messaging'
+    );
+  `);
+  seedDefaultCommunicatorData();
+}
+function seedDefaultCommunicatorData() {
+  const stackCount = db.prepare("SELECT COUNT(*) as c FROM communicator_stacks").get().c;
+  if (stackCount === 0) {
+    const now = Date.now();
+    db.prepare("INSERT INTO communicator_stacks (id, name, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?)").run(
+      "main_stack",
+      "Primary",
+      "P",
+      0,
+      now
+    );
+    db.prepare(
+      "INSERT INTO communicator_apps (id, stack_id, profile_id, name, url, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("gmail_main", "main_stack", "main", "Gmail", "https://mail.google.com", "gmail", 0, now);
+    db.prepare(
+      "INSERT INTO communicator_apps (id, stack_id, profile_id, name, url, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run("slack_main", "main_stack", "main", "Slack", "https://app.slack.com/client", "slack", 1, now);
+  }
+  const provCount = db.prepare("SELECT COUNT(*) as c FROM communicator_providers").get().c;
+  if (provCount === 0) {
+    const defaultProviders = [
+      { id: "slack", name: "Slack", default_url: "https://app.slack.com/client", icon: "slack", category: "messaging" },
+      { id: "gmail", name: "Gmail", default_url: "https://mail.google.com", icon: "gmail", category: "email" },
+      { id: "whatsapp", name: "WhatsApp", default_url: "https://web.whatsapp.com", icon: "whatsapp", category: "messaging" },
+      { id: "telegram", name: "Telegram", default_url: "https://web.telegram.org", icon: "telegram", category: "messaging" },
+      { id: "discord", name: "Discord", default_url: "https://discord.com/app", icon: "discord", category: "messaging" },
+      { id: "linear", name: "Linear", default_url: "https://linear.app/inbox", icon: "linear", category: "productivity" },
+      { id: "notion", name: "Notion", default_url: "https://www.notion.so", icon: "notion", category: "productivity" },
+      { id: "github", name: "GitHub", default_url: "https://github.com/notifications", icon: "github", category: "dev" },
+      { id: "teams", name: "Microsoft Teams", default_url: "https://teams.microsoft.com", icon: "teams", category: "messaging" },
+      { id: "twitter", name: "X / Messages", default_url: "https://x.com/messages", icon: "twitter", category: "social" },
+      { id: "chatgpt", name: "ChatGPT", default_url: "https://chatgpt.com", icon: "chatgpt", category: "ai" },
+      { id: "claude", name: "Claude", default_url: "https://claude.ai", icon: "claude", category: "ai" }
+    ];
+    const insertProv = db.prepare(
+      "INSERT INTO communicator_providers (id, name, default_url, icon, category) VALUES (?, ?, ?, ?, ?)"
+    );
+    for (const p of defaultProviders) {
+      insertProv.run(p.id, p.name, p.default_url, p.icon, p.category);
+    }
+  }
+}
+function getCommunicatorState() {
+  initCommunicatorTables();
+  const stacks = db.prepare("SELECT * FROM communicator_stacks ORDER BY sort_order ASC, created_at ASC").all();
+  const apps = db.prepare("SELECT * FROM communicator_apps ORDER BY sort_order ASC, created_at ASC").all();
+  const providers = db.prepare("SELECT * FROM communicator_providers ORDER BY name ASC").all();
+  const hydratedStacks = stacks.map((s) => ({
+    id: s.id,
+    name: s.name,
+    icon: s.icon,
+    apps: apps.filter((a) => a.stack_id === s.id).map((a) => ({
+      id: a.id,
+      name: a.name,
+      url: a.url,
+      icon: a.icon,
+      profileId: a.profile_id,
+      stackId: a.stack_id,
+      unreadCount: 0
+    }))
+  }));
+  return { stacks: hydratedStacks, providers };
+}
+function createCommunicatorStack(id, name, icon) {
+  const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM communicator_stacks").get().m;
+  db.prepare("INSERT INTO communicator_stacks (id, name, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?)").run(
+    id,
+    name,
+    icon,
+    maxOrder + 1,
+    Date.now()
+  );
+}
+function updateCommunicatorStack(id, name, icon) {
+  db.prepare("UPDATE communicator_stacks SET name = ?, icon = ? WHERE id = ?").run(name, icon, id);
+}
+function deleteCommunicatorStack(id) {
+  db.prepare("DELETE FROM communicator_apps WHERE stack_id = ?").run(id);
+  db.prepare("DELETE FROM communicator_stacks WHERE id = ?").run(id);
+}
+function createCommunicatorApp(id, stackId, profileId, name, url, icon) {
+  const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM communicator_apps WHERE stack_id = ?").get(stackId).m;
+  db.prepare(
+    "INSERT INTO communicator_apps (id, stack_id, profile_id, name, url, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+  ).run(id, stackId, profileId || "main", name, url, icon || "globe", maxOrder + 1, Date.now());
+}
+function updateCommunicatorApp(id, updates) {
+  const current = db.prepare("SELECT * FROM communicator_apps WHERE id = ?").get(id);
+  if (!current) return;
+  const name = updates.name ?? current.name;
+  const url = updates.url ?? current.url;
+  const icon = updates.icon ?? current.icon;
+  const profileId = updates.profileId ?? current.profile_id;
+  const stackId = updates.stackId ?? current.stack_id;
+  db.prepare("UPDATE communicator_apps SET name = ?, url = ?, icon = ?, profile_id = ?, stack_id = ? WHERE id = ?").run(
+    name,
+    url,
+    icon,
+    profileId,
+    stackId,
+    id
+  );
+}
+function deleteCommunicatorApp(id) {
+  db.prepare("DELETE FROM communicator_apps WHERE id = ?").run(id);
+}
+function saveCommunicatorProvider(provider) {
+  db.prepare(
+    "INSERT OR REPLACE INTO communicator_providers (id, name, default_url, icon, category) VALUES (?, ?, ?, ?, ?)"
+  ).run(provider.id, provider.name, provider.default_url, provider.icon, provider.category || "custom");
+}
+function deleteCommunicatorProvider(id) {
+  db.prepare("DELETE FROM communicator_providers WHERE id = ?").run(id);
+}
 function toPhysicalRect(r, dpr) {
   return {
     x: Math.round(r.x * dpr),
@@ -1182,6 +1332,7 @@ const IPC_CHANNELS = {
     IMPORT_VAULT: "vault.importSession"
   },
   EVENTS: {
+    OPEN_IN_NEW_PANE: "open-in-new-pane",
     VIEW_NAVIGATED: "view.navigated",
     VIEW_MEDIA_STATUS: "view.media-status",
     VIEW_CRASHED: "view.crashed",
@@ -2166,6 +2317,405 @@ function initAuthIpc() {
     }
   );
 }
+const APP_OVERLAY_ID = "__appOverlay";
+function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
+  if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const px = cssX * scale;
+  const py = cssY * scale;
+  if (s.communicator) {
+    const cr = s.communicator.rect;
+    const insideComm = px >= cr.x && px < cr.x + cr.width && py >= cr.y && py < cr.y + cr.height;
+    if (insideComm) {
+      return { paneId: s.communicator.id, cssLeft: cr.cssLeft, cssTop: cr.cssTop };
+    }
+  }
+  let hit;
+  for (const [paneId, r] of s.panes) {
+    const inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
+    if (inside) hit = { paneId, cssLeft: r.cssLeft, cssTop: r.cssTop };
+  }
+  return hit;
+}
+function devicePixelRatioFor(win) {
+  try {
+    if (win.isDestroyed()) return 1;
+    const factor = require$$1$3.screen.getDisplayMatching(win.getBounds()).scaleFactor;
+    return Number.isFinite(factor) && factor > 0 ? factor : 1;
+  } catch {
+    return 1;
+  }
+}
+const composers = /* @__PURE__ */ new Map();
+function registerComposer(win) {
+  const existing = composers.get(win.id);
+  if (existing) return existing;
+  const state = {
+    views: /* @__PURE__ */ new Map(),
+    hidden: /* @__PURE__ */ new Set(),
+    stack: { panes: /* @__PURE__ */ new Map(), transientOrder: [] },
+    paneCss: /* @__PURE__ */ new Map()
+  };
+  composers.set(win.id, state);
+  win.once("closed", () => composers.delete(win.id));
+  return state;
+}
+function attach(win, v, index) {
+  if (win.isDestroyed()) return;
+  const children = win.contentView.children;
+  if (children.includes(v)) return;
+  const at = Math.max(0, Math.min(index ?? children.length, children.length));
+  win.contentView.addChildView(v, at);
+}
+function detach(win, v) {
+  if (win.isDestroyed()) return;
+  if (win.contentView.children.includes(v)) win.contentView.removeChildView(v);
+}
+function setAppOverlay(win, view) {
+  const s = registerComposer(win);
+  if (!view) {
+    const prev = s.views.get(APP_OVERLAY_ID);
+    if (prev) detach(win, prev);
+    s.views.delete(APP_OVERLAY_ID);
+    s.stack.appOverlayId = void 0;
+    return;
+  }
+  s.views.set(APP_OVERLAY_ID, view);
+  attach(win, view);
+  s.stack.appOverlayId = APP_OVERLAY_ID;
+}
+function setTransientOverlay(win, id, view) {
+  const s = registerComposer(win);
+  s.views.set(id, view);
+  attach(win, view);
+  if (!s.stack.transientOrder.includes(id)) s.stack.transientOrder.push(id);
+  s.hidden.delete(id);
+}
+function hideTransient(win, id) {
+  const s = registerComposer(win);
+  s.hidden.add(id);
+  const at = s.stack.transientOrder.indexOf(id);
+  if (at !== -1) s.stack.transientOrder.splice(at, 1);
+}
+function placePane(win, paneId, view, rect) {
+  const s = registerComposer(win);
+  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
+  s.stack.panes.set(paneId, r);
+  s.views.set(paneId, view);
+  const dpr = devicePixelRatioFor(win);
+  const w = r.width / dpr;
+  const h = r.height / dpr;
+  const targetTop = s.stack.communicator ? s.views.get(s.stack.communicator.id) : s.views.get(APP_OVERLAY_ID);
+  const children = win.isDestroyed() ? [] : win.contentView.children;
+  const at = targetTop ? children.indexOf(targetTop) : children.length;
+  attach(win, view, at !== -1 ? at : children.length);
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
+  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
+  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
+}
+function placeCommunicator(win, appId, view, rect) {
+  const s = registerComposer(win);
+  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
+  s.stack.communicator = { id: appId, rect: r };
+  s.views.set(appId, view);
+  const dpr = devicePixelRatioFor(win);
+  const w = r.width / dpr;
+  const h = r.height / dpr;
+  const overlay = s.views.get(APP_OVERLAY_ID);
+  const children = win.isDestroyed() ? [] : win.contentView.children;
+  const at = overlay ? children.indexOf(overlay) : children.length;
+  attach(win, view, at !== -1 ? at : children.length);
+  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
+  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
+}
+function removeCommunicator(win, appId) {
+  const s = registerComposer(win);
+  const view = s.views.get(appId);
+  if (view) detach(win, view);
+  s.views.delete(appId);
+  s.hidden.delete(appId);
+  if (s.stack.communicator?.id === appId) {
+    s.stack.communicator = void 0;
+  }
+}
+function removePane(win, paneId) {
+  const s = registerComposer(win);
+  const view = s.views.get(paneId);
+  if (view) detach(win, view);
+  s.views.delete(paneId);
+  s.hidden.delete(paneId);
+  s.stack.panes.delete(paneId);
+  s.paneCss.delete(paneId);
+  if (s.stack.communicator?.id === paneId) {
+    s.stack.communicator = void 0;
+  }
+}
+function hitTestPaneAt(win, cssX, cssY, dpr = devicePixelRatioFor(win)) {
+  const s = registerComposer(win);
+  const hit = hitTestPaneAtPhysical(s.stack, cssX, cssY, dpr);
+  if (!hit) return void 0;
+  const view = s.views.get(hit.paneId);
+  if (!view) return void 0;
+  return { ...hit, view };
+}
+function reRoundAllPanes(win) {
+  const s = registerComposer(win);
+  const dpr = devicePixelRatioFor(win);
+  for (const [paneId, css] of s.paneCss) {
+    const view = s.views.get(paneId);
+    if (!view || s.hidden.has(paneId)) continue;
+    if (!isValidPhysicalRect(css)) continue;
+    view.setBounds(css);
+    const phys = toPhysicalRect(css, dpr);
+    s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
+  }
+}
+const tearWindows = /* @__PURE__ */ new Map();
+function initTearWindowIpc() {
+  require$$1$3.ipcMain.on("tear-update", (_event, paneId, x, y) => {
+    let win = tearWindows.get(paneId);
+    if (!win) {
+      win = new require$$1$3.BrowserWindow({
+        width: 400,
+        height: 300,
+        x: x - 200,
+        y: y - 20,
+        frame: false,
+        transparent: true,
+        alwaysOnTop: true,
+        webPreferences: { preload: require$$1.join(__dirname, "../preload/index.js") }
+      });
+      win.__isTearWindow = true;
+      win.setOpacity(0.8);
+      if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+        win.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#tear-${paneId}`);
+      } else {
+        win.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
+          hash: `tear-${paneId}`
+        });
+      }
+      tearWindows.set(paneId, win);
+    } else {
+      win.setPosition(Math.round(x - 200), Math.round(y - 20));
+      if (!win.isVisible()) win.show();
+    }
+  });
+  require$$1$3.ipcMain.on("tear-hide", (_event, paneId) => {
+    const win = tearWindows.get(paneId);
+    if (win && win.isVisible()) win.hide();
+  });
+  require$$1$3.ipcMain.on("tear-commit", (_event, paneId) => {
+    const win = tearWindows.get(paneId);
+    if (win) {
+      const bounds = win.getBounds();
+      win.destroy();
+      tearWindows.delete(paneId);
+      const finalWin = new require$$1$3.BrowserWindow({
+        ...bounds,
+        titleBarStyle: "hidden",
+        titleBarOverlay: {
+          color: "#ffffff",
+          symbolColor: "#737373",
+          height: 40
+        },
+        webPreferences: {
+          preload: require$$1.join(__dirname, "../preload/index.js"),
+          webviewTag: true,
+          safeDialogs: true
+        }
+      });
+      finalWin.__isTearWindow = true;
+      if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+        finalWin.loadURL(
+          `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
+        );
+      } else {
+        finalWin.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
+          hash: `standalone-${paneId}`
+        });
+      }
+    }
+  });
+}
+function resolvePreload(name) {
+  return require$$1.join(__dirname, "../preload", name);
+}
+function resolveAppIcon() {
+  const ico = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.ico");
+  const png = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.png");
+  return process.platform === "win32" ? ico : png;
+}
+function createWindow() {
+  const win = new require$$1$3.BrowserWindow({
+    width: 1200,
+    height: 800,
+    icon: resolveAppIcon(),
+    transparent: false,
+    backgroundColor: "#F7F7F5",
+    frame: false,
+    show: false,
+    webPreferences: {
+      preload: resolvePreload("index.js"),
+      contextIsolation: true,
+      sandbox: false,
+      backgroundThrottling: false
+    }
+  });
+  win.__isMainWindow = true;
+  global.mainWindow = win;
+  global.overlayWindow = win;
+  registerComposer(win);
+  return win;
+}
+function createAppOverlay(win) {
+  const view = new require$$1$3.WebContentsView({
+    webPreferences: {
+      preload: resolvePreload("index.js"),
+      contextIsolation: true,
+      sandbox: false
+    }
+  });
+  view.setBackgroundColor("#00000000");
+  if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+    view.webContents.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+  } else {
+    view.webContents.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
+  }
+  setAppOverlay(win, view);
+  global.appOverlayView = view;
+  global.overlayWindow = win;
+  syncAppOverlayBounds(win);
+  view.webContents.once("dom-ready", () => {
+    view.webContents.send("app:env", { nativeViews: true });
+  });
+  return view;
+}
+function syncAppOverlayBounds(win) {
+  if (!win || win.isDestroyed()) return;
+  const view = global.appOverlayView;
+  if (!view || view.webContents.isDestroyed()) return;
+  const [w, h] = win.getContentSize();
+  if (w > 0 && h > 0) {
+    view.setBounds({ x: 0, y: 0, width: w, height: h });
+  }
+}
+function initWindowManagerIpc() {
+  require$$1$3.ipcMain.on("window.minimize", () => {
+    global.mainWindow?.minimize();
+  });
+  require$$1$3.ipcMain.on("window.focus-main", () => {
+    global.mainWindow?.focus();
+    global.mainWindow?.webContents.focus();
+  });
+  require$$1$3.ipcMain.on("app.openInternalDevTools", () => {
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+      global.appOverlayView.webContents.openDevTools({ mode: "undocked" });
+    }
+  });
+  require$$1$3.ipcMain.on("app.closeInternalDevTools", () => {
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+      global.appOverlayView.webContents.closeDevTools();
+    }
+  });
+  require$$1$3.ipcMain.on("window.maximize", () => {
+    const win = global.mainWindow;
+    if (win) {
+      if (win.isMaximized()) {
+        win.unmaximize();
+      } else {
+        win.maximize();
+      }
+    }
+  });
+  require$$1$3.ipcMain.on("window.close", () => {
+    global.mainWindow?.close();
+  });
+  initTearWindowIpc();
+}
+function bindGuestCursor(wc) {
+  wc.on("cursor-changed", (_e, type2) => {
+    global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type2);
+  });
+}
+function handleBeforeInputEvent(webContents, event, input) {
+  if (input.type !== "keyDown") return;
+  const isMod = Boolean(input.control || input.meta);
+  const keyLower = input.key ? input.key.toLowerCase() : "";
+  const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
+  const isReload = isMod && keyLower === "r" || input.key === "F5";
+  const isNum = keyLower >= "0" && keyLower <= "9";
+  const isZoom = isMod && (input.key === "=" || input.key === "+" || input.key === "-" || input.key === "0");
+  const isTabJump = isMod && input.key === "Tab";
+  const isAppShortcut = input.alt && isArrow || isMod && isArrow || isMod && (keyLower === "w" || keyLower === "t" || keyLower === "k" || keyLower === "l" || keyLower === "d" || keyLower === "f" || keyLower === "p" || keyLower === "n" || keyLower === "m" || keyLower === "e" || keyLower === "[" || keyLower === "]" || keyLower === "\\" || keyLower === "/") || input.alt && (keyLower === "d" || keyLower === "f" || keyLower === "p" || input.code === "Space") || isMod && isNum || input.alt && isNum || isZoom || isTabJump || input.key === "F11" || input.key === "F12" || isReload;
+  if (isAppShortcut) {
+    event.preventDefault();
+  }
+  if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
+    if (input.shift) {
+      webContents.reloadIgnoringCache();
+    } else {
+      webContents.reload();
+    }
+    if (!global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
+    }
+    return;
+  }
+  const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
+  const payload = {
+    webContentsId: webContents.id,
+    key: input.key,
+    code: input.code,
+    control: input.control,
+    meta: input.meta,
+    shift: input.shift,
+    alt: input.alt,
+    isAutoRepeat: input.isAutoRepeat,
+    isInputFocused: false,
+    eventId: sharedId
+  };
+  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
+  if (ov && !ov.isDestroyed()) {
+    if (isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
+      ov.focus();
+    }
+    ov.send("forwarded-key", payload);
+  }
+}
+function extractUnreadBadgeFromTitle(title) {
+  if (!title || typeof title !== "string") {
+    return { count: 0, hasUnread: false, rawTitle: "" };
+  }
+  const clean = title.trim();
+  const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
+  if (parenMatch && parenMatch[1]) {
+    const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  if (clean.startsWith("*") || clean.startsWith("•") || clean.startsWith("●")) {
+    return {
+      count: 1,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  const wordMatch = clean.match(/([0-9]+)\s+(unread|new|notifications?)/i);
+  if (wordMatch && wordMatch[1]) {
+    const num = parseInt(wordMatch[1], 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  return { count: 0, hasUnread: false, rawTitle: clean };
+}
 const OAUTH_DOMAINS = [
   "accounts.google.com",
   "google.com/gsi",
@@ -2271,6 +2821,307 @@ function configureSessionProxy(ses, proxyServer, profileId) {
     proxyBypassRules: "<-loopback>"
   }).catch((err) => {
     console.error(`Failed to configure proxy for profile ${profileId}:`, err);
+  });
+}
+const GMAIL_AMBIENT_CSS = `
+  /* 1. Guaranteed Opaque Canvas Pipeline (Eliminates Bleed-Through) */
+  html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
+    background-color: #ffffff !important;
+    background: #ffffff !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
+      background-color: #141415 !important;
+      background: #141415 !important;
+      color: #e5e5e5 !important;
+    }
+  }
+
+  /* 2. Hide bulky Google Add-ons right side panel & Meet/Chat widgets */
+  [aria-label="Side panel"], div[role="complementary"], .bq9,
+  div[aria-label="Meet"], div[aria-label="Hangouts"], div[aria-label="Chat"], .aYF, .aT5 {
+    display: none !important;
+  }
+
+  /* 3. Streamline Top Search & Header Banner */
+  header[role="banner"] {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    height: 48px !important;
+    min-height: 48px !important;
+  }
+  header[role="banner"] form {
+    max-width: 480px !important;
+  }
+
+  /* 4. Streamline Left Sidebar Density */
+  .aeN {
+    min-width: 180px !important;
+  }
+  .w-asV {
+    width: auto !important;
+  }
+
+  /* 5. Precision Grayscale Monochromatic Scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+const SLACK_AMBIENT_CSS = `
+  /* Guaranteed Opaque Canvas Pipeline for Slack */
+  html, body, .p-client_container, .p-client, .p-view_contents, .p-workspace_layout {
+    background-color: #1a1d21 !important;
+  }
+  /* Hide desktop download prompts */
+  .p-download_banner, .p-get_desktop_app_banner {
+    display: none !important;
+  }
+  /* Sleek scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+const GENERIC_MESSENGER_CSS = `
+  /* Guaranteed Opaque Canvas Pipeline for Generic Messengers */
+  html, body {
+    background-color: #ffffff !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    html, body {
+      background-color: #141415 !important;
+    }
+  }
+  /* Sleek monochromatic scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+function injectCommunicatorRecipe(webContents, url) {
+  try {
+    const u = url.toLowerCase();
+    if (u.includes("mail.google.com")) {
+      webContents.insertCSS(GMAIL_AMBIENT_CSS).catch(() => {
+      });
+    } else if (u.includes("slack.com")) {
+      webContents.insertCSS(SLACK_AMBIENT_CSS).catch(() => {
+      });
+    } else {
+      webContents.insertCSS(GENERIC_MESSENGER_CSS).catch(() => {
+      });
+    }
+  } catch {
+  }
+}
+class CommunicatorService {
+  views = /* @__PURE__ */ new Map();
+  activeAppId = "slack";
+  updateAppUnread(appId, info) {
+    global.appOverlayView?.webContents.send("communicator.unread-updated", {
+      appId,
+      unreadCount: info.count
+    });
+  }
+  getOrCreateView(win, appId, customPartition, customUrl) {
+    if (this.views.has(appId)) return this.views.get(appId);
+    if (!customUrl) return void 0;
+    const partition = customPartition || "persist:main";
+    const view = new require$$1$3.WebContentsView({
+      webPreferences: {
+        preload: resolvePreload("pane.js"),
+        partition,
+        contextIsolation: true,
+        sandbox: false,
+        spellcheck: false,
+        backgroundThrottling: false
+      }
+    });
+    view.setBackgroundColor("#ffffff");
+    view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
+    bindGuestCursor(view.webContents);
+    view.webContents.on("will-navigate", (_e, navUrl) => {
+      if (isGoogleOAuthEndpoint(navUrl)) {
+        view.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      } else if (view.webContents.getUserAgent() === FIREFOX_AUTH_UA) {
+        view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
+      }
+    });
+    view.webContents.on("dom-ready", () => {
+      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
+      try {
+        const bounds = view.getBounds();
+        const targetZoom = Math.min(1, Math.max(0.72, (bounds.width || 600) / 760));
+        view.webContents.setZoomFactor(targetZoom);
+      } catch {
+      }
+    });
+    view.webContents.on("did-navigate", () => {
+      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
+    });
+    view.webContents.on("page-title-updated", () => {
+      const title = view.webContents.getTitle();
+      const info = extractUnreadBadgeFromTitle(title);
+      this.updateAppUnread(appId, info);
+    });
+    view.webContents.on("before-input-event", (e, input) => {
+      handleBeforeInputEvent(view.webContents, e, input);
+    });
+    view.webContents.setWindowOpenHandler((details) => {
+      if (isGoogleOAuthEndpoint(details.url) || details.url.includes("login") || details.url.includes("auth")) {
+        view.webContents.loadURL(details.url);
+        return { action: "deny" };
+      }
+      return { action: "allow" };
+    });
+    view.webContents.loadURL(customUrl);
+    this.views.set(appId, view);
+    return view;
+  }
+  showDrawerView(win, appId, rect, partition, url) {
+    this.activeAppId = appId;
+    for (const [id, v] of this.views.entries()) {
+      if (id !== appId) {
+        removeCommunicator(win, id);
+        try {
+          v.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
+        } catch {
+        }
+      }
+    }
+    const view = this.getOrCreateView(win, appId, partition, url);
+    if (!view) return;
+    if (isValidPhysicalRect(rect)) {
+      const dpr = devicePixelRatioFor(win);
+      const phys = toPhysicalRect(rect, dpr);
+      placeCommunicator(win, appId, view, { ...phys, cssLeft: rect.x, cssTop: rect.y });
+      view.setBounds(rect);
+      try {
+        const targetZoom = Math.min(1, Math.max(0.68, rect.width / 820));
+        const currentZoom = view.webContents.getZoomFactor();
+        if (Math.abs(currentZoom - targetZoom) > 0.02) {
+          view.webContents.setZoomFactor(targetZoom);
+        }
+      } catch {
+      }
+    }
+  }
+  async captureAppSnapshot(appId) {
+    const view = this.views.get(appId);
+    if (!view || view.webContents.isDestroyed()) return null;
+    try {
+      const image = await view.webContents.capturePage();
+      if (image.isEmpty()) return null;
+      return image.toDataURL();
+    } catch {
+      return null;
+    }
+  }
+  destroyView(win, appId) {
+    const view = this.views.get(appId);
+    if (view) {
+      if (win) removeCommunicator(win, appId);
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+      this.views.delete(appId);
+    }
+  }
+  hideDrawerView(win) {
+    for (const [id, view] of this.views.entries()) {
+      removeCommunicator(win, id);
+      try {
+        view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
+      } catch {
+      }
+    }
+  }
+}
+const communicatorService = new CommunicatorService();
+function initCommunicatorIpc(getWindow) {
+  require$$1$3.ipcMain.handle("communicator.getState", async () => {
+    return getCommunicatorState();
+  });
+  require$$1$3.ipcMain.handle("communicator.createStack", async (_e, id, name, icon) => {
+    createCommunicatorStack(id, name, icon);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle("communicator.updateStack", async (_e, id, name, icon) => {
+    updateCommunicatorStack(id, name, icon);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle("communicator.deleteStack", async (_e, id) => {
+    deleteCommunicatorStack(id);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle(
+    "communicator.createApp",
+    async (_e, id, stackId, profileId, name, url, icon) => {
+      createCommunicatorApp(id, stackId, profileId, name, url, icon);
+      return { success: true };
+    }
+  );
+  require$$1$3.ipcMain.handle(
+    "communicator.updateApp",
+    async (_e, id, updates) => {
+      updateCommunicatorApp(id, updates);
+      return { success: true };
+    }
+  );
+  require$$1$3.ipcMain.handle("communicator.deleteApp", async (_e, id) => {
+    const win = getWindow();
+    communicatorService.destroyView(win, id);
+    deleteCommunicatorApp(id);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle("communicator.saveProvider", async (_e, provider) => {
+    saveCommunicatorProvider(provider);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle("communicator.deleteProvider", async (_e, id) => {
+    deleteCommunicatorProvider(id);
+    return { success: true };
+  });
+  require$$1$3.ipcMain.handle("communicator.captureSnapshot", async (_e, appId) => {
+    return communicatorService.captureAppSnapshot(appId);
+  });
+  require$$1$3.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
+    const win = getWindow();
+    if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
+  });
+  require$$1$3.ipcMain.on("communicator.hideDrawer", () => {
+    const win = getWindow();
+    if (win) communicatorService.hideDrawerView(win);
+  });
+  require$$1$3.ipcMain.on("communicator.destroyView", (_e, appId) => {
+    const win = getWindow();
+    communicatorService.destroyView(win, appId);
   });
 }
 const AUTH_SURFACE_URL = "https://accounts.google.com";
@@ -2865,287 +3716,6 @@ function initViewManager() {
   initCaptureIpc();
   initViewIpc();
 }
-const APP_OVERLAY_ID = "__appOverlay";
-function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
-  if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
-  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-  const px = cssX * scale;
-  const py = cssY * scale;
-  let hit;
-  for (const [paneId, r] of s.panes) {
-    const inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
-    if (inside) hit = { paneId, cssLeft: r.cssLeft, cssTop: r.cssTop };
-  }
-  return hit;
-}
-function devicePixelRatioFor(win) {
-  try {
-    if (win.isDestroyed()) return 1;
-    const factor = require$$1$3.screen.getDisplayMatching(win.getBounds()).scaleFactor;
-    return Number.isFinite(factor) && factor > 0 ? factor : 1;
-  } catch {
-    return 1;
-  }
-}
-const composers = /* @__PURE__ */ new Map();
-function registerComposer(win) {
-  const existing = composers.get(win.id);
-  if (existing) return existing;
-  const state = {
-    views: /* @__PURE__ */ new Map(),
-    hidden: /* @__PURE__ */ new Set(),
-    stack: { panes: /* @__PURE__ */ new Map(), transientOrder: [] },
-    paneCss: /* @__PURE__ */ new Map()
-  };
-  composers.set(win.id, state);
-  win.once("closed", () => composers.delete(win.id));
-  return state;
-}
-function attach(win, v, index) {
-  if (win.isDestroyed()) return;
-  const children = win.contentView.children;
-  if (children.includes(v)) return;
-  const at = Math.max(0, Math.min(index ?? children.length, children.length));
-  win.contentView.addChildView(v, at);
-}
-function detach(win, v) {
-  if (win.isDestroyed()) return;
-  if (win.contentView.children.includes(v)) win.contentView.removeChildView(v);
-}
-function setAppOverlay(win, view) {
-  const s = registerComposer(win);
-  if (!view) {
-    const prev = s.views.get(APP_OVERLAY_ID);
-    if (prev) detach(win, prev);
-    s.views.delete(APP_OVERLAY_ID);
-    s.stack.appOverlayId = void 0;
-    return;
-  }
-  s.views.set(APP_OVERLAY_ID, view);
-  attach(win, view);
-  s.stack.appOverlayId = APP_OVERLAY_ID;
-}
-function setTransientOverlay(win, id, view) {
-  const s = registerComposer(win);
-  s.views.set(id, view);
-  attach(win, view);
-  if (!s.stack.transientOrder.includes(id)) s.stack.transientOrder.push(id);
-  s.hidden.delete(id);
-}
-function hideTransient(win, id) {
-  const s = registerComposer(win);
-  s.hidden.add(id);
-  const at = s.stack.transientOrder.indexOf(id);
-  if (at !== -1) s.stack.transientOrder.splice(at, 1);
-}
-function placePane(win, paneId, view, rect) {
-  const s = registerComposer(win);
-  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
-  s.stack.panes.set(paneId, r);
-  s.views.set(paneId, view);
-  const dpr = devicePixelRatioFor(win);
-  const w = r.width / dpr;
-  const h = r.height / dpr;
-  const overlay = s.views.get(APP_OVERLAY_ID);
-  const children = win.isDestroyed() ? [] : win.contentView.children;
-  attach(win, view, overlay ? children.indexOf(overlay) : children.length);
-  if (typeof view.setBorderRadius === "function") {
-    view.setBorderRadius(12);
-  }
-  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
-  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
-}
-function removePane(win, paneId) {
-  const s = registerComposer(win);
-  const view = s.views.get(paneId);
-  if (view) detach(win, view);
-  s.views.delete(paneId);
-  s.hidden.delete(paneId);
-  s.stack.panes.delete(paneId);
-  s.paneCss.delete(paneId);
-}
-function hitTestPaneAt(win, cssX, cssY, dpr = devicePixelRatioFor(win)) {
-  const s = registerComposer(win);
-  const hit = hitTestPaneAtPhysical(s.stack, cssX, cssY, dpr);
-  if (!hit) return void 0;
-  const view = s.views.get(hit.paneId);
-  if (!view) return void 0;
-  return { ...hit, view };
-}
-function reRoundAllPanes(win) {
-  const s = registerComposer(win);
-  const dpr = devicePixelRatioFor(win);
-  for (const [paneId, css] of s.paneCss) {
-    const view = s.views.get(paneId);
-    if (!view || s.hidden.has(paneId)) continue;
-    if (!isValidPhysicalRect(css)) continue;
-    view.setBounds(css);
-    const phys = toPhysicalRect(css, dpr);
-    s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
-  }
-}
-const tearWindows = /* @__PURE__ */ new Map();
-function initTearWindowIpc() {
-  require$$1$3.ipcMain.on("tear-update", (_event, paneId, x, y) => {
-    let win = tearWindows.get(paneId);
-    if (!win) {
-      win = new require$$1$3.BrowserWindow({
-        width: 400,
-        height: 300,
-        x: x - 200,
-        y: y - 20,
-        frame: false,
-        transparent: true,
-        alwaysOnTop: true,
-        webPreferences: { preload: require$$1.join(__dirname, "../preload/index.js") }
-      });
-      win.__isTearWindow = true;
-      win.setOpacity(0.8);
-      if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-        win.loadURL(`${process.env["ELECTRON_RENDERER_URL"]}#tear-${paneId}`);
-      } else {
-        win.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
-          hash: `tear-${paneId}`
-        });
-      }
-      tearWindows.set(paneId, win);
-    } else {
-      win.setPosition(Math.round(x - 200), Math.round(y - 20));
-      if (!win.isVisible()) win.show();
-    }
-  });
-  require$$1$3.ipcMain.on("tear-hide", (_event, paneId) => {
-    const win = tearWindows.get(paneId);
-    if (win && win.isVisible()) win.hide();
-  });
-  require$$1$3.ipcMain.on("tear-commit", (_event, paneId) => {
-    const win = tearWindows.get(paneId);
-    if (win) {
-      const bounds = win.getBounds();
-      win.destroy();
-      tearWindows.delete(paneId);
-      const finalWin = new require$$1$3.BrowserWindow({
-        ...bounds,
-        titleBarStyle: "hidden",
-        titleBarOverlay: {
-          color: "#ffffff",
-          symbolColor: "#737373",
-          height: 40
-        },
-        webPreferences: {
-          preload: require$$1.join(__dirname, "../preload/index.js"),
-          webviewTag: true,
-          safeDialogs: true
-        }
-      });
-      finalWin.__isTearWindow = true;
-      if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-        finalWin.loadURL(
-          `${process.env["ELECTRON_RENDERER_URL"]}#standalone-${paneId}`
-        );
-      } else {
-        finalWin.loadFile(require$$1.join(__dirname, "../renderer/index.html"), {
-          hash: `standalone-${paneId}`
-        });
-      }
-    }
-  });
-}
-function resolvePreload(name) {
-  return require$$1.join(__dirname, "../preload", name);
-}
-function resolveAppIcon() {
-  const ico = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.ico");
-  const png = require$$1.join(require$$1$3.app.getAppPath(), "assets/icon.png");
-  return process.platform === "win32" ? ico : png;
-}
-function createWindow() {
-  const win = new require$$1$3.BrowserWindow({
-    width: 1200,
-    height: 800,
-    icon: resolveAppIcon(),
-    transparent: false,
-    backgroundColor: "#F7F7F5",
-    frame: false,
-    show: false,
-    webPreferences: {
-      preload: resolvePreload("index.js"),
-      contextIsolation: true,
-      sandbox: false,
-      backgroundThrottling: false
-    }
-  });
-  win.__isMainWindow = true;
-  global.mainWindow = win;
-  global.overlayWindow = win;
-  registerComposer(win);
-  return win;
-}
-function createAppOverlay(win) {
-  const view = new require$$1$3.WebContentsView({
-    webPreferences: {
-      preload: resolvePreload("index.js"),
-      contextIsolation: true,
-      sandbox: false
-    }
-  });
-  view.setBackgroundColor("#00000000");
-  if (utils$2.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-    view.webContents.loadURL(process.env["ELECTRON_RENDERER_URL"]);
-  } else {
-    view.webContents.loadFile(require$$1.join(__dirname, "../renderer/index.html"));
-  }
-  setAppOverlay(win, view);
-  global.appOverlayView = view;
-  global.overlayWindow = win;
-  syncAppOverlayBounds(win);
-  view.webContents.once("dom-ready", () => {
-    view.webContents.send("app:env", { nativeViews: true });
-  });
-  return view;
-}
-function syncAppOverlayBounds(win) {
-  if (!win || win.isDestroyed()) return;
-  const view = global.appOverlayView;
-  if (!view || view.webContents.isDestroyed()) return;
-  const [w, h] = win.getContentSize();
-  if (w > 0 && h > 0) {
-    view.setBounds({ x: 0, y: 0, width: w, height: h });
-  }
-}
-function initWindowManagerIpc() {
-  require$$1$3.ipcMain.on("window.minimize", () => {
-    global.mainWindow?.minimize();
-  });
-  require$$1$3.ipcMain.on("window.focus-main", () => {
-    global.mainWindow?.focus();
-    global.mainWindow?.webContents.focus();
-  });
-  require$$1$3.ipcMain.on("app.openInternalDevTools", () => {
-    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-      global.appOverlayView.webContents.openDevTools({ mode: "undocked" });
-    }
-  });
-  require$$1$3.ipcMain.on("app.closeInternalDevTools", () => {
-    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-      global.appOverlayView.webContents.closeDevTools();
-    }
-  });
-  require$$1$3.ipcMain.on("window.maximize", () => {
-    const win = global.mainWindow;
-    if (win) {
-      if (win.isMaximized()) {
-        win.unmaximize();
-      } else {
-        win.maximize();
-      }
-    }
-  });
-  require$$1$3.ipcMain.on("window.close", () => {
-    global.mainWindow?.close();
-  });
-  initTearWindowIpc();
-}
 function handleWebContentsWindowOpen(webContents) {
   webContents.setWindowOpenHandler((details) => {
     const decision = evaluateWindowOpenRequest(
@@ -3205,51 +3775,6 @@ function handleWebContentsWindowOpen(webContents) {
     }
     return { action: "deny" };
   });
-}
-function handleBeforeInputEvent(webContents, event, input) {
-  if (input.type !== "keyDown") return;
-  const isMod = Boolean(input.control || input.meta);
-  const keyLower = input.key ? input.key.toLowerCase() : "";
-  const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
-  const isReload = isMod && keyLower === "r" || input.key === "F5";
-  const isNum = keyLower >= "0" && keyLower <= "9";
-  const isZoom = isMod && (input.key === "=" || input.key === "+" || input.key === "-" || input.key === "0");
-  const isTabJump = isMod && input.key === "Tab";
-  const isAppShortcut = input.alt && isArrow || isMod && isArrow || isMod && (keyLower === "w" || keyLower === "t" || keyLower === "k" || keyLower === "l" || keyLower === "d" || keyLower === "f" || keyLower === "p" || keyLower === "n" || keyLower === "m" || keyLower === "e" || keyLower === "[" || keyLower === "]" || keyLower === "\\" || keyLower === "/") || input.alt && (keyLower === "d" || keyLower === "f" || keyLower === "p" || input.code === "Space") || isMod && isNum || input.alt && isNum || isZoom || isTabJump || input.key === "F11" || input.key === "F12" || isReload;
-  if (isAppShortcut) {
-    event.preventDefault();
-  }
-  if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
-    if (input.shift) {
-      webContents.reloadIgnoringCache();
-    } else {
-      webContents.reload();
-    }
-    if (!global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
-    }
-    return;
-  }
-  const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-  const payload = {
-    webContentsId: webContents.id,
-    key: input.key,
-    code: input.code,
-    control: input.control,
-    meta: input.meta,
-    shift: input.shift,
-    alt: input.alt,
-    isAutoRepeat: input.isAutoRepeat,
-    isInputFocused: false,
-    eventId: sharedId
-  };
-  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
-  if (ov && !ov.isDestroyed()) {
-    if (isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
-      ov.focus();
-    }
-    ov.send("forwarded-key", payload);
-  }
 }
 const patchedSessions = /* @__PURE__ */ new WeakSet();
 function configureSessionSecurity(session) {
@@ -19600,7 +20125,7 @@ function initPointerForwarder(getWindow) {
     const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
     if (!hit) return;
     const view = composers.get(win.id)?.views.get(hit.paneId);
-    if (!view) return;
+    if (!view || view.webContents.isDestroyed()) return;
     const dbg = ensureDebugger(view);
     if (!dbg) return;
     const localX = Math.round(msg.x - hit.cssLeft);
@@ -19716,11 +20241,6 @@ function repositionTransientOverlays(win) {
       v.setVisible(true);
     }
   }
-}
-function bindGuestCursor(wc) {
-  wc.on("cursor-changed", (_e, type2) => {
-    global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type2);
-  });
 }
 async function captureWebContentsCdp(wc, options = { fullPage: true, copyToClipboard: true }) {
   if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
@@ -20071,145 +20591,6 @@ async function pickColorFromPane(wc, x, y) {
     return { success: false, error: err?.message || String(err) };
   }
 }
-function extractUnreadBadgeFromTitle(title) {
-  if (!title || typeof title !== "string") {
-    return { count: 0, hasUnread: false, rawTitle: "" };
-  }
-  const clean = title.trim();
-  const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
-  if (parenMatch && parenMatch[1]) {
-    const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
-    return {
-      count: isNaN(num) ? 1 : num,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  if (clean.startsWith("*") || clean.startsWith("•") || clean.startsWith("●")) {
-    return {
-      count: 1,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  const wordMatch = clean.match(/([0-9]+)\s+(unread|new|notifications?)/i);
-  if (wordMatch && wordMatch[1]) {
-    const num = parseInt(wordMatch[1], 10);
-    return {
-      count: isNaN(num) ? 1 : num,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  return { count: 0, hasUnread: false, rawTitle: clean };
-}
-const DEFAULT_COMMUNICATOR_APPS = [
-  { id: "slack", name: "Slack", url: "https://app.slack.com/client", icon: "slack", partition: "persist:main", unreadCount: 0 },
-  { id: "gmail", name: "Gmail", url: "https://mail.google.com", icon: "gmail", partition: "persist:main", unreadCount: 0 },
-  { id: "whatsapp", name: "WhatsApp", url: "https://web.whatsapp.com", icon: "whatsapp", partition: "persist:main", unreadCount: 0 },
-  { id: "discord", name: "Discord", url: "https://discord.com/app", icon: "discord", partition: "persist:main", unreadCount: 0 },
-  { id: "telegram", name: "Telegram", url: "https://web.telegram.org", icon: "telegram", partition: "persist:main", unreadCount: 0 },
-  { id: "linear", name: "Linear", url: "https://linear.app/inbox", icon: "linear", partition: "persist:main", unreadCount: 0 },
-  { id: "notion", name: "Notion", url: "https://www.notion.so", icon: "notion", partition: "persist:main", unreadCount: 0 }
-];
-class CommunicatorService {
-  apps = [...DEFAULT_COMMUNICATOR_APPS];
-  views = /* @__PURE__ */ new Map();
-  activeAppId = "slack";
-  isDrawerOpen = false;
-  getApps() {
-    return this.apps;
-  }
-  getTotalUnreadCount() {
-    return this.apps.reduce((sum, app) => sum + app.unreadCount, 0);
-  }
-  updateAppUnread(appId, info) {
-    const app = this.apps.find((a) => a.id === appId);
-    if (app) {
-      const prevCount = app.unreadCount;
-      app.unreadCount = info.count;
-      global.appOverlayView?.webContents.send("communicator.unread-updated", {
-        appId,
-        unreadCount: info.count,
-        totalUnread: this.getTotalUnreadCount()
-      });
-      if (info.count > prevCount && info.count > 0) {
-        global.appOverlayView?.webContents.send("pane.notification-posted", {
-          appId,
-          appName: app.name,
-          title: `New message in ${app.name}`,
-          snippet: `You have ${info.count} unread messages`
-        });
-      }
-    }
-  }
-  getOrCreateView(appId, customPartition, customUrl) {
-    if (this.views.has(appId)) return this.views.get(appId);
-    const app = this.apps.find((a) => a.id === appId);
-    const targetUrl = customUrl || app?.url;
-    const targetPartition = customPartition || app?.partition || "persist:main";
-    if (!targetUrl) return void 0;
-    const view = new require$$1$3.WebContentsView({
-      webPreferences: {
-        preload: resolvePreload("pane.js"),
-        partition: targetPartition,
-        contextIsolation: true,
-        sandbox: false
-      }
-    });
-    view.setBackgroundColor("#ffffff");
-    if (typeof view.setBorderRadius === "function") {
-      view.setBorderRadius(12);
-    }
-    view.webContents.on("dom-ready", () => {
-      try {
-        const bounds = view.getBounds();
-        const targetZoom = Math.min(1, Math.max(0.72, (bounds.width || 600) / 760));
-        view.webContents.setZoomFactor(targetZoom);
-      } catch {
-      }
-    });
-    view.webContents.on("page-title-updated", () => {
-      const title = view.webContents.getTitle();
-      const info = extractUnreadBadgeFromTitle(title);
-      this.updateAppUnread(appId, info);
-    });
-    view.webContents.loadURL(targetUrl);
-    this.views.set(appId, view);
-    return view;
-  }
-  showDrawerView(win, appId, rect, partition, url) {
-    this.activeAppId = appId;
-    this.isDrawerOpen = true;
-    const view = this.getOrCreateView(appId, partition, url);
-    if (!view) return;
-    try {
-      if (!win.contentView.children.includes(view)) {
-        win.contentView.addChildView(view);
-      }
-    } catch {
-    }
-    try {
-      view.setBounds(rect);
-      const targetZoom = Math.min(1, Math.max(0.68, rect.width / 820));
-      const currentZoom = view.webContents.getZoomFactor();
-      if (Math.abs(currentZoom - targetZoom) > 0.02) {
-        view.webContents.setZoomFactor(targetZoom);
-      }
-    } catch {
-    }
-  }
-  hideDrawerView(win) {
-    this.isDrawerOpen = false;
-    for (const [, view] of this.views.entries()) {
-      try {
-        win.contentView.removeChildView(view);
-      } catch {
-      }
-    }
-  }
-}
-const communicatorService = new CommunicatorService();
 function initPaneSuperpowerIpc(panes2, getWindow) {
   require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, async (_e, paneId) => {
     const view = panes2.get(paneId);
@@ -20257,14 +20638,6 @@ function initPaneSuperpowerIpc(panes2, getWindow) {
   require$$1$3.ipcMain.handle(IPC_CHANNELS.VIEW.PICK_COLOR, async (_e, paneId, x, y) => {
     const view = panes2.get(paneId);
     return view ? pickColorFromPane(view.webContents, x, y) : { success: false, error: "Pane not found" };
-  });
-  require$$1$3.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
-    const win = getWindow();
-    if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
-  });
-  require$$1$3.ipcMain.on("communicator.hideDrawer", () => {
-    const win = getWindow();
-    if (win) communicatorService.hideDrawerView(win);
   });
   require$$1$3.ipcMain.on("pane.notification-posted", (e, data) => {
     const senderWc = e.sender;
@@ -20400,10 +20773,9 @@ function forwardGuestEvents(win, paneId, view, partition) {
     }
     const currentUrl = wc.getURL();
     if (details.url === currentUrl || details.url.startsWith(currentUrl + "#")) {
-      wc.loadURL(details.url);
       return { action: "deny" };
     }
-    ov()?.send("pane.spawn-request", { sourcePaneId: paneId, url: details.url, partition });
+    ov()?.send(IPC_CHANNELS.EVENTS.OPEN_IN_NEW_PANE, details.url);
     return { action: "deny" };
   });
 }
@@ -20476,7 +20848,14 @@ function initPaneLifecycle(getWindow) {
     const w = getWindow();
     if (w) destroyPane(w, paneId);
   });
-  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.NAVIGATE, (_e, id, url) => url?.trim() && panes.get(id)?.webContents.loadURL(url));
+  require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.NAVIGATE, (_e, id, url) => {
+    if (!url?.trim()) return;
+    const view = panes.get(id);
+    if (!view || view.webContents.isDestroyed()) return;
+    const cur = view.webContents.getURL();
+    if (cur && (cur === url || cur.replace(/\/+$/, "") === url.replace(/\/+$/, ""))) return;
+    view.webContents.loadURL(url);
+  });
   require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.FOCUS, (_e, id) => panes.get(id)?.webContents.focus());
   require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, (_e, id, muted) => panes.get(id)?.webContents.setAudioMuted(muted));
   require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.RELOAD, (_e, id) => panes.get(id)?.webContents.reload());
@@ -20491,17 +20870,17 @@ function initPaneLifecycle(getWindow) {
   require$$1$3.ipcMain.on("view.zoomReset", (_e, id) => panes.get(id)?.webContents.setZoomLevel(0));
   require$$1$3.ipcMain.on("view.findInPage", (_e, id, text, opts) => panes.get(id)?.webContents.findInPage(text, opts));
   require$$1$3.ipcMain.on("view.stopFindInPage", (_e, id, action) => panes.get(id)?.webContents.stopFindInPage(action));
-  require$$1$3.ipcMain.on("pane.media-timestamp", (e, payload) => {
+  require$$1$3.ipcMain.on("pane.media-timestamp", (e, p) => {
     const id = findPaneIdBySender(e.sender.id);
-    if (id) global.appOverlayView?.webContents.send("app:media-timestamp", { paneId: id, ...payload });
+    if (id) global.appOverlayView?.webContents.send("app:media-timestamp", { paneId: id, ...p });
   });
-  require$$1$3.ipcMain.on("pane.scroll-position", (e, payload) => {
+  require$$1$3.ipcMain.on("pane.scroll-position", (e, p) => {
     const id = findPaneIdBySender(e.sender.id);
-    if (id) global.appOverlayView?.webContents.send("app:scroll-position", { paneId: id, ...payload });
+    if (id) global.appOverlayView?.webContents.send("app:scroll-position", { paneId: id, ...p });
   });
-  require$$1$3.ipcMain.on("pane.focus-change", (e, isFocused) => {
+  require$$1$3.ipcMain.on("pane.focus-change", (e, f) => {
     const id = findPaneIdBySender(e.sender.id);
-    if (id) global.appOverlayView?.webContents.send("pane.focus-change", { paneId: id, isFocused });
+    if (id) global.appOverlayView?.webContents.send("pane.focus-change", { paneId: id, isFocused: f });
   });
   require$$1$3.ipcMain.on("pane.clicked", (e) => {
     const id = findPaneIdBySender(e.sender.id);
@@ -20544,6 +20923,7 @@ if (!gotTheLock) {
     initDbIpc();
     initLicensingIpc();
     initAuthIpc();
+    initCommunicatorIpc(() => global.mainWindow || void 0);
     initDiagnosticsIpc(logFile);
     initDevCommandBridge(isDevMode);
     const guestLogger = createLogger("GUEST");
