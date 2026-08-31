@@ -5768,7 +5768,7 @@ function matchAccelerator(acc, isMac) {
   );
 }
 const logo = "" + new URL("logo-yHKUUx0t.svg", import.meta.url).href;
-var _tmpl$$1p = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$11 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$Q = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$C = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain dark:invert"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
+var _tmpl$$1q = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$12 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$Q = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$D = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain dark:invert"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
     const current = props.uiMode();
@@ -5792,7 +5792,7 @@ function AppUiHub(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$4$C(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
+    var _el$ = _tmpl$4$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
@@ -5805,14 +5805,14 @@ function AppUiHub(props) {
             return props.uiMode() === "inset";
           },
           get children() {
-            return _tmpl$$1p();
+            return _tmpl$$1q();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "overlap";
           },
           get children() {
-            return _tmpl$2$11();
+            return _tmpl$2$12();
           }
         }), createComponent(Match, {
           get when() {
@@ -5857,7 +5857,7 @@ var defaultAttributes = {
   "stroke-linejoin": "round"
 };
 var defaultAttributes_default = defaultAttributes;
-var _tmpl$$1o = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1p = /* @__PURE__ */ template(`<svg>`);
 var toKebabCase = (string) => string.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 var mergeClasses = (...classes) => classes.filter((className2, index, array) => {
   return Boolean(className2) && className2.trim() !== "" && array.indexOf(className2) === index;
@@ -5865,7 +5865,7 @@ var mergeClasses = (...classes) => classes.filter((className2, index, array) => 
 var Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$1o();
+    var _el$ = _tmpl$$1p();
     spread(_el$, mergeProps(defaultAttributes_default, {
       get width() {
         return localProps.size ?? defaultAttributes_default.width;
@@ -8418,7 +8418,7 @@ function getSmartIconId(name = "") {
     return "moon";
   return "folder";
 }
-var _tmpl$$1n = /* @__PURE__ */ template(`<span>`);
+var _tmpl$$1o = /* @__PURE__ */ template(`<span>`);
 function WorkspaceIcon(props) {
   const iconId = () => {
     if (props.icon && props.icon !== "auto") {
@@ -8431,7 +8431,7 @@ function WorkspaceIcon(props) {
     return item ? item.component : folder_default;
   };
   return (() => {
-    var _el$ = _tmpl$$1n();
+    var _el$ = _tmpl$$1o();
     insert(_el$, () => {
       const Comp = IconComp();
       return createComponent(Comp, {
@@ -8447,14 +8447,14 @@ function WorkspaceIcon(props) {
     return _el$;
   })();
 }
-var _tmpl$$1m = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
+var _tmpl$$1n = /* @__PURE__ */ template(`<span class="flex items-center gap-1.5 pl-4 pr-2 mr-1 border-r border-neutral-200/70 select-none shrink-0"><span class=text-neutral-400></span><span class="text-[10.5px] font-semibold tracking-[0.14em] uppercase text-neutral-500 whitespace-nowrap max-w-[100px] truncate">`);
 function TabIslandEyebrow(props) {
   return createComponent(Show, {
     get when() {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$1m(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$$1n(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, createComponent(WorkspaceIcon, {
         get icon() {
           return props.workspaceIcon;
@@ -13793,7 +13793,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$1l = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$10 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$P = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$B = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$i = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$c = /* @__PURE__ */ template(`<div class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$7 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$3 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$2 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1m = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$11 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$P = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$r = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$k = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$d = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$9 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$4 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$2 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -13818,14 +13818,14 @@ function TabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$1l();
+        var _el$ = _tmpl$$1m();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$7$c(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$7$d(), _el$3 = _el$2.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -13835,7 +13835,7 @@ function TabPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$17 = _tmpl$8$7(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
+              var _el$17 = _tmpl$8$9(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
               insert(_el$22, () => props.cascadePrompt?.profileName);
               _el$24.$$click = (e) => {
                 e.stopPropagation();
@@ -13850,16 +13850,16 @@ function TabPopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$4$B(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$4 = _tmpl$4$C(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
               insert(_el$8, createComponent(Show, {
                 get when() {
                   return props.isSplit;
                 },
                 get fallback() {
-                  return _tmpl$9$3();
+                  return _tmpl$9$4();
                 },
                 get children() {
-                  return _tmpl$2$10();
+                  return _tmpl$2$11();
                 }
               }));
               insert(_el$5, createComponent(Show, {
@@ -13883,7 +13883,7 @@ function TabPopover(props) {
               createRenderEffect(() => _el$10.value = getCustomName());
               return _el$4;
             })(), (() => {
-              var _el$11 = _tmpl$5$q(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
+              var _el$11 = _tmpl$5$r(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$14) : flipThumbRef = _el$14;
               insert(_el$13, createComponent(For, {
@@ -13939,7 +13939,7 @@ function TabPopover(props) {
               }), null);
               return _el$11;
             })(), (() => {
-              var _el$15 = _tmpl$6$i(), _el$16 = _el$15.firstChild;
+              var _el$15 = _tmpl$6$k(), _el$16 = _el$15.firstChild;
               _el$16.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -13967,7 +13967,7 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$1k = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$$ = /* @__PURE__ */ template(`<div>`), _tmpl$3$O = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+var _tmpl$$1l = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain transition-opacity duration-200">`, true, false, false), _tmpl$2$10 = /* @__PURE__ */ template(`<div>`), _tmpl$3$O = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
 function Favicon(props) {
   const [hasError, setHasError] = createSignal(false);
   const size = () => props.size || 16;
@@ -13984,7 +13984,7 @@ function Favicon(props) {
     markFaviconFailed(props.url);
   };
   return (() => {
-    var _el$ = _tmpl$2$$();
+    var _el$ = _tmpl$2$10();
     insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!faviconUrl())() && !hasError();
@@ -14005,7 +14005,7 @@ function Favicon(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$1k();
+        var _el$2 = _tmpl$$1l();
         _el$2.addEventListener("error", handleError2);
         createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
         return _el$2;
@@ -14025,7 +14025,7 @@ function Favicon(props) {
     return _el$;
   })();
 }
-var _tmpl$$1j = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$_ = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1k = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/90 dark:bg-neutral-700 text-[7.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 ring-[1px] ring-white/90 dark:ring-neutral-900 z-0 shrink-0">+`), _tmpl$2$$ = /* @__PURE__ */ template(`<div>`);
 function TabFaviconStack(props) {
   const size = () => props.size || 14;
   const validUrls = () => props.urls.filter((u) => u && u.trim().length > 0 && u !== "about:blank");
@@ -14042,7 +14042,7 @@ function TabFaviconStack(props) {
       return validUrls().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$2$_();
+      var _el$ = _tmpl$2$$();
       insert(_el$, createComponent(For, {
         get each() {
           return displayUrls().slice(0, 3);
@@ -14050,7 +14050,7 @@ function TabFaviconStack(props) {
         children: (url, idx) => {
           const isFocused = () => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url)));
           return (() => {
-            var _el$4 = _tmpl$2$_();
+            var _el$4 = _tmpl$2$$();
             insert(_el$4, createComponent(Favicon, {
               url,
               get size() {
@@ -14075,7 +14075,7 @@ function TabFaviconStack(props) {
           return validUrls().length > 3;
         },
         get children() {
-          var _el$2 = _tmpl$$1j();
+          var _el$2 = _tmpl$$1k();
           _el$2.firstChild;
           insert(_el$2, () => validUrls().length - 3, null);
           createRenderEffect((_p$) => {
@@ -14293,7 +14293,7 @@ function computeSmartTabName(customName, leafPanes) {
   const primaryName = formatSmartDomain(validPanes[0].url);
   return `${primaryName} + ${validPanes.length - 1}`;
 }
-var _tmpl$$1i = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$Z = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$N = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+var _tmpl$$1j = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$_ = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$3$N = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
 function TabItem(props) {
   const leafInfo = createMemo(() => extractTabLeafInfo(props.tab.id, props.activeTabId || (props.isActive ? props.tab.id : ""), layoutStore.nodes, layoutStore.rootId, props.tab.layout_state));
   const activeUrl = createMemo(() => {
@@ -14342,7 +14342,7 @@ function TabItem(props) {
         return isPlaying();
       },
       get children() {
-        var _el$5 = _tmpl$$1i();
+        var _el$5 = _tmpl$$1j();
         _el$5.$$click = (e) => {
           e.stopPropagation();
           const ids = leafInfo().leafPaneIds;
@@ -14403,7 +14403,7 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$6 = _tmpl$2$Z();
+        var _el$6 = _tmpl$2$_();
         _el$6.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
@@ -14439,7 +14439,7 @@ function TabItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$1h = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$Y = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$1i = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$Z = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden shrink min-w-0 [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1"></div><div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
@@ -14467,7 +14467,7 @@ function TabIsland(props) {
   });
   const isCompact = () => props.tabs.length > 3;
   return (() => {
-    var _el$ = _tmpl$2$Y(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$Z(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
@@ -14581,7 +14581,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$1h();
+        return _tmpl$$1i();
       }
     }), _el$4);
     _el$5.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
@@ -14590,7 +14590,7 @@ function TabIsland(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$1g = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1h = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-max px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
   const handleCloseTab = async (tabId) => {
     const currentTabs = props.ws.tabs();
@@ -14651,7 +14651,7 @@ function AppTopbar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$1g(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1h(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -14684,7 +14684,7 @@ function AppTopbar(props) {
     }
   });
 }
-var _tmpl$$1f = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$X = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$M = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$1g = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$Y = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$M = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const u = new URL(rawUrl);
@@ -14764,7 +14764,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$1f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$1g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -14802,7 +14802,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$X();
+              return _tmpl$2$Y();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -14815,21 +14815,21 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$1e = /* @__PURE__ */ template(`<kbd>`);
+var _tmpl$$1f = /* @__PURE__ */ template(`<kbd>`);
 function ShortcutBadge(props) {
   return createComponent(Show, {
     get when() {
       return props.shortcut;
     },
     get children() {
-      var _el$ = _tmpl$$1e();
+      var _el$ = _tmpl$$1f();
       insert(_el$, () => props.shortcut);
       createRenderEffect(() => className(_el$, `px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none tracking-normal inline-flex items-center justify-center select-none ${props.class || ""}`));
       return _el$;
     }
   });
 }
-var _tmpl$$1d = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$W = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
+var _tmpl$$1e = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$X = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -14877,7 +14877,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$2$W();
+    var _el$ = _tmpl$2$X();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -14891,7 +14891,7 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$$1d(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$1e(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
             insert(_el$2, createComponent(ShortcutBadge, {
               get shortcut() {
@@ -14918,7 +14918,7 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$1c = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$V = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$L = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1d = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$W = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$L = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$B = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
 function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
@@ -15023,7 +15023,7 @@ function ActivePaneNav(props) {
   };
   onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$4$A();
+    var _el$ = _tmpl$4$B();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -15031,7 +15031,7 @@ function ActivePaneNav(props) {
         return !canGoBack();
       },
       get children() {
-        var _el$2 = _tmpl$$1c();
+        var _el$2 = _tmpl$$1d();
         _el$2.$$contextmenu = (e) => {
           e.preventDefault();
           if (backItems().length > 0) openHistory("back");
@@ -15058,7 +15058,7 @@ function ActivePaneNav(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$V();
+        var _el$3 = _tmpl$2$W();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -15293,14 +15293,14 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$1b = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$U = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$K = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$z = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$p = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$h = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$b = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$6 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$2 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
+var _tmpl$$1c = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$V = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$K = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$A = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$q = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$j = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$c = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$3 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
 const SlackIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$ = _tmpl$$1b();
+  var _el$ = _tmpl$$1c();
   setAttribute(_el$, "class", className2);
   return _el$;
 })();
 const GmailIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$2 = _tmpl$2$U();
+  var _el$2 = _tmpl$2$V();
   setAttribute(_el$2, "class", className2);
   return _el$2;
 })();
@@ -15310,32 +15310,32 @@ const NotionIcon = (className2 = "w-6 h-6") => (() => {
   return _el$3;
 })();
 const FigmaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$4 = _tmpl$4$z();
+  var _el$4 = _tmpl$4$A();
   setAttribute(_el$4, "class", className2);
   return _el$4;
 })();
 const CanvaIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$5 = _tmpl$5$p();
+  var _el$5 = _tmpl$5$q();
   setAttribute(_el$5, "class", className2);
   return _el$5;
 })();
 const GitHubIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$6 = _tmpl$6$h();
+  var _el$6 = _tmpl$6$j();
   setAttribute(_el$6, "class", className2);
   return _el$6;
 })();
 const ChatGPTIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$7 = _tmpl$7$b();
+  var _el$7 = _tmpl$7$c();
   setAttribute(_el$7, "class", className2);
   return _el$7;
 })();
 const HubSpotIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$8 = _tmpl$8$6();
+  var _el$8 = _tmpl$8$8();
   setAttribute(_el$8, "class", className2);
   return _el$8;
 })();
 const StripeIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$9 = _tmpl$9$2();
+  var _el$9 = _tmpl$9$3();
   setAttribute(_el$9, "class", className2);
   return _el$9;
 })();
@@ -15660,7 +15660,7 @@ function useProfileApps(profileId) {
     handleDrop
   };
 }
-var _tmpl$$1a = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/80 p-1.5 max-h-[240px] overflow-y-auto z-50 animate-in fade-in zoom-in-[0.99] duration-100">`), _tmpl$2$T = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-medium truncate">`), _tmpl$3$J = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$4$y = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$o = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$6$g = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<div class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-double-bezel-elevated border border-neutral-200/80 p-1.5 max-h-[240px] overflow-y-auto z-50 animate-in fade-in zoom-in-[0.99] duration-100">`), _tmpl$2$U = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-medium truncate">`), _tmpl$3$J = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$4$z = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate">`), _tmpl$5$p = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$6$i = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
 function CommandBarDropdown(props) {
   let listContainer;
   createEffect(() => {
@@ -15677,7 +15677,7 @@ function CommandBarDropdown(props) {
       return memo(() => !!props.show)() && props.suggestions.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$1a();
+      var _el$ = _tmpl$$1b();
       use((el) => {
         listContainer = el;
         props.containerRef(el);
@@ -15687,7 +15687,7 @@ function CommandBarDropdown(props) {
           return props.suggestions;
         },
         children: (item, idx) => (() => {
-          var _el$2 = _tmpl$4$y(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
+          var _el$2 = _tmpl$4$z(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild;
           _el$2.$$click = () => props.onExecute(item);
           insert(_el$3, createComponent(Show, {
             get when() {
@@ -15695,7 +15695,7 @@ function CommandBarDropdown(props) {
             },
             get fallback() {
               return (() => {
-                var _el$8 = _tmpl$5$o();
+                var _el$8 = _tmpl$5$p();
                 insert(_el$8, createComponent(Switch, {
                   get children() {
                     return [createComponent(Match, {
@@ -15744,7 +15744,7 @@ function CommandBarDropdown(props) {
               return item.subtitle;
             },
             get children() {
-              var _el$6 = _tmpl$2$T();
+              var _el$6 = _tmpl$2$U();
               insert(_el$6, () => item.subtitle);
               return _el$6;
             }
@@ -15759,7 +15759,7 @@ function CommandBarDropdown(props) {
                   return props.activeIdx === idx();
                 },
                 get children() {
-                  var _el$9 = _tmpl$6$g(), _el$0 = _el$9.firstChild;
+                  var _el$9 = _tmpl$6$i(), _el$0 = _el$9.firstChild;
                   insert(_el$9, createComponent(corner_down_left_default, {
                     "class": "w-2.5 h-2.5"
                   }), _el$0);
@@ -15829,16 +15829,16 @@ function cleanUrlString(rawUrl) {
     return rawUrl;
   }
 }
-var _tmpl$$19 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$S = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$I = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$x = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$n = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$f = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$a = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$T = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$I = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$y = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$o = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$h = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$b = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
 function OmniboxInputIcon(props) {
   return (() => {
-    var _el$ = _tmpl$4$x();
+    var _el$ = _tmpl$4$y();
     insert(_el$, createComponent(Show, {
       get when() {
         return props.type === "search";
       },
       get children() {
-        return _tmpl$$19();
+        return _tmpl$$1a();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -15846,7 +15846,7 @@ function OmniboxInputIcon(props) {
         return props.type === "localhost";
       },
       get children() {
-        return _tmpl$2$S();
+        return _tmpl$2$T();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -15862,17 +15862,17 @@ function OmniboxInputIcon(props) {
 }
 function CopyCleanButton(props) {
   return (() => {
-    var _el$5 = _tmpl$6$f();
+    var _el$5 = _tmpl$6$h();
     addEventListener(_el$5, "click", props.onCopy, true);
     insert(_el$5, createComponent(Show, {
       get when() {
         return props.copied;
       },
       get fallback() {
-        return _tmpl$7$a();
+        return _tmpl$7$b();
       },
       get children() {
-        return _tmpl$5$n();
+        return _tmpl$5$o();
       }
     }));
     createRenderEffect(() => setAttribute(_el$5, "title", props.copied ? "Clean Link Copied!" : "Copy Clean URL (Strips tracking parameters)"));
@@ -15965,7 +15965,7 @@ function useOmniboxEvents(params) {
   };
   return { handleKeyDown };
 }
-var _tmpl$$18 = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
+var _tmpl$$19 = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
 function ActivePaneProgress(props) {
   const [loading, setLoading] = createSignal(false);
   const [progress, setProgress] = createSignal(0);
@@ -16048,13 +16048,13 @@ function ActivePaneProgress(props) {
       return loading();
     },
     get children() {
-      var _el$ = _tmpl$$18(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$19(), _el$2 = _el$.firstChild;
       createRenderEffect((_$p) => setStyleProperty(_el$2, "width", `${progress()}%`));
       return _el$;
     }
   });
 }
-var _tmpl$$17 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$R = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$H = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$18 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$S = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$H = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function ActivePaneAudio(props) {
   const [isPlaying, setIsPlaying] = createSignal(false);
   const [isMuted, setIsMuted] = createSignal(false);
@@ -16077,7 +16077,7 @@ function ActivePaneAudio(props) {
       return isPlaying();
     },
     get children() {
-      var _el$ = _tmpl$2$R();
+      var _el$ = _tmpl$2$S();
       _el$.$$click = toggleMute;
       insert(_el$, createComponent(Show, {
         get when() {
@@ -16087,7 +16087,7 @@ function ActivePaneAudio(props) {
           return _tmpl$3$H();
         },
         get children() {
-          return _tmpl$$17();
+          return _tmpl$$18();
         }
       }));
       createRenderEffect((_p$) => {
@@ -16104,7 +16104,7 @@ function ActivePaneAudio(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$16 = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$2$Q = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)...">`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<div class="flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1"><span class=truncate>`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="relative flex items-center min-w-[220px] max-w-[360px] flex-1"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)...">`);
 function ActivePaneOmnibox(props) {
   let inputRef;
   let suggestionsContainerRef;
@@ -16183,7 +16183,7 @@ function ActivePaneOmnibox(props) {
     return formatUrlForDisplay(url);
   };
   return (() => {
-    var _el$ = _tmpl$2$Q(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$R(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$2.$$click = () => {
       if (!isFocused()) {
         setIsFocused(true);
@@ -16220,7 +16220,7 @@ function ActivePaneOmnibox(props) {
       },
       get children() {
         return [(() => {
-          var _el$4 = _tmpl$$16(), _el$5 = _el$4.firstChild;
+          var _el$4 = _tmpl$$17(), _el$5 = _el$4.firstChild;
           insert(_el$5, displayLabel);
           return _el$4;
         })(), createComponent(ActivePaneAudio, {
@@ -16269,7 +16269,7 @@ function ActivePaneOmnibox(props) {
       }
     }), null);
     createRenderEffect((_p$) => {
-      var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-all duration-200 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-2 ring-neutral-900/10 border-neutral-300 shadow-sm" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
+      var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-[background-color,border-color,box-shadow] duration-150 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-2 ring-neutral-900/10 border-neutral-300 shadow-sm" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
       _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
       _v$2 !== _p$.t && className(_el$3, _p$.t = _v$2);
       return _p$;
@@ -16282,7 +16282,7 @@ function ActivePaneOmnibox(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$15 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$P = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$G = /* @__PURE__ */ template(`<div class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$w = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+var _tmpl$$16 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$Q = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$G = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom`), _tmpl$4$x = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
 function SplitMenu(props) {
   let triggerRef;
   const [coords, setCoords] = createSignal({
@@ -16295,6 +16295,7 @@ function SplitMenu(props) {
   const lastDir = () => layoutStore.lastSplitDirection || "right";
   const handleToggle = (e) => {
     e.stopPropagation();
+    PaneFocusManager.focusPane(props.paneId);
     if (triggerRef) {
       const rect = triggerRef.getBoundingClientRect();
       setCoords({
@@ -16309,13 +16310,14 @@ function SplitMenu(props) {
   };
   const handleSplitClick = (dir, e) => {
     e.stopPropagation();
+    PaneFocusManager.focusPane(props.paneId);
     setLayoutStore("lastSplitDirection", dir);
     setLayoutStore("splitPreview", null);
     props.onSplit(props.paneId, dir);
     props.setShowSplitMenu(false);
   };
   return (() => {
-    var _el$ = _tmpl$4$w(), _el$3 = _el$.firstChild;
+    var _el$ = _tmpl$4$x(), _el$3 = _el$.firstChild;
     var _ref$ = triggerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
     insert(_el$, createComponent(ActionTooltip, {
@@ -16327,9 +16329,10 @@ function SplitMenu(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$15();
+        var _el$2 = _tmpl$$16();
         _el$2.$$click = (e) => {
           e.stopPropagation();
+          PaneFocusManager.focusPane(props.paneId);
           setLayoutStore("splitPreview", null);
           props.onSplit(props.paneId, lastDir());
         };
@@ -16345,7 +16348,7 @@ function SplitMenu(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$P();
+              var _el$4 = _tmpl$2$Q();
               _el$4.$$click = (e) => {
                 e.stopPropagation();
                 props.setShowSplitMenu(false);
@@ -16375,344 +16378,6 @@ function SplitMenu(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$14 = /* @__PURE__ */ template(`<button type=button class="text-[10px] font-medium text-neutral-500 hover:text-neutral-900 pt-1 transition-colors w-full text-center cursor-pointer">`), _tmpl$2$O = /* @__PURE__ */ template(`<div class="space-y-2 p-3 bg-neutral-50/90 rounded-xl border border-neutral-200/70"><div class="flex items-center justify-between"><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Connected Accounts</label><span class="text-[10px] text-neutral-400">Auto-login in this profile</span></div><div class="space-y-1.5 max-h-[220px] overflow-y-auto pr-0.5">`), _tmpl$3$F = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-white border border-neutral-200 rounded-md text-neutral-600 hover:text-red-600 hover:border-red-200 transition-colors shrink-0 cursor-pointer">Disconnect`), _tmpl$4$v = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-lg border border-neutral-200/70 shadow-xs hover:border-neutral-300 transition-colors"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-md bg-neutral-100 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-4 h-4 object-contain"></div><div class="flex flex-col min-w-0"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-500 truncate">`), _tmpl$5$m = /* @__PURE__ */ template(`<button type=button class="text-[11px] font-medium px-2.5 py-1 bg-neutral-900 text-white rounded-md hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer shadow-xs">Connect`);
-const SUPPORTED_PROVIDERS = [{
-  id: "google",
-  name: "Google",
-  domain: "google.com",
-  loginUrl: "https://accounts.google.com"
-}, {
-  id: "github",
-  name: "GitHub",
-  domain: "github.com",
-  loginUrl: "https://github.com/login"
-}, {
-  id: "microsoft",
-  name: "Microsoft 365",
-  domain: "microsoft.com",
-  loginUrl: "https://login.microsoftonline.com"
-}, {
-  id: "apple",
-  name: "Apple",
-  domain: "apple.com",
-  loginUrl: "https://appleid.apple.com"
-}, {
-  id: "x",
-  name: "X (Twitter)",
-  domain: "x.com",
-  loginUrl: "https://twitter.com/login"
-}, {
-  id: "discord",
-  name: "Discord",
-  domain: "discord.com",
-  loginUrl: "https://discord.com/login"
-}, {
-  id: "gitlab",
-  name: "GitLab",
-  domain: "gitlab.com",
-  loginUrl: "https://gitlab.com/users/sign_in"
-}, {
-  id: "slack",
-  name: "Slack",
-  domain: "slack.com",
-  loginUrl: "https://slack.com/signin"
-}];
-function ConnectedAccountsList(props) {
-  const [showAll, setShowAll] = createSignal(false);
-  const getIdentities = () => {
-    if (!props.identitiesJson) return {};
-    try {
-      return JSON.parse(props.identitiesJson);
-    } catch {
-      return {};
-    }
-  };
-  const handleConnect = (loginUrl) => {
-    const id = props.profileId || "main";
-    const api = window.api;
-    if (api?.openGoogleAuth) {
-      api.openGoogleAuth({
-        url: loginUrl,
-        profileId: id
-      });
-    } else if (api?.auth?.openGoogleAuth) {
-      api.auth.openGoogleAuth({
-        url: loginUrl,
-        profileId: id
-      });
-    }
-  };
-  const handleDisconnect = async (providerId) => {
-    const id = props.profileId || "main";
-    const api = window.api;
-    if (providerId === "google") {
-      if (api?.disconnectGoogle) await api.disconnectGoogle(id);
-      else if (api?.auth?.disconnectGoogle) await api.auth.disconnectGoogle(id);
-    }
-  };
-  const displayedProviders = () => showAll() ? SUPPORTED_PROVIDERS : SUPPORTED_PROVIDERS.slice(0, 4);
-  return (() => {
-    var _el$ = _tmpl$2$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-    insert(_el$3, createComponent(For, {
-      get each() {
-        return displayedProviders();
-      },
-      children: (provider) => {
-        const identity = () => getIdentities()[provider.id];
-        return (() => {
-          var _el$5 = _tmpl$4$v(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
-          _el$8.addEventListener("error", (e) => {
-            e.currentTarget.style.display = "none";
-          });
-          insert(_el$0, () => provider.name);
-          insert(_el$1, () => identity()?.email || "Not connected");
-          insert(_el$5, createComponent(Show, {
-            get when() {
-              return identity();
-            },
-            get fallback() {
-              return (() => {
-                var _el$11 = _tmpl$5$m();
-                _el$11.$$click = () => handleConnect(provider.loginUrl);
-                return _el$11;
-              })();
-            },
-            get children() {
-              var _el$10 = _tmpl$3$F();
-              _el$10.$$click = () => handleDisconnect(provider.id);
-              return _el$10;
-            }
-          }), null);
-          createRenderEffect((_p$) => {
-            var _v$ = `https://www.google.com/s2/favicons?domain=${provider.domain}&sz=64`, _v$2 = provider.name;
-            _v$ !== _p$.e && setAttribute(_el$8, "src", _p$.e = _v$);
-            _v$2 !== _p$.t && setAttribute(_el$8, "alt", _p$.t = _v$2);
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$5;
-        })();
-      }
-    }));
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return SUPPORTED_PROVIDERS.length > 4;
-      },
-      get children() {
-        var _el$4 = _tmpl$$14();
-        _el$4.$$click = () => setShowAll(!showAll());
-        insert(_el$4, (() => {
-          var _c$ = memo(() => !!showAll());
-          return () => _c$() ? "Show Fewer" : `+ ${SUPPORTED_PROVIDERS.length - 4} More Accounts`;
-        })());
-        return _el$4;
-      }
-    }), null);
-    return _el$;
-  })();
-}
-delegateEvents(["click"]);
-var _tmpl$$13 = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l-2 border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs text-neutral-700">Incognito Mode (RAM-only session)</span></label><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Proxy Server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800"></div><div class=space-y-1><label class="text-[10px] font-semibold text-neutral-500 uppercase">Custom User Agent</label><input type=text placeholder="e.g. Custom UA string..."class="w-full bg-white border border-neutral-200 rounded-md px-2.5 py-1.5 text-xs outline-none focus:border-neutral-800">`), _tmpl$2$N = /* @__PURE__ */ template(`<div class="flex flex-col gap-3.5 p-1"><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Profile Name</label><input type=text placeholder="e.g. Personal, Work, Client Alpha"class="w-full bg-white border border-neutral-200 rounded-lg px-3 py-2 text-xs text-neutral-900 outline-none focus:border-neutral-800 transition-colors shadow-xs"autofocus></div><div class=space-y-1.5><label class="text-[11px] font-semibold text-neutral-600 uppercase tracking-wider block">Theme Color</label><div class="flex flex-wrap gap-2"></div></div><div class=pt-1><button type=button class="flex items-center gap-1.5 text-[11px] font-semibold text-neutral-500 hover:text-neutral-900 transition-colors uppercase tracking-wider cursor-pointer"><span></span><span>Advanced Configuration</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$E = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$u = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
-const COLORS = [
-  "#6d7f94",
-  // Slate Grey
-  "#a1907d",
-  // Warm Sand
-  "#5e7c7a",
-  // Eucalyptus Teal
-  "#8a7685",
-  // Muted Plum
-  "#a38c8e",
-  // Muted Rose
-  "#9c8c7c",
-  // Muted Clay
-  "#4a4a49"
-  // Monochromatic Charcoal
-];
-function ProfileForm(props) {
-  const [name, setName] = createSignal(props.initialData?.name || "");
-  const [color, setColor] = createSignal(props.initialData?.color || COLORS[6]);
-  const [isEphemeral, setIsEphemeral] = createSignal(props.initialData?.is_ephemeral || false);
-  const [proxyServer, setProxyServer] = createSignal(props.initialData?.proxy_server || "");
-  const [userAgent, setUserAgent] = createSignal(props.initialData?.user_agent || "");
-  const [showAdvanced, setShowAdvanced] = createSignal(Boolean(props.initialData?.proxy_server || props.initialData?.user_agent || props.initialData?.is_ephemeral));
-  const handleSave = () => {
-    if (!name().trim()) return;
-    props.onSave({
-      id: props.initialData?.id,
-      name: name().trim(),
-      color: color(),
-      is_ephemeral: isEphemeral(),
-      proxy_server: proxyServer().trim() || "",
-      user_agent: userAgent().trim() || ""
-    });
-  };
-  return (() => {
-    var _el$ = _tmpl$2$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
-    _el$4.$$input = (e) => setName(e.currentTarget.value);
-    insert(_el$, createComponent(ConnectedAccountsList, {
-      get profileId() {
-        return props.initialData?.id;
-      },
-      get identitiesJson() {
-        return props.initialData?.identities_json;
-      }
-    }), _el$5);
-    insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$23 = _tmpl$3$E();
-      _el$23.$$click = () => setColor(c);
-      setStyleProperty(_el$23, "background-color", c);
-      createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer ${color() === c ? "ring-2 ring-offset-1 ring-neutral-900 scale-105" : ""}`));
-      return _el$23;
-    })()));
-    _el$9.$$click = () => setShowAdvanced(!showAdvanced());
-    insert(_el$0, () => showAdvanced() ? "▾" : "▸");
-    insert(_el$8, createComponent(Show, {
-      get when() {
-        return showAdvanced();
-      },
-      get children() {
-        var _el$1 = _tmpl$$13(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
-        _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
-        _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
-        _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
-        createRenderEffect(() => _el$11.checked = isEphemeral());
-        createRenderEffect(() => _el$14.value = proxyServer());
-        createRenderEffect(() => _el$17.value = userAgent());
-        return _el$1;
-      }
-    }), null);
-    insert(_el$19, (() => {
-      var _c$ = memo(() => !!props.onDelete);
-      return () => _c$() && (() => {
-        var _el$24 = _tmpl$4$u();
-        addEventListener(_el$24, "click", props.onDelete, true);
-        return _el$24;
-      })();
-    })());
-    addEventListener(_el$21, "click", props.onCancel, true);
-    _el$22.$$click = handleSave;
-    createRenderEffect(() => _el$22.disabled = !name().trim());
-    createRenderEffect(() => _el$4.value = name());
-    return _el$;
-  })();
-}
-delegateEvents(["input", "click"]);
-var _tmpl$$12 = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$M = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$D = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$t = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$l = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$e = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate">`);
-function ProfileMenuList(props) {
-  let listRef;
-  const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
-  const [highlightedIndex, setHighlightedIndex] = createSignal(initialIndex());
-  onMount(() => {
-    listRef?.focus();
-  });
-  const handleKeyDown = (e) => {
-    const total = layoutStore.profiles.length;
-    if (total === 0) return;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      e.stopPropagation();
-      setHighlightedIndex((i) => (i + 1) % total);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      e.stopPropagation();
-      setHighlightedIndex((i) => (i - 1 + total) % total);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      e.stopPropagation();
-      const target = layoutStore.profiles[highlightedIndex()];
-      if (target) {
-        props.onSelect(target.id);
-      }
-    }
-  };
-  return (() => {
-    var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
-    _el$.$$keydown = handleKeyDown;
-    var _ref$ = listRef;
-    typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
-    insert(_el$3, createComponent(For, {
-      get each() {
-        return layoutStore.profiles;
-      },
-      children: (profile, idx) => (() => {
-        var _el$6 = _tmpl$5$l(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
-        _el$6.$$click = (e) => {
-          e.stopPropagation();
-          props.onSelect(profile.id);
-        };
-        _el$6.addEventListener("mouseenter", () => setHighlightedIndex(idx()));
-        insert(_el$8, () => profile.name.charAt(0).toUpperCase());
-        insert(_el$0, () => profile.name);
-        insert(_el$9, () => {
-          try {
-            if (profile.identities_json) {
-              const idents = JSON.parse(profile.identities_json);
-              const first = Object.values(idents).find((val) => val?.email || val?.handle);
-              if (first) {
-                return (() => {
-                  var _el$14 = _tmpl$6$e();
-                  insert(_el$14, () => first.email || first.handle);
-                  return _el$14;
-                })();
-              }
-            }
-          } catch {
-          }
-          return null;
-        }, null);
-        insert(_el$7, createComponent(Show, {
-          get when() {
-            return profile.is_ephemeral;
-          },
-          get children() {
-            return _tmpl$2$M();
-          }
-        }), null);
-        insert(_el$6, createComponent(Show, {
-          get when() {
-            return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
-          },
-          get children() {
-            return _tmpl$3$D();
-          }
-        }), _el$11);
-        insert(_el$11, createComponent(Show, {
-          get when() {
-            return props.onSplitWithProfile;
-          },
-          get children() {
-            var _el$12 = _tmpl$4$t();
-            _el$12.$$click = (e) => {
-              e.stopPropagation();
-              props.onSplitWithProfile?.(profile.id);
-            };
-            return _el$12;
-          }
-        }), _el$13);
-        _el$13.$$click = (e) => {
-          e.stopPropagation();
-          props.onEdit(profile.id);
-        };
-        createRenderEffect((_p$) => {
-          var _v$ = `group/prow relative flex items-center justify-between px-2.5 py-1.5 rounded-[8px] transition-all w-full cursor-pointer select-none outline-none ${highlightedIndex() === idx() ? "bg-neutral-100 text-neutral-900 font-medium shadow-sm" : props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId ? "bg-neutral-50/80 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50/80 hover:text-neutral-900"}`, _v$2 = profile.color || "#3b82f6";
-          _v$ !== _p$.e && className(_el$6, _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$8, "background-color", _p$.t = _v$2);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0
-        });
-        return _el$6;
-      })()
-    }));
-    addEventListener(_el$5, "click", props.onCreateNew, true);
-    return _el$;
-  })();
-}
-delegateEvents(["keydown", "click"]);
 function useProfileMenuController(nodeId, onUpdatePane) {
   const [editingProfileId, setEditingProfileId] = createSignal(
     null
@@ -16770,40 +16435,704 @@ function useProfileMenuController(nodeId, onUpdatePane) {
     handleDeleteProfile
   };
 }
-var _tmpl$$11 = /* @__PURE__ */ template(`<div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$L = /* @__PURE__ */ template(`<div class=p-3>`), _tmpl$3$C = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$4$s = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$5$k = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$6$d = /* @__PURE__ */ template(`<div>`), _tmpl$7$9 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+const PROVIDER_PRIORITY_ORDER = [
+  "google",
+  "github",
+  "microsoft",
+  "apple",
+  "slack",
+  "x",
+  "vercel",
+  "stripe",
+  "atlassian",
+  "figma",
+  "notion",
+  "linear",
+  "chatgpt",
+  "canva",
+  "discord",
+  "gitlab"
+];
+const DOMAIN_MAP = {
+  google: "google.com",
+  github: "github.com",
+  microsoft: "microsoft.com",
+  apple: "apple.com",
+  slack: "slack.com",
+  x: "x.com",
+  vercel: "vercel.com",
+  stripe: "stripe.com",
+  atlassian: "atlassian.com",
+  figma: "figma.com",
+  notion: "notion.so",
+  linear: "linear.app",
+  chatgpt: "chatgpt.com",
+  canva: "canva.com",
+  discord: "discord.com",
+  gitlab: "gitlab.com"
+};
+function getProviderDomain$1(providerId) {
+  return DOMAIN_MAP[providerId.toLowerCase()] || `${providerId}.com`;
+}
+function parseIdentities(rawJson) {
+  if (!rawJson || typeof rawJson !== "string") return {};
+  try {
+    const parsed = JSON.parse(rawJson);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function getSortedIdentities(rawJson) {
+  const map = parseIdentities(rawJson);
+  const keys = Object.keys(map);
+  if (keys.length === 0) return [];
+  const sortedKeys = [
+    ...PROVIDER_PRIORITY_ORDER.filter((p) => keys.includes(p)),
+    ...keys.filter((k) => !PROVIDER_PRIORITY_ORDER.includes(k))
+  ];
+  const list = [];
+  for (const providerId of sortedKeys) {
+    const raw = map[providerId];
+    if (!raw) continue;
+    const email = raw.email || void 0;
+    const handle = raw.handle || void 0;
+    const displayName = raw.displayName || void 0;
+    const avatarUrl = raw.avatarUrl || void 0;
+    const displayLabel = email || handle || displayName || providerId;
+    if (displayLabel) {
+      list.push({
+        providerId,
+        email,
+        handle,
+        displayName,
+        avatarUrl,
+        displayLabel
+      });
+    }
+  }
+  return list;
+}
+function getPrimaryIdentity(rawJson) {
+  const list = getSortedIdentities(rawJson);
+  return list.length > 0 ? list[0] : null;
+}
+function getPrimaryIdentityDisplay(rawJson) {
+  const primary = getPrimaryIdentity(rawJson);
+  return primary ? primary.displayLabel : "";
+}
+var _tmpl$$15 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400"> active`), _tmpl$2$P = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 text-xs font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$F = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$w = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="text-xs font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$n = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-xs font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left text-[11px] font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$g = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
+const PINNED_PROVIDERS = [{
+  id: "google",
+  name: "Google",
+  domain: "google.com",
+  loginUrl: "https://accounts.google.com"
+}, {
+  id: "github",
+  name: "GitHub",
+  domain: "github.com",
+  loginUrl: "https://github.com/login"
+}, {
+  id: "microsoft",
+  name: "Microsoft 365",
+  domain: "microsoft.com",
+  loginUrl: "https://login.microsoftonline.com"
+}, {
+  id: "apple",
+  name: "Apple",
+  domain: "apple.com",
+  loginUrl: "https://appleid.apple.com"
+}, {
+  id: "slack",
+  name: "Slack",
+  domain: "slack.com",
+  loginUrl: "https://slack.com/signin"
+}, {
+  id: "x",
+  name: "X (Twitter)",
+  domain: "x.com",
+  loginUrl: "https://twitter.com/login"
+}];
+const SAAS_PROVIDERS = [{
+  id: "vercel",
+  name: "Vercel",
+  domain: "vercel.com",
+  loginUrl: "https://vercel.com/login"
+}, {
+  id: "stripe",
+  name: "Stripe",
+  domain: "stripe.com",
+  loginUrl: "https://dashboard.stripe.com/login"
+}, {
+  id: "atlassian",
+  name: "Atlassian / Jira",
+  domain: "atlassian.com",
+  loginUrl: "https://id.atlassian.com/login"
+}, {
+  id: "figma",
+  name: "Figma",
+  domain: "figma.com",
+  loginUrl: "https://www.figma.com/login"
+}, {
+  id: "notion",
+  name: "Notion",
+  domain: "notion.so",
+  loginUrl: "https://www.notion.so/login"
+}, {
+  id: "linear",
+  name: "Linear",
+  domain: "linear.app",
+  loginUrl: "https://linear.app/login"
+}, {
+  id: "chatgpt",
+  name: "ChatGPT",
+  domain: "chatgpt.com",
+  loginUrl: "https://chatgpt.com/auth/login"
+}, {
+  id: "canva",
+  name: "Canva",
+  domain: "canva.com",
+  loginUrl: "https://www.canva.com/login"
+}, {
+  id: "discord",
+  name: "Discord",
+  domain: "discord.com",
+  loginUrl: "https://discord.com/login"
+}, {
+  id: "gitlab",
+  name: "GitLab",
+  domain: "gitlab.com",
+  loginUrl: "https://gitlab.com/users/sign_in"
+}];
+const ALL_SUPPORTED_PROVIDERS = [...PINNED_PROVIDERS, ...SAAS_PROVIDERS];
+function ConnectedAccountsList(props) {
+  const [showAll, setShowAll] = createSignal(false);
+  const [searchQuery, setSearchQuery] = createSignal("");
+  const [loadingProvider, setLoadingProvider] = createSignal(null);
+  const [copiedId, setCopiedId] = createSignal(null);
+  const profileId = () => props.profileId || "main";
+  const syncLatestProfiles = async () => {
+    try {
+      await window.api?.scanProfileIdentities?.(profileId());
+      const profiles = await window.api?.getProfiles?.();
+      if (profiles && Array.isArray(profiles)) {
+        setLayoutStore("profiles", profiles);
+      }
+    } catch {
+    }
+  };
+  onMount(() => {
+    syncLatestProfiles();
+  });
+  const getIdentities = () => {
+    const fromStore = layoutStore.profiles.find((p) => p.id === profileId())?.identities_json;
+    const raw = fromStore ?? props.identitiesJson;
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  };
+  const handleConnect = async (provider) => {
+    setLoadingProvider(provider.id);
+    try {
+      if (window.api?.connectAccount) {
+        await window.api.connectAccount({
+          providerId: provider.id,
+          loginUrl: provider.loginUrl,
+          profileId: profileId()
+        });
+      } else if (window.api?.openGoogleAuth) {
+        await window.api.openGoogleAuth({
+          url: provider.loginUrl,
+          profileId: profileId()
+        });
+      }
+      await syncLatestProfiles();
+    } finally {
+      setLoadingProvider(null);
+    }
+  };
+  const handleDisconnect = async (providerId) => {
+    setLoadingProvider(providerId);
+    try {
+      if (window.api?.disconnectAccount) {
+        await window.api.disconnectAccount(providerId, profileId());
+      }
+      await syncLatestProfiles();
+    } finally {
+      setLoadingProvider(null);
+    }
+  };
+  const copyToClipboard = (text, id) => {
+    if (!text) return;
+    navigator.clipboard?.writeText(text);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 1500);
+  };
+  const connectedProviders = () => {
+    const ids = getIdentities();
+    return ALL_SUPPORTED_PROVIDERS.filter((p) => Boolean(ids[p.id]));
+  };
+  const unconnectedProviders = () => {
+    const ids = getIdentities();
+    const q = searchQuery().trim().toLowerCase();
+    const list = ALL_SUPPORTED_PROVIDERS.filter((p) => {
+      if (ids[p.id]) return false;
+      if (!q) return true;
+      return p.name.toLowerCase().includes(q) || p.id.toLowerCase().includes(q) || p.domain.toLowerCase().includes(q);
+    });
+    if (q) return list;
+    return showAll() ? list : list.slice(0, 4);
+  };
+  return (() => {
+    var _el$ = _tmpl$4$w(), _el$2 = _el$.firstChild;
+    _el$2.firstChild;
+    var _el$8 = _el$2.nextSibling;
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return connectedProviders().length > 0;
+      },
+      get children() {
+        var _el$4 = _tmpl$$15(), _el$5 = _el$4.firstChild;
+        insert(_el$4, () => connectedProviders().length, _el$5);
+        return _el$4;
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
+      },
+      get children() {
+        var _el$6 = _tmpl$2$P(), _el$7 = _el$6.firstChild;
+        _el$7.$$input = (e) => setSearchQuery(e.currentTarget.value);
+        createRenderEffect(() => _el$7.value = searchQuery());
+        return _el$6;
+      }
+    }), _el$8);
+    insert(_el$8, createComponent(For, {
+      get each() {
+        return connectedProviders();
+      },
+      children: (provider) => {
+        const identity = () => getIdentities()[provider.id];
+        const isLoading = () => loadingProvider() === provider.id;
+        const accountText = () => identity()?.email || identity()?.handle || "";
+        return (() => {
+          var _el$0 = _tmpl$5$n(), _el$1 = _el$0.firstChild, _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild, _el$15 = _el$13.nextSibling, _el$16 = _el$1.nextSibling;
+          _el$11.addEventListener("error", (e) => {
+            e.currentTarget.style.display = "none";
+          });
+          insert(_el$14, () => provider.name);
+          _el$15.$$click = () => copyToClipboard(accountText(), provider.id);
+          insert(_el$15, (() => {
+            var _c$2 = memo(() => copiedId() === provider.id);
+            return () => _c$2() ? "✓ Copied" : accountText();
+          })());
+          _el$16.$$click = () => handleDisconnect(provider.id);
+          insert(_el$16, () => isLoading() ? "..." : "Disconnect");
+          createRenderEffect((_p$) => {
+            var _v$ = `https://www.google.com/s2/favicons?domain=${provider.domain}&sz=64`, _v$2 = provider.name, _v$3 = isLoading();
+            _v$ !== _p$.e && setAttribute(_el$11, "src", _p$.e = _v$);
+            _v$2 !== _p$.t && setAttribute(_el$11, "alt", _p$.t = _v$2);
+            _v$3 !== _p$.a && (_el$16.disabled = _p$.a = _v$3);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0,
+            a: void 0
+          });
+          return _el$0;
+        })();
+      }
+    }), null);
+    insert(_el$8, createComponent(For, {
+      get each() {
+        return unconnectedProviders();
+      },
+      children: (provider) => {
+        const isLoading = () => loadingProvider() === provider.id;
+        return (() => {
+          var _el$17 = _tmpl$6$g(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild, _el$21 = _el$19.nextSibling, _el$22 = _el$21.firstChild, _el$23 = _el$18.nextSibling;
+          _el$20.addEventListener("error", (e) => {
+            e.currentTarget.style.display = "none";
+          });
+          insert(_el$22, () => provider.name);
+          _el$23.$$click = () => handleConnect(provider);
+          insert(_el$23, () => isLoading() ? "..." : "Connect");
+          createRenderEffect((_p$) => {
+            var _v$4 = `https://www.google.com/s2/favicons?domain=${provider.domain}&sz=64`, _v$5 = provider.name, _v$6 = isLoading();
+            _v$4 !== _p$.e && setAttribute(_el$20, "src", _p$.e = _v$4);
+            _v$5 !== _p$.t && setAttribute(_el$20, "alt", _p$.t = _v$5);
+            _v$6 !== _p$.a && (_el$23.disabled = _p$.a = _v$6);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0,
+            a: void 0
+          });
+          return _el$17;
+        })();
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return memo(() => !!!searchQuery())() && ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
+      },
+      get children() {
+        var _el$9 = _tmpl$3$F();
+        _el$9.$$click = () => setShowAll(!showAll());
+        insert(_el$9, (() => {
+          var _c$ = memo(() => !!showAll());
+          return () => _c$() ? "Show fewer" : `+ ${ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length - 4} more accounts`;
+        })());
+        return _el$9;
+      }
+    }), null);
+    return _el$;
+  })();
+}
+delegateEvents(["input", "click"]);
+var _tmpl$$14 = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs font-normal text-neutral-600">Incognito mode (clears browsing data on exit)</span></label><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Proxy server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700"></div><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700">`), _tmpl$2$O = /* @__PURE__ */ template(`<div class="flex flex-col gap-4 p-1"><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200/90 rounded-xl px-3 py-2 text-xs font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2 pt-0.5"></div></div><div class=pt-0.5><button type=button class="flex items-center gap-1.5 text-xs font-normal text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"><span></span><span>Advanced settings</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$E = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$v = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+const COLORS = [
+  "#e11d48",
+  // Rose Red
+  "#ea580c",
+  // Warm Orange
+  "#d97706",
+  // Amber
+  "#16a34a",
+  // Emerald Green
+  "#0891b2",
+  // Teal / Cyan
+  "#2563eb",
+  // Royal Blue
+  "#4f46e5",
+  // Indigo
+  "#7c3aed",
+  // Violet / Purple
+  "#475569",
+  // Slate
+  "#18181b"
+  // Charcoal
+];
+function ProfileForm(props) {
+  const [name, setName] = createSignal(props.initialData?.name || "");
+  const [color, setColor] = createSignal(props.initialData?.color || COLORS[0]);
+  const [isEphemeral, setIsEphemeral] = createSignal(props.initialData?.is_ephemeral || false);
+  const [proxyServer, setProxyServer] = createSignal(props.initialData?.proxy_server || "");
+  const [userAgent, setUserAgent] = createSignal(props.initialData?.user_agent || "");
+  const [showAdvanced, setShowAdvanced] = createSignal(Boolean(props.initialData?.proxy_server || props.initialData?.user_agent || props.initialData?.is_ephemeral));
+  const handleSave = () => {
+    if (!name().trim()) return;
+    props.onSave({
+      id: props.initialData?.id,
+      name: name().trim(),
+      color: color(),
+      is_ephemeral: isEphemeral(),
+      proxy_server: proxyServer().trim() || "",
+      user_agent: userAgent().trim() || ""
+    });
+  };
+  return (() => {
+    var _el$ = _tmpl$2$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    _el$4.$$input = (e) => setName(e.currentTarget.value);
+    insert(_el$, createComponent(ConnectedAccountsList, {
+      get profileId() {
+        return props.initialData?.id;
+      },
+      get identitiesJson() {
+        return (props.initialData?.id ? layoutStore.profiles.find((p) => p.id === props.initialData?.id)?.identities_json : void 0) ?? props.initialData?.identities_json;
+      }
+    }), _el$5);
+    insert(_el$7, () => COLORS.map((c) => (() => {
+      var _el$23 = _tmpl$3$E();
+      _el$23.$$click = () => setColor(c);
+      setStyleProperty(_el$23, "background-color", c);
+      createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] ${color() === c ? "ring-2 ring-offset-2 ring-neutral-900 scale-105" : "border border-black/10"}`));
+      return _el$23;
+    })()));
+    _el$9.$$click = () => setShowAdvanced(!showAdvanced());
+    insert(_el$0, () => showAdvanced() ? "▾" : "▸");
+    insert(_el$8, createComponent(Show, {
+      get when() {
+        return showAdvanced();
+      },
+      get children() {
+        var _el$1 = _tmpl$$14(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+        _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
+        _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
+        _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
+        createRenderEffect(() => _el$11.checked = isEphemeral());
+        createRenderEffect(() => _el$14.value = proxyServer());
+        createRenderEffect(() => _el$17.value = userAgent());
+        return _el$1;
+      }
+    }), null);
+    insert(_el$19, (() => {
+      var _c$ = memo(() => !!props.onDelete);
+      return () => _c$() && (() => {
+        var _el$24 = _tmpl$4$v();
+        addEventListener(_el$24, "click", props.onDelete, true);
+        return _el$24;
+      })();
+    })());
+    addEventListener(_el$21, "click", props.onCancel, true);
+    _el$22.$$click = handleSave;
+    createRenderEffect(() => _el$22.disabled = !name().trim());
+    createRenderEffect(() => _el$4.value = name());
+    return _el$;
+  })();
+}
+delegateEvents(["input", "click"]);
+var _tmpl$$13 = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$N = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$D = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$u = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$m = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$f = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono text-neutral-600 truncate mt-0.5 tracking-tight flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$7$a = /* @__PURE__ */ template(`<span class="text-[8.5px] text-neutral-400 font-sans shrink-0">+`), _tmpl$8$7 = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate mt-0.5">`);
+function ProfileMenuList(props) {
+  let listRef;
+  const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
+  const [highlightedIndex, setHighlightedIndex] = createSignal(initialIndex());
+  onMount(() => {
+    listRef?.focus();
+  });
+  const handleKeyDown = (e) => {
+    const total = layoutStore.profiles.length;
+    if (total === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightedIndex((i) => (i + 1) % total);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      setHighlightedIndex((i) => (i - 1 + total) % total);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      e.stopPropagation();
+      const target = layoutStore.profiles[highlightedIndex()];
+      if (target) {
+        props.onSelect(target.id);
+      }
+    }
+  };
+  return (() => {
+    var _el$ = _tmpl$$13(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
+    _el$.$$keydown = handleKeyDown;
+    var _ref$ = listRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
+    insert(_el$3, createComponent(For, {
+      get each() {
+        return layoutStore.profiles;
+      },
+      children: (profile, idx) => (() => {
+        var _el$6 = _tmpl$5$m(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
+        _el$6.$$click = (e) => {
+          e.stopPropagation();
+          props.onSelect(profile.id);
+        };
+        _el$6.addEventListener("mouseenter", () => setHighlightedIndex(idx()));
+        insert(_el$8, () => profile.name.charAt(0).toUpperCase());
+        insert(_el$0, () => profile.name);
+        insert(_el$9, () => {
+          const sorted = getSortedIdentities(profile?.identities_json);
+          if (sorted.length > 0) {
+            const primary = sorted[0];
+            const othersCount = sorted.length - 1;
+            return (() => {
+              var _el$14 = _tmpl$6$f(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+              _el$15.addEventListener("error", (e) => {
+                e.currentTarget.style.display = "none";
+              });
+              insert(_el$16, () => primary.displayLabel);
+              insert(_el$14, othersCount > 0 ? (() => {
+                var _el$17 = _tmpl$7$a();
+                _el$17.firstChild;
+                insert(_el$17, othersCount, null);
+                return _el$17;
+              })() : null, null);
+              createRenderEffect((_p$) => {
+                var _v$3 = `https://www.google.com/s2/favicons?domain=${getProviderDomain$1(primary.providerId)}&sz=64`, _v$4 = primary.providerId;
+                _v$3 !== _p$.e && setAttribute(_el$15, "src", _p$.e = _v$3);
+                _v$4 !== _p$.t && setAttribute(_el$15, "alt", _p$.t = _v$4);
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0
+              });
+              return _el$14;
+            })();
+          }
+          return (() => {
+            var _el$19 = _tmpl$8$7();
+            insert(_el$19, () => profile.is_ephemeral ? "Temporary Session" : "Dedicated Partition");
+            return _el$19;
+          })();
+        }, null);
+        insert(_el$7, createComponent(Show, {
+          get when() {
+            return profile.is_ephemeral;
+          },
+          get children() {
+            return _tmpl$2$N();
+          }
+        }), null);
+        insert(_el$6, createComponent(Show, {
+          get when() {
+            return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
+          },
+          get children() {
+            return _tmpl$3$D();
+          }
+        }), _el$11);
+        insert(_el$11, createComponent(Show, {
+          get when() {
+            return props.onSplitWithProfile;
+          },
+          get children() {
+            var _el$12 = _tmpl$4$u();
+            _el$12.$$click = (e) => {
+              e.stopPropagation();
+              props.onSplitWithProfile?.(profile.id);
+            };
+            return _el$12;
+          }
+        }), _el$13);
+        _el$13.$$click = (e) => {
+          e.stopPropagation();
+          props.onEdit(profile.id);
+        };
+        createRenderEffect((_p$) => {
+          var _v$ = `group/prow relative flex items-center justify-between px-2.5 py-1.5 rounded-[8px] transition-all w-full cursor-pointer select-none outline-none ${highlightedIndex() === idx() ? "bg-neutral-100 text-neutral-900 font-medium shadow-sm" : props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId ? "bg-neutral-50/80 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50/80 hover:text-neutral-900"}`, _v$2 = profile.color || "#3b82f6";
+          _v$ !== _p$.e && className(_el$6, _p$.e = _v$);
+          _v$2 !== _p$.t && setStyleProperty(_el$8, "background-color", _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$6;
+      })()
+    }));
+    addEventListener(_el$5, "click", props.onCreateNew, true);
+    return _el$;
+  })();
+}
+delegateEvents(["keydown", "click"]);
+var _tmpl$$12 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$M = /* @__PURE__ */ template(`<div class=p-3>`);
+function ProfilePopoverContent(props) {
+  return (() => {
+    var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild;
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return !props.isFormMode;
+      },
+      get fallback() {
+        return (() => {
+          var _el$3 = _tmpl$2$M();
+          insert(_el$3, createComponent(ProfileForm, {
+            get initialData() {
+              const p = layoutStore.profiles.find((item) => item.id === props.ctrl.editingProfileId());
+              if (!p) return void 0;
+              return {
+                ...p,
+                is_ephemeral: !!p.is_ephemeral,
+                proxy_server: p.proxy_server || "",
+                user_agent: p.user_agent || "",
+                identities_json: p.identities_json
+              };
+            },
+            get onSave() {
+              return props.ctrl.handleSaveProfile;
+            },
+            onCancel: () => {
+              props.ctrl.setEditingProfileId(null);
+              props.ctrl.setIsCreatingProfile(false);
+            },
+            get onDelete() {
+              return props.ctrl.editingProfileId() && props.ctrl.editingProfileId() !== "main" ? () => props.ctrl.handleDeleteProfile(props.ctrl.editingProfileId()) : void 0;
+            }
+          }));
+          return _el$3;
+        })();
+      },
+      get children() {
+        return createComponent(ProfileMenuList, {
+          get currentProfileId() {
+            return props.targetProfileId;
+          },
+          onSelect: (profileId) => {
+            PaneFocusManager.focusPane(props.targetId);
+            props.onUpdatePane(props.targetId, {
+              profileId
+            });
+            props.setShowProfileMenu(false);
+          },
+          get onSplitWithProfile() {
+            return props.onSplit ? (profileId) => {
+              PaneFocusManager.focusPane(props.targetId);
+              props.onSplit(props.targetId, "right", props.nodeUrl, profileId);
+              props.setShowProfileMenu(false);
+            } : void 0;
+          },
+          onEdit: (profileId) => {
+            PaneFocusManager.focusPane(props.targetId);
+            props.ctrl.setEditingProfileId(profileId);
+            props.ctrl.setIsCreatingProfile(false);
+          },
+          get onCreateNew() {
+            return props.onCreateNew;
+          }
+        });
+      }
+    }));
+    createRenderEffect(() => className(_el$2, `bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${props.isFormMode ? "w-[280px]" : "w-[220px]"}`));
+    return _el$;
+  })();
+}
+var _tmpl$$11 = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$2$L = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$3$C = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$4$t = /* @__PURE__ */ template(`<div data-overlay-chrome=true>`), _tmpl$5$l = /* @__PURE__ */ template(`<div>`), _tmpl$6$e = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
 function ProfileMenu$1(props) {
   let btnRef;
   const [anchorPos, setAnchorPos] = createSignal(null);
-  const targetId = () => props.node?.id || props.paneId || "";
-  const targetProfileId = () => props.node?.profileId || props.currentProfileId || "main";
+  const [frozenTargetId, setFrozenTargetId] = createSignal("");
+  const [frozenProfileId, setFrozenProfileId] = createSignal("");
+  const targetId = () => frozenTargetId() || props.node?.id || props.paneId || "";
+  const targetProfileId = () => frozenProfileId() || props.node?.profileId || props.currentProfileId || "main";
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === targetProfileId()) || {
     name: "Main",
     color: "#78716c"
   };
+  const detectedEmail = () => getPrimaryIdentityDisplay(currentProfile()?.identities_json);
   const ctrl = useProfileMenuController(targetId(), props.onUpdatePane);
   const isCluster = () => props.buttonStyle === "cluster";
   const isFormMode = () => !!ctrl.editingProfileId() || ctrl.isCreatingProfile();
-  const toggleMenu = () => {
-    if (btnRef) {
-      const rect = btnRef.getBoundingClientRect();
+  const toggleMenu = (explicitRect) => {
+    const liveTargetId = props.node?.id || props.paneId || "";
+    const liveProfileId = props.node?.profileId || props.currentProfileId || "main";
+    setFrozenTargetId(liveTargetId);
+    setFrozenProfileId(liveProfileId);
+    PaneFocusManager.focusPane(liveTargetId);
+    const rect = explicitRect || btnRef?.getBoundingClientRect();
+    if (rect) {
       const popoverWidth = isFormMode() ? 280 : 220;
       setAnchorPos({
-        top: rect.bottom + 10,
-        left: Math.min(window.innerWidth - popoverWidth - 16, Math.max(16, rect.right - popoverWidth)),
+        top: rect.bottom + (isCluster() ? 8 : 10),
+        left: isCluster() ? Math.max(12, rect.left) : Math.min(window.innerWidth - popoverWidth - 16, Math.max(16, rect.right - popoverWidth)),
         right: window.innerWidth - rect.left + 12,
         bottom: Math.max(12, window.innerHeight - rect.bottom)
       });
     }
-    props.setShowProfileMenu(!props.showProfileMenu());
+    const nextShow = !props.showProfileMenu();
+    if (!nextShow) {
+      setFrozenTargetId("");
+      setFrozenProfileId("");
+    }
+    props.setShowProfileMenu(nextShow);
     props.setShowSplitMenu?.(false);
   };
   onMount(() => {
     if (!props.isShortcutTarget) return;
     const handleToggle = (e) => {
       const activeId = e.detail?.paneId;
-      if (!activeId || activeId === targetId()) {
-        toggleMenu();
-      }
+      if (!activeId || activeId === targetId()) toggleMenu();
     };
     window.addEventListener("app:toggle-active-profile-menu", handleToggle);
     onCleanup(() => {
@@ -16812,6 +17141,7 @@ function ProfileMenu$1(props) {
   });
   const handleCreateNew = (e) => {
     e.stopPropagation();
+    PaneFocusManager.focusPane(targetId());
     if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
       const rect = e.currentTarget.getBoundingClientRect();
       setLayoutStore("paywallAnchor", {
@@ -16827,134 +17157,66 @@ function ProfileMenu$1(props) {
     ctrl.setEditingProfileId(null);
     ctrl.setIsCreatingProfile(true);
   };
-  const renderContent = () => (() => {
-    var _el$ = _tmpl$$11(), _el$2 = _el$.firstChild;
-    insert(_el$2, createComponent(Show, {
-      get when() {
-        return !isFormMode();
-      },
-      get fallback() {
-        return (() => {
-          var _el$3 = _tmpl$2$L();
-          insert(_el$3, createComponent(ProfileForm, {
-            get initialData() {
-              const p = layoutStore.profiles.find((p2) => p2.id === ctrl.editingProfileId());
-              if (!p) return void 0;
-              return {
-                ...p,
-                is_ephemeral: !!p.is_ephemeral,
-                proxy_server: p.proxy_server || "",
-                user_agent: p.user_agent || "",
-                identities_json: p.identities_json
-              };
-            },
-            get onSave() {
-              return ctrl.handleSaveProfile;
-            },
-            onCancel: () => {
-              ctrl.setEditingProfileId(null);
-              ctrl.setIsCreatingProfile(false);
-            },
-            get onDelete() {
-              return ctrl.editingProfileId() && ctrl.editingProfileId() !== "main" ? () => ctrl.handleDeleteProfile(ctrl.editingProfileId()) : void 0;
-            }
-          }));
-          return _el$3;
-        })();
-      },
-      get children() {
-        return createComponent(ProfileMenuList, {
-          get currentProfileId() {
-            return targetProfileId();
-          },
-          onSelect: (profileId) => {
-            props.onUpdatePane(targetId(), {
-              profileId
-            });
-            props.setShowProfileMenu(false);
-          },
-          get onSplitWithProfile() {
-            return props.onSplit ? (profileId) => {
-              const url = props.node?.url;
-              props.onSplit(targetId(), "right", url, profileId);
-              props.setShowProfileMenu(false);
-            } : void 0;
-          },
-          onEdit: (profileId) => {
-            ctrl.setEditingProfileId(profileId);
-            ctrl.setIsCreatingProfile(false);
-          },
-          onCreateNew: handleCreateNew
-        });
-      }
-    }));
-    createRenderEffect(() => className(_el$2, `bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex flex-col overflow-hidden transition-[width] duration-200 ease-out ${isFormMode() ? "w-[280px]" : "w-[220px]"}`));
-    return _el$;
-  })();
   return (() => {
-    var _el$4 = _tmpl$6$d();
-    insert(_el$4, createComponent(Show, {
+    var _el$ = _tmpl$5$l();
+    insert(_el$, createComponent(Show, {
       get when() {
         return isCluster();
       },
       get fallback() {
         return createComponent(ActionTooltip, {
           get label() {
-            return `Profile: ${currentProfile().name}`;
+            return memo(() => !!detectedEmail())() ? `Profile: ${currentProfile().name} (${detectedEmail()})` : `Profile: ${currentProfile().name}`;
           },
           get shortcut() {
             return getShortcutDisplay("switch_profile") || "Alt+P";
           },
           placement: "bottom",
           get children() {
-            var _el$12 = _tmpl$7$9(), _el$13 = _el$12.firstChild;
-            _el$12.$$click = (e) => {
+            var _el$1 = _tmpl$6$e(), _el$10 = _el$1.firstChild;
+            _el$1.$$click = (e) => {
               e.stopPropagation();
               toggleMenu();
             };
             var _ref$ = btnRef;
-            typeof _ref$ === "function" ? use(_ref$, _el$12) : btnRef = _el$12;
-            insert(_el$13, () => currentProfile().name.charAt(0).toUpperCase());
-            createRenderEffect((_$p) => setStyleProperty(_el$13, "background-color", currentProfile().color || "#78716c"));
-            return _el$12;
+            typeof _ref$ === "function" ? use(_ref$, _el$1) : btnRef = _el$1;
+            insert(_el$10, () => currentProfile().name.charAt(0).toUpperCase());
+            createRenderEffect((_$p) => setStyleProperty(_el$10, "background-color", currentProfile().color || "#78716c"));
+            return _el$1;
           }
         });
       },
       get children() {
         return [(() => {
-          var _el$5 = _tmpl$3$C(), _el$6 = _el$5.firstChild;
-          _el$5.$$click = (e) => {
+          var _el$2 = _tmpl$$11(), _el$3 = _el$2.firstChild;
+          _el$2.$$click = (e) => {
             e.stopPropagation();
-            const rect = e.currentTarget.getBoundingClientRect();
-            setAnchorPos({
-              right: window.innerWidth - rect.left + 12,
-              bottom: Math.max(12, window.innerHeight - rect.bottom),
-              top: rect.bottom + 8,
-              left: Math.max(12, rect.left)
-            });
-            props.setShowProfileMenu(!props.showProfileMenu());
-            props.setShowSplitMenu?.(false);
+            toggleMenu(e.currentTarget.getBoundingClientRect());
           };
-          insert(_el$6, () => currentProfile().name.charAt(0).toUpperCase());
+          insert(_el$3, () => currentProfile().name.charAt(0).toUpperCase());
           createRenderEffect((_p$) => {
-            var _v$ = `Profile: ${currentProfile().name}`, _v$2 = currentProfile().color || "#78716c";
-            _v$ !== _p$.e && setAttribute(_el$5, "title", _p$.e = _v$);
-            _v$2 !== _p$.t && setStyleProperty(_el$6, "background-color", _p$.t = _v$2);
+            var _v$ = detectedEmail() ? `Profile: ${currentProfile().name} (${detectedEmail()})` : `Profile: ${currentProfile().name}`, _v$2 = currentProfile().color || "#78716c";
+            _v$ !== _p$.e && setAttribute(_el$2, "title", _p$.e = _v$);
+            _v$2 !== _p$.t && setStyleProperty(_el$3, "background-color", _p$.t = _v$2);
             return _p$;
           }, {
             e: void 0,
             t: void 0
           });
-          return _el$5;
+          return _el$2;
         })(), (() => {
-          var _el$7 = _tmpl$4$s(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
-          _el$1.nextSibling;
-          insert(_el$8, () => currentProfile().name, _el$1);
-          return _el$7;
+          var _el$4 = _tmpl$2$L(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling;
+          _el$8.nextSibling;
+          insert(_el$5, () => currentProfile().name, _el$8);
+          insert(_el$5, (() => {
+            var _c$ = memo(() => !!detectedEmail());
+            return () => _c$() ? ` • ${detectedEmail()}` : "";
+          })(), _el$8);
+          return _el$4;
         })()];
       }
     }), null);
-    insert(_el$4, createComponent(Show, {
+    insert(_el$, createComponent(Show, {
       get when() {
         return props.showProfileMenu();
       },
@@ -16962,15 +17224,45 @@ function ProfileMenu$1(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$10 = _tmpl$5$k();
-              _el$10.$$pointerdown = (e) => {
+              var _el$9 = _tmpl$3$C();
+              _el$9.$$pointerdown = (e) => {
                 e.stopPropagation();
+                setFrozenTargetId("");
+                setFrozenProfileId("");
                 props.setShowProfileMenu(false);
               };
-              return _el$10;
+              return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$6$d();
-              insert(_el$11, renderContent);
+              var _el$0 = _tmpl$4$t();
+              insert(_el$0, createComponent(ProfilePopoverContent, {
+                get targetId() {
+                  return targetId();
+                },
+                get targetProfileId() {
+                  return targetProfileId();
+                },
+                get isFormMode() {
+                  return isFormMode();
+                },
+                ctrl,
+                get nodeUrl() {
+                  return props.node?.url;
+                },
+                get onUpdatePane() {
+                  return props.onUpdatePane;
+                },
+                get onSplit() {
+                  return props.onSplit;
+                },
+                setShowProfileMenu: (val) => {
+                  if (!val) {
+                    setFrozenTargetId("");
+                    setFrozenProfileId("");
+                  }
+                  props.setShowProfileMenu(val);
+                },
+                onCreateNew: handleCreateNew
+              }));
               createRenderEffect((_p$) => {
                 var _v$3 = `pointer-events-auto fixed z-[9999] animate-in fade-in duration-200 ${isCluster() ? "slide-in-from-right-2" : "slide-in-from-top-2"}`, _v$4 = isCluster() ? {
                   bottom: `${anchorPos()?.bottom ?? 60}px`,
@@ -16979,21 +17271,21 @@ function ProfileMenu$1(props) {
                   top: `${anchorPos()?.top ?? 50}px`,
                   left: `${anchorPos()?.left ?? 100}px`
                 };
-                _v$3 !== _p$.e && className(_el$11, _p$.e = _v$3);
-                _p$.t = style(_el$11, _v$4, _p$.t);
+                _v$3 !== _p$.e && className(_el$0, _p$.e = _v$3);
+                _p$.t = style(_el$0, _v$4, _p$.t);
                 return _p$;
               }, {
                 e: void 0,
                 t: void 0
               });
-              return _el$11;
+              return _el$0;
             })()];
           }
         });
       }
     }), null);
-    createRenderEffect(() => className(_el$4, `relative group/profilemenu flex items-center shrink-0 ${isCluster() ? "z-30" : "bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"}`));
-    return _el$4;
+    createRenderEffect(() => className(_el$, `relative group/profilemenu flex items-center shrink-0 ${isCluster() ? "z-30" : "bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"}`));
+    return _el$;
   })();
 }
 delegateEvents(["click", "pointerdown"]);
@@ -17203,7 +17495,7 @@ function WorkspaceItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$Y = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$K = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$j = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$c = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$8 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$5 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+var _tmpl$$Y = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$K = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$s = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$k = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$d = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$9 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$6 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
 const RECENT_KEY = "apposition:recent_workspace_icons";
 function IconPickerPopover(props) {
   let popoverRef;
@@ -17293,7 +17585,7 @@ function IconPickerPopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        var _el$2 = _tmpl$4$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -17342,7 +17634,7 @@ function IconPickerPopover(props) {
                 if (!item) return null;
                 const Comp = item.component;
                 return (() => {
-                  var _el$11 = _tmpl$5$j();
+                  var _el$11 = _tmpl$5$k();
                   _el$11.$$click = () => handlePickIcon(id);
                   insert(_el$11, createComponent(Comp, {
                     size: 12,
@@ -17359,7 +17651,7 @@ function IconPickerPopover(props) {
         insert(_el$1, createComponent(For, {
           each: ICON_CATEGORIES,
           children: (cat) => (() => {
-            var _el$12 = _tmpl$6$c();
+            var _el$12 = _tmpl$6$d();
             _el$12.$$click = () => {
               setSelectedCategory(cat);
               setFocusedIdx(-1);
@@ -17378,7 +17670,7 @@ function IconPickerPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$7$8(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+              var _el$13 = _tmpl$7$9(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
               _el$16.nextSibling;
               insert(_el$13, search, _el$16);
               return _el$13;
@@ -17389,7 +17681,7 @@ function IconPickerPopover(props) {
             const isFocused = () => focusedIdx() === idx();
             const Comp = item.component;
             return (() => {
-              var _el$17 = _tmpl$8$5();
+              var _el$17 = _tmpl$8$6();
               _el$17.$$click = () => handlePickIcon(item.id);
               insert(_el$17, createComponent(Comp, {
                 size: 15,
@@ -17437,7 +17729,7 @@ function IconPickerPopover(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$X = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$J = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$b = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$7 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$X = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$J = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$j = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$c = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$8 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function WorkspacePopover(props) {
   let popoverRef;
@@ -17470,7 +17762,7 @@ function WorkspacePopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$5$i(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$5$j(), _el$3 = _el$2.firstChild;
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
         insert(_el$3, createComponent(Show, {
@@ -17479,7 +17771,7 @@ function WorkspacePopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$6$b(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
+              var _el$13 = _tmpl$6$c(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
               insert(_el$18, () => props.cascadePrompt?.profileName);
               _el$20.$$click = (e) => {
                 e.stopPropagation();
@@ -17546,7 +17838,7 @@ function WorkspacePopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$22 = _tmpl$7$7(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
+                    var _el$22 = _tmpl$7$8(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
                     _el$22.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -17580,7 +17872,7 @@ function WorkspacePopover(props) {
               }), null);
               return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$4$q(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$4$r(), _el$12 = _el$11.firstChild;
               _el$12.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -17624,7 +17916,7 @@ function WorkspacePopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$W = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$I = /* @__PURE__ */ template(`<div class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+var _tmpl$$W = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$I = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
 function WorkspaceCreateFlyout(props) {
   const [name, setName] = createSignal("");
   const [selectedIcon, setSelectedIcon] = createSignal(null);
@@ -17723,7 +18015,7 @@ function WorkspaceCreateFlyout(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$V = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$H = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$p = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$V = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$H = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$q = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function WorkspaceDock(props) {
   const [isCreatingHover, setIsCreatingHover] = createSignal(false);
   const [configOpenId, setConfigOpenId] = createSignal(null);
@@ -17774,7 +18066,7 @@ function WorkspaceDock(props) {
       },
       get fallback() {
         return (() => {
-          var _el$0 = _tmpl$4$p();
+          var _el$0 = _tmpl$4$q();
           _el$0.$$click = (e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setCreatePos({
@@ -17962,14 +18254,14 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$T = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$G = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$y = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$o = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$T = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$G = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$y = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$p = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$4$o();
+      var _el$ = _tmpl$4$p();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
       insert(_el$, createComponent(ActionTooltip, {
         label: "Minimize",
@@ -18000,7 +18292,7 @@ function AppWindowControls(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$n = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$h = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$a = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$6 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$4 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+var _tmpl$$S = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$o = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$b = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$5 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
 function AppEdgeZones(props) {
   return createComponent(Show, {
     get when() {
@@ -18020,23 +18312,23 @@ function AppEdgeZones(props) {
         _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
         return _el$3;
       })(), (() => {
-        var _el$4 = _tmpl$4$n();
+        var _el$4 = _tmpl$4$o();
         _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
         return _el$4;
       })(), (() => {
-        var _el$5 = _tmpl$5$h();
+        var _el$5 = _tmpl$5$i();
         _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
         return _el$5;
       })(), (() => {
-        var _el$6 = _tmpl$6$a();
+        var _el$6 = _tmpl$6$b();
         _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
         return _el$6;
       })(), (() => {
-        var _el$7 = _tmpl$7$6();
+        var _el$7 = _tmpl$7$7();
         _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
         return _el$7;
       })(), (() => {
-        var _el$8 = _tmpl$8$4();
+        var _el$8 = _tmpl$8$5();
         _el$8.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
         return _el$8;
       })()];
@@ -18109,7 +18401,7 @@ function useFeaturebase() {
   };
   return { openFeedback, openUpdates, hasUnread };
 }
-var _tmpl$$R = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$E = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$g = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+var _tmpl$$R = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$E = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$n = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$h = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$a = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportCluster(props) {
   const {
     hasUnread
@@ -18188,7 +18480,7 @@ function SupportCluster(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$6$9(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
+      var _el$ = _tmpl$6$a(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
       insert(_el$2, createComponent(ActionTooltip, {
         get label() {
@@ -18222,7 +18514,7 @@ function SupportCluster(props) {
         label: "Release Notes",
         placement: "right",
         get children() {
-          var _el$9 = _tmpl$4$m();
+          var _el$9 = _tmpl$4$n();
           _el$9.firstChild;
           _el$9.$$click = handleOpenUpdates;
           insert(_el$9, createComponent(Show, {
@@ -18240,7 +18532,7 @@ function SupportCluster(props) {
         label: "Feedback & Roadmap",
         placement: "right",
         get children() {
-          var _el$11 = _tmpl$5$g();
+          var _el$11 = _tmpl$5$h();
           _el$11.$$click = handleOpenFeedback;
           return _el$11;
         }
@@ -18250,10 +18542,10 @@ function SupportCluster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$Q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$D = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$v = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$l = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$f = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$Q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$D = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$v = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$g = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActionClusterSplitBar(props) {
   return (() => {
-    var _el$ = _tmpl$5$f();
+    var _el$ = _tmpl$5$g();
     _el$.addEventListener("mouseleave", () => props.onSplitLeave?.());
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.splitBarRef;
@@ -18307,7 +18599,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$5 = _tmpl$4$l();
+        var _el$5 = _tmpl$4$m();
         _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
         _el$5.$$click = (e) => props.onSplit("bottom", e);
@@ -18318,11 +18610,11 @@ function ActionClusterSplitBar(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$P = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$C = /* @__PURE__ */ template(`<button>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$k = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$e = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$P = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$C = /* @__PURE__ */ template(`<button>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$l = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$f = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function ActionClusterVerticalDock(props) {
   const isMaximized = () => !!layoutStore.maximizedPaneId;
   return (() => {
-    var _el$ = _tmpl$4$k(), _el$5 = _el$.firstChild;
+    var _el$ = _tmpl$4$l(), _el$5 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.dockRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -18342,7 +18634,7 @@ function ActionClusterVerticalDock(props) {
             return isMaximized();
           },
           get fallback() {
-            return _tmpl$5$e();
+            return _tmpl$5$f();
           },
           get children() {
             return _tmpl$$P();
@@ -18807,7 +19099,7 @@ function CommunicatorProfilePopover(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$y = /* @__PURE__ */ template(`<button>`), _tmpl$3$s = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$j = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$d = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$8 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$5 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$3 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
+var _tmpl$$L = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$y = /* @__PURE__ */ template(`<button>`), _tmpl$3$s = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$k = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$e = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$9 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$6 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$4 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
 function CommunicatorStackRail(props) {
   const [isAddingStack, setIsAddingStack] = createSignal(false);
   const [newStackName, setNewStackName] = createSignal("");
@@ -18831,7 +19123,7 @@ function CommunicatorStackRail(props) {
   const currentStack = () => commStore.stacks.find((s) => s.id === activeStackPopover()?.id);
   const currentProfile = () => profiles().find((p) => p.id === activeProfilePopover()?.id);
   return (() => {
-    var _el$ = _tmpl$5$d(), _el$3 = _el$.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.nextSibling;
+    var _el$ = _tmpl$5$e(), _el$3 = _el$.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.nextSibling;
     insert(_el$, createComponent(ActionTooltip, {
       label: "Drag to float (Double-click to dock)",
       placement: "right",
@@ -18889,7 +19181,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$0 = _tmpl$7$5(), _el$1 = _el$0.firstChild;
+                var _el$0 = _tmpl$7$6(), _el$1 = _el$0.firstChild;
                 _el$0.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveStackPopover({
@@ -18921,7 +19213,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$10 = _tmpl$6$8();
+                    var _el$10 = _tmpl$6$9();
                     insert(_el$10, (() => {
                       var _c$ = memo(() => unread() > 9);
                       return () => _c$() ? "9+" : unread();
@@ -18940,7 +19232,7 @@ function CommunicatorStackRail(props) {
           },
           get fallback() {
             return (() => {
-              var _el$11 = _tmpl$8$3(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$8$4(), _el$12 = _el$11.firstChild;
               _el$11.addEventListener("submit", handleCreateStack);
               _el$12.$$keydown = (e) => e.key === "Escape" && setIsAddingStack(false);
               _el$12.$$input = (e) => setNewStackName(e.currentTarget.value);
@@ -18983,7 +19275,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$13 = _tmpl$7$5(), _el$14 = _el$13.firstChild;
+                var _el$13 = _tmpl$7$6(), _el$14 = _el$13.firstChild;
                 _el$13.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveProfilePopover({
@@ -19015,7 +19307,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$15 = _tmpl$6$8();
+                    var _el$15 = _tmpl$6$9();
                     insert(_el$15, (() => {
                       var _c$2 = memo(() => unread() > 9);
                       return () => _c$2() ? "9+" : unread();
@@ -19035,7 +19327,7 @@ function CommunicatorStackRail(props) {
       label: "Configure Communicator",
       placement: "right",
       get children() {
-        var _el$9 = _tmpl$4$j();
+        var _el$9 = _tmpl$4$k();
         addEventListener(_el$9, "click", props.onOpenConfig, true);
         insert(_el$9, createComponent(settings_default, {
           "class": "w-3.5 h-3.5"
@@ -19213,11 +19505,11 @@ function CommunicatorTabPopover(props) {
   });
 }
 delegateEvents(["click", "contextmenu", "input", "keydown"]);
-var _tmpl$$J = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$q = /* @__PURE__ */ template(`<button>`), _tmpl$4$i = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$c = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$7 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$4 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
+var _tmpl$$J = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$q = /* @__PURE__ */ template(`<button>`), _tmpl$4$j = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$d = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$8 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
 function CommunicatorHeader(props) {
   const [activeTabPopover, setActiveTabPopover] = createSignal(null);
   return (() => {
-    var _el$ = _tmpl$5$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$7 = _el$2.nextSibling, _el$8 = _el$7.nextSibling;
+    var _el$ = _tmpl$5$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$7 = _el$2.nextSibling, _el$8 = _el$7.nextSibling;
     addEventListener(_el$, "dblclick", props.onResetPosition, true);
     addEventListener(_el$, "mousedown", props.onDragStart, true);
     _el$3.$$click = () => {
@@ -19244,7 +19536,7 @@ function CommunicatorHeader(props) {
       children: (app) => {
         const isActive = () => commStore.activeTab === app.id;
         return (() => {
-          var _el$10 = _tmpl$7$4(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild;
+          var _el$10 = _tmpl$7$5(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild;
           _el$11.$$contextmenu = (e) => {
             e.preventDefault();
             const rect = e.currentTarget.getBoundingClientRect();
@@ -19287,7 +19579,7 @@ function CommunicatorHeader(props) {
               return app.unreadCount > 0;
             },
             get children() {
-              return _tmpl$6$7();
+              return _tmpl$6$8();
             }
           }), null);
           createRenderEffect(() => className(_el$11, `p-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${isActive() ? "bg-neutral-200/90 dark:bg-neutral-700 shadow-sm text-neutral-900 dark:text-white" : "hover:bg-neutral-200/50 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"}`));
@@ -19333,7 +19625,7 @@ function CommunicatorHeader(props) {
           label: "Expand to Workspace Split",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$i();
+            var _el$0 = _tmpl$4$j();
             _el$0.$$click = () => {
               const current = props.currentApps().find((a) => a.id === commStore.activeTab);
               if (current) props.onExpandToSplit(current.url, current.name);
@@ -19350,7 +19642,7 @@ function CommunicatorHeader(props) {
       label: "Dismiss (Esc)",
       placement: "bottom",
       get children() {
-        var _el$1 = _tmpl$4$i();
+        var _el$1 = _tmpl$4$j();
         addEventListener(_el$1, "click", commActions.close, true);
         insert(_el$1, createComponent(x_default, {
           "class": "w-3.5 h-3.5"
@@ -19379,7 +19671,7 @@ function CommunicatorHeader(props) {
   })();
 }
 delegateEvents(["mousedown", "dblclick", "click", "contextmenu"]);
-var _tmpl$$I = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
+var _tmpl$$I = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$v = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$p = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$i = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
 function CommunicatorFeed() {
   return (() => {
     var _el$ = _tmpl$2$v();
@@ -19403,7 +19695,7 @@ function CommunicatorFeed() {
             return commStore.notifications;
           },
           children: (item) => (() => {
-            var _el$5 = _tmpl$4$h(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
+            var _el$5 = _tmpl$4$i(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
             _el$5.$$click = () => commActions.setTab(item.appId);
             insert(_el$7, () => item.appName);
             insert(_el$8, () => new Date(item.timestamp).toLocaleTimeString([], {
@@ -19456,7 +19748,7 @@ function CommunicatorManageStacks() {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$2$t = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$3$n = /* @__PURE__ */ template(`<form class="flex flex-col gap-3"><div class="flex flex-col gap-2"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-2 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-2 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-1">`), _tmpl$4$g = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute inset-0 z-[140] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150 select-none pointer-events-auto"><div data-overlay-chrome=true class="w-[420px] bg-white dark:bg-[#18181b] border border-neutral-300 dark:border-neutral-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] p-4 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Manage Stacks</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$5$b = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left"><span class="text-[11px] font-medium truncate">`), _tmpl$6$6 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$$G = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$2$t = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$3$n = /* @__PURE__ */ template(`<form class="flex flex-col gap-3"><div class="flex flex-col gap-2"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-2 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-2 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-1">`), _tmpl$4$h = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute inset-0 z-[140] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150 select-none pointer-events-auto"><div data-overlay-chrome=true class="w-[420px] bg-white dark:bg-[#18181b] border border-neutral-300 dark:border-neutral-700 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] p-4 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Manage Stacks</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$5$c = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left"><span class="text-[11px] font-medium truncate">`), _tmpl$6$7 = /* @__PURE__ */ template(`<option>`);
 function AppConfigModal(props) {
   const [activeTab, setActiveTab] = createSignal("addApp");
   const [appName, setAppName] = createSignal(props.editApp?.name || "");
@@ -19505,7 +19797,7 @@ function AppConfigModal(props) {
     props.onClose();
   };
   return (() => {
-    var _el$ = _tmpl$4$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
+    var _el$ = _tmpl$4$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
     addEventListener(_el$, "click", props.onClose, true);
     _el$2.$$click = (e) => e.stopPropagation();
     _el$5.$$click = () => setActiveTab("addApp");
@@ -19535,7 +19827,7 @@ function AppConfigModal(props) {
                 return commStore.providers;
               },
               children: (prov) => (() => {
-                var _el$24 = _tmpl$5$b(), _el$25 = _el$24.firstChild;
+                var _el$24 = _tmpl$5$c(), _el$25 = _el$24.firstChild;
                 _el$24.$$click = () => handleSelectProvider(prov);
                 insert(_el$24, createComponent(Favicon, {
                   get url() {
@@ -19559,7 +19851,7 @@ function AppConfigModal(props) {
             return profiles().filter((p) => p.id !== "main");
           },
           children: (p) => (() => {
-            var _el$26 = _tmpl$6$6();
+            var _el$26 = _tmpl$6$7();
             insert(_el$26, () => p.name);
             createRenderEffect(() => _el$26.value = p.id);
             return _el$26;
@@ -19571,7 +19863,7 @@ function AppConfigModal(props) {
             return commStore.stacks;
           },
           children: (s) => (() => {
-            var _el$27 = _tmpl$6$6();
+            var _el$27 = _tmpl$6$7();
             insert(_el$27, () => s.name);
             createRenderEffect(() => _el$27.value = s.id);
             return _el$27;
@@ -20036,7 +20328,7 @@ function useCommunicatorIntent() {
     handleTriggerEnter
   };
 }
-var _tmpl$$D = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
+var _tmpl$$D = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
 function ActionCluster(props) {
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
   createSignal(false);
@@ -20214,7 +20506,7 @@ function DoubleBezel(rawProps) {
     return _el$;
   })();
 }
-var _tmpl$$B = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$r = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$l = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$f = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+var _tmpl$$B = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$r = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$l = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
 function CommandBar(props) {
   const [isFocused, setIsFocused] = createSignal(false);
   let inputEl;
@@ -20251,7 +20543,7 @@ function CommandBar(props) {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$4$f(), _el$5 = _el$4.firstChild;
+            var _el$4 = _tmpl$4$g(), _el$5 = _el$4.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = !!isFocused(), _v$5 = !isFocused();
               _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
@@ -20312,7 +20604,7 @@ function CommandBar(props) {
 }
 delegateEvents(["input", "keydown"]);
 delegateEvents(["click"]);
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$q = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$a = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+var _tmpl$$A = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 cursor-text"><div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 text-neutral-600"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg></div><input type=text placeholder="Search workspaces, URLs, or commands…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none pointer-events-auto focus:ring-0 focus:outline-none"style=caret-color:#000>`), _tmpl$2$q = /* @__PURE__ */ template(`<div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">Workspaces`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto"><div><div class="px-3 py-1.5 text-[10px] font-semibold text-neutral-400 tracking-[0.2em] uppercase">System Commands</div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate Background Panes (Free Memory)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">mem</span></div><div class="px-3 py-2 text-sm text-neutral-700 hover:text-neutral-900 hover:bg-neutral-100/80 rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><span class=font-medium>Hibernate All Panes (Deep Sleep)</span><span class="text-neutral-400 text-xs font-mono bg-white border border-neutral-200 px-2 py-0.5 rounded-md">zzz`), _tmpl$4$f = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-300 select-none">`), _tmpl$5$b = /* @__PURE__ */ template(`<div class="px-3 py-2 text-sm rounded-xl cursor-pointer flex items-center justify-between group transition-colors"><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded-lg flex items-center justify-center transition-colors"></div><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
 function CommandPalette(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -20375,7 +20667,7 @@ function CommandPalette(props) {
       return isOpen();
     },
     get children() {
-      var _el$ = _tmpl$4$e();
+      var _el$ = _tmpl$4$f();
       _el$.$$click = () => setIsOpen(false);
       insert(_el$, createComponent(DoubleBezel, {
         size: "lg",
@@ -20412,7 +20704,7 @@ function CommandPalette(props) {
                   children: (ws, idx) => {
                     const isFocused = () => activeIdx() === idx();
                     return (() => {
-                      var _el$10 = _tmpl$5$a(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
+                      var _el$10 = _tmpl$5$b(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
                       _el$10.addEventListener("mouseenter", () => setActiveIdx(idx()));
                       _el$10.$$click = () => handleSelectWorkspace(ws.id);
                       insert(_el$12, createComponent(WorkspaceIcon, {
@@ -20683,7 +20975,7 @@ function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximized
   traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
   return result;
 }
-var _tmpl$$y = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$p = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$j = /* @__PURE__ */ template(`<button>`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$9 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$5 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$3 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$y = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$p = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$j = /* @__PURE__ */ template(`<button>`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$a = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$6 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div data-overlay-chrome=true><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$4 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function PaneIsland(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -20702,13 +20994,19 @@ function PaneIsland(props) {
           var _el$ = _tmpl$$y();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
+            props.onActive?.();
+            PaneFocusManager.focusPane(props.node.id);
             setShowSplitMenu(false);
             setShowProfileMenu(false);
           };
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$6$5(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
+        var _el$2 = _tmpl$6$6(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
+        _el$3.$$pointerdown = () => {
+          props.onActive?.();
+          PaneFocusManager.focusPane(props.node.id);
+        };
         insert(_el$4, createComponent(ProfileMenu$1, {
           get node() {
             return props.node;
@@ -20743,15 +21041,21 @@ function PaneIsland(props) {
             var _el$7 = _tmpl$3$j();
             _el$7.$$click = (e) => {
               e.stopPropagation();
+              props.onActive?.();
+              PaneFocusManager.focusPane(props.node.id);
               setLayoutStore("maximizedPaneId", isMaximized() ? null : props.node.id);
             };
-            _el$7.$$pointerdown = (e) => e.stopPropagation();
+            _el$7.$$pointerdown = (e) => {
+              e.stopPropagation();
+              props.onActive?.();
+              PaneFocusManager.focusPane(props.node.id);
+            };
             insert(_el$7, createComponent(Show, {
               get when() {
                 return isMaximized();
               },
               get fallback() {
-                return _tmpl$7$3();
+                return _tmpl$7$4();
               },
               get children() {
                 return _tmpl$2$p();
@@ -20765,10 +21069,12 @@ function PaneIsland(props) {
           label: "Drag to Move",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$d();
+            var _el$0 = _tmpl$4$e();
             _el$0.$$pointerdown = (e) => {
               e.preventDefault();
               e.stopPropagation();
+              props.onActive?.();
+              PaneFocusManager.focusPane(props.node.id);
               window.dispatchEvent(new CustomEvent("app:dragstart", {
                 detail: {
                   id: props.node.id,
@@ -20784,12 +21090,18 @@ function PaneIsland(props) {
           shortcut: "Ctrl+W",
           placement: "bottom",
           get children() {
-            var _el$10 = _tmpl$5$9();
+            var _el$10 = _tmpl$5$a();
             _el$10.$$click = (e) => {
               e.stopPropagation();
+              props.onActive?.();
+              PaneFocusManager.focusPane(props.node.id);
               props.onClose(props.node.id);
             };
-            _el$10.$$pointerdown = (e) => e.stopPropagation();
+            _el$10.$$pointerdown = (e) => {
+              e.stopPropagation();
+              props.onActive?.();
+              PaneFocusManager.focusPane(props.node.id);
+            };
             return _el$10;
           }
         }), null);
@@ -20811,7 +21123,7 @@ function PaneIsland(props) {
   });
 }
 delegateEvents(["pointerdown", "click"]);
-var _tmpl$$x = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$i = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$c = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$x = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$i = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function PaneNode(props) {
   const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
   const isTarget = () => props.dragTarget?.id === props.node.id;
@@ -20855,7 +21167,7 @@ function PaneNode(props) {
     },
     get fallback() {
       return (() => {
-        var _el$13 = _tmpl$4$c(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
+        var _el$13 = _tmpl$4$d(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
         insert(_el$15, () => props.node.title || "Split Preview");
         return _el$13;
       })();
@@ -20926,7 +21238,11 @@ function PaneNode(props) {
         get onUpdatePane() {
           return props.onUpdatePane;
         },
-        isDraggingThis
+        isDraggingThis,
+        onActive: () => {
+          props.onActivePaneChange(props.node.id);
+          PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
+        }
       }), null);
       createRenderEffect((_p$) => {
         var _v$ = `w-full h-full relative group/pane-container pointer-events-none ${props.activePaneId === props.node.id ? "z-20" : "z-10"}`, _v$2 = `${padding().pt}px`, _v$3 = `${padding().pr}px`, _v$4 = `${padding().pb}px`, _v$5 = `${padding().pl}px`, _v$6 = props.node.id, _v$7 = `w-full h-full relative overflow-visible flex flex-col pointer-events-none rounded-[14px] transition-shadow duration-200 ease-out ${isDraggingThis() || layoutStore.maximizedPaneId ? "opacity-0" : ""}`, _v$8 = focusStyle(), _v$9 = `flex-1 w-full h-full flex transition-all duration-200 gap-1.5 relative ${isTarget() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "right") ? "flex-row" : "flex-col"}`, _v$0 = `pane-container-${props.node.id}`;
@@ -21570,9 +21886,23 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$r = /* @__PURE__ */ template(`<div class="absolute right-0 top-full mt-3 w-48 bg-white/95 backdrop-blur-xl border border-neutral-200/60 rounded-xl shadow-double-bezel-elevated p-1 z-[100] origin-top-right">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$h = /* @__PURE__ */ template(`<button class="w-full flex items-center gap-2.5 px-3 py-2 rounded-lg hover:bg-neutral-100/80 transition-colors cursor-pointer text-left"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span>`);
+var _tmpl$$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute right-0 top-full mt-3 w-60 bg-white/95 backdrop-blur-xl border border-neutral-200/80 rounded-2xl shadow-[0_12px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 z-[100] origin-top-right animate-in zoom-in-95 duration-150"><div class="px-2.5 py-1 text-xs font-normal text-neutral-400">Profiles</div><div class=space-y-1></div><div class="mt-1.5 pt-1.5 border-t border-neutral-100 flex items-center justify-between px-1"><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100">+ New profile</button><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100 flex items-center gap-1"><span>⚙</span> Settings`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$h = /* @__PURE__ */ template(`<span class="text-xs font-semibold text-neutral-800 pr-1 shrink-0">✓`), _tmpl$4$c = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2.5 overflow-hidden min-w-0"><div class="flex items-center justify-center w-6 h-6 rounded-lg text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><span>`), _tmpl$5$9 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400 truncate">No connected account`), _tmpl$6$5 = /* @__PURE__ */ template(`<div class="flex items-center gap-1 min-w-0"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class="text-[10px] font-normal text-neutral-500 truncate">`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === props.currentProfileId);
+  onMount(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && props.show) {
+        props.onToggle();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+  });
+  const openSettingsProfiles = () => {
+    setLayoutStore("settingsActiveTab", "profiles");
+    setLayoutStore("showSettings", true);
+    props.onToggle();
+  };
   return (() => {
     var _el$ = _tmpl$2$l(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
@@ -21585,39 +21915,80 @@ function ProfileMenu(props) {
         return props.show;
       },
       get children() {
-        var _el$3 = _tmpl$$r();
-        insert(_el$3, createComponent(For, {
+        var _el$3 = _tmpl$$r(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+        insert(_el$5, createComponent(For, {
           get each() {
-            return [{
+            return [layoutStore.profiles.find((p) => p.id === "main") || {
               id: "main",
-              color: "#6d7f94",
+              color: "#e11d48",
               name: "Main"
             }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
           },
-          children: (profile) => (() => {
-            var _el$4 = _tmpl$3$h(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
-            _el$4.$$click = () => {
-              props.onSelect(profile.id === "main" ? void 0 : profile.id);
-            };
-            insert(_el$5, () => profile.name.charAt(0).toUpperCase());
-            insert(_el$6, () => profile.name);
-            createRenderEffect((_p$) => {
-              var _v$3 = profile.color, _v$4 = `text-[13px] truncate ${props.currentProfileId === profile.id || !props.currentProfileId && profile.id === "main" ? "font-bold text-neutral-900" : "font-medium text-neutral-600"}`;
-              _v$3 !== _p$.e && setStyleProperty(_el$5, "background-color", _p$.e = _v$3);
-              _v$4 !== _p$.t && className(_el$6, _p$.t = _v$4);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0
-            });
-            return _el$4;
-          })()
+          children: (profile) => {
+            const isSelected = () => props.currentProfileId === profile.id || !props.currentProfileId && profile.id === "main";
+            const firstIdentity = () => getPrimaryIdentity(profile?.identities_json);
+            return (() => {
+              var _el$9 = _tmpl$4$c(), _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$10.firstChild;
+              _el$9.$$click = () => {
+                props.onSelect(profile.id === "main" ? void 0 : profile.id);
+              };
+              insert(_el$1, () => profile.name.charAt(0).toUpperCase());
+              insert(_el$11, () => profile.name);
+              insert(_el$10, createComponent(Show, {
+                get when() {
+                  return firstIdentity();
+                },
+                get fallback() {
+                  return _tmpl$5$9();
+                },
+                children: (ident) => (() => {
+                  var _el$14 = _tmpl$6$5(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+                  _el$15.addEventListener("error", (e) => {
+                    e.currentTarget.style.display = "none";
+                  });
+                  insert(_el$16, () => ident().displayLabel);
+                  createRenderEffect((_p$) => {
+                    var _v$6 = `https://www.google.com/s2/favicons?domain=${getProviderDomain$1(ident().providerId)}&sz=64`, _v$7 = ident().providerId;
+                    _v$6 !== _p$.e && setAttribute(_el$15, "src", _p$.e = _v$6);
+                    _v$7 !== _p$.t && setAttribute(_el$15, "alt", _p$.t = _v$7);
+                    return _p$;
+                  }, {
+                    e: void 0,
+                    t: void 0
+                  });
+                  return _el$14;
+                })()
+              }), null);
+              insert(_el$9, createComponent(Show, {
+                get when() {
+                  return isSelected();
+                },
+                get children() {
+                  return _tmpl$3$h();
+                }
+              }), null);
+              createRenderEffect((_p$) => {
+                var _v$3 = `w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl transition-all cursor-pointer text-left ${isSelected() ? "bg-neutral-100/90 border border-neutral-200/70 shadow-2xs" : "hover:bg-neutral-50/80 border border-transparent"}`, _v$4 = profile.color || "#e11d48", _v$5 = `text-xs truncate ${isSelected() ? "font-medium text-neutral-950" : "font-normal text-neutral-700"}`;
+                _v$3 !== _p$.e && className(_el$9, _p$.e = _v$3);
+                _v$4 !== _p$.t && setStyleProperty(_el$1, "background-color", _p$.t = _v$4);
+                _v$5 !== _p$.a && className(_el$11, _p$.a = _v$5);
+                return _p$;
+              }, {
+                e: void 0,
+                t: void 0,
+                a: void 0
+              });
+              return _el$9;
+            })();
+          }
         }));
+        _el$7.$$click = openSettingsProfiles;
+        _el$8.$$click = openSettingsProfiles;
         return _el$3;
       }
     }), null);
     createRenderEffect((_p$) => {
-      var _v$ = currentProfile()?.color || "#6d7f94", _v$2 = `Profile: ${currentProfile()?.name || "Main"}`;
+      var _v$ = currentProfile()?.color || "#e11d48", _v$2 = `Profile: ${currentProfile()?.name || "Main"}`;
       _v$ !== _p$.e && setStyleProperty(_el$2, "background-color", _p$.e = _v$);
       _v$2 !== _p$.t && setAttribute(_el$2, "title", _p$.t = _v$2);
       return _p$;
@@ -22564,7 +22935,9 @@ function useNativePaneBridge(paneId, onNavigated) {
       }) ?? noop
     );
     offs.push(
-      api.onViewFocusWc?.((_wcId) => {
+      api.onViewFocusWc?.((wcId) => {
+        const targetPane = webContentsRegistry.getPaneId(wcId);
+        if (!targetPane || targetPane !== paneId) return;
         PaneFocusManager.setActivePaneId(paneId);
         window.dispatchEvent(new CustomEvent("app:webview-focused", { detail: paneId }));
       }) ?? noop
@@ -22846,12 +23219,17 @@ function usePaneLauncher(paneId, setCurrentType, setCurrentUrl, onUpdate) {
 }
 function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebview) {
   onMount(() => {
+    let lastReloadTime = 0;
     const unsub = window.api?.onPartitionCookieChanged?.((data) => {
       try {
         const myPart = partition();
         if (!myPart || myPart !== data.partition) return;
         const url = currentUrl();
         if (!url) return;
+        const lowerUrl = url.toLowerCase();
+        if (lowerUrl.includes("/sessions/social/") || lowerUrl.includes("/oauth/authorize") || lowerUrl.includes("/signin/rejected") || lowerUrl.includes("accounts.google.com")) {
+          return;
+        }
         let host = "";
         try {
           host = new URL(url).hostname;
@@ -22863,6 +23241,11 @@ function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebvi
           if (isActivePane()) {
             return;
           }
+          const now = Date.now();
+          if (now - lastReloadTime < 3e3) {
+            return;
+          }
+          lastReloadTime = now;
           reloadWebview();
         }
       } catch (err) {
@@ -23224,7 +23607,7 @@ function DropSnapPreview(props) {
     }
   });
 }
-var _tmpl$$i = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$g = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$7 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$2 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9$1 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
+var _tmpl$$i = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$g = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$7 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9$2 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
 function FindInPageBar(props) {
   let inputRef;
   const [query, setQuery] = createSignal("");
@@ -23339,7 +23722,7 @@ function FindInPageBar(props) {
       return props.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$9$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$9 = _el$3.nextSibling;
+      var _el$ = _tmpl$9$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$9 = _el$3.nextSibling;
       _el$.$$click = (e) => e.stopPropagation();
       insert(_el$3, createComponent(search_default, {
         "class": "w-3.5 h-3.5 text-neutral-400 shrink-0 mr-1"
@@ -23488,7 +23871,7 @@ function FindInPageBar(props) {
         shortcut: "Esc",
         placement: "bottom",
         get children() {
-          var _el$14 = _tmpl$7$2();
+          var _el$14 = _tmpl$7$3();
           _el$14.$$click = () => {
             window.api?.stopFind?.("clearSelection");
             props.onClose();
@@ -23505,7 +23888,7 @@ function FindInPageBar(props) {
           return memo(() => scope() === "global")() && matchingGlobal().length > 0;
         },
         get children() {
-          var _el$15 = _tmpl$8$2();
+          var _el$15 = _tmpl$8$3();
           insert(_el$15, createComponent(For, {
             get each() {
               return matchingGlobal();
@@ -23960,7 +24343,7 @@ function EdgeDragZones(props) {
     }
   });
 }
-var _tmpl$$f = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+var _tmpl$$f = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const formatDate = (dateStr) => {
     if (!dateStr) return "";
@@ -23973,7 +24356,7 @@ function AccountTab(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$7$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
+    var _el$ = _tmpl$7$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
     var _el$24 = _el$9.nextSibling, _el$25 = _el$24.firstChild, _el$26 = _el$25.firstChild, _el$27 = _el$26.nextSibling;
     insert(_el$3, createComponent(Show, {
@@ -23981,7 +24364,7 @@ function AccountTab(props) {
         return layoutStore.licenseState?.customer?.avatar_url;
       },
       get fallback() {
-        return _tmpl$8$1();
+        return _tmpl$8$2();
       },
       get children() {
         var _el$4 = _tmpl$$f();
@@ -24004,7 +24387,7 @@ function AccountTab(props) {
         return layoutStore.isPremium;
       },
       get fallback() {
-        return _tmpl$9();
+        return _tmpl$9$1();
       },
       get children() {
         return _tmpl$3$b();
@@ -24259,49 +24642,55 @@ function ProfileShortcutsManager(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$c = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-500 bg-neutral-100 border border-neutral-200">DEFAULT`), _tmpl$2$a = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono font-medium text-neutral-600 bg-neutral-100 border border-neutral-200">RAM-ONLY`), _tmpl$3$8 = /* @__PURE__ */ template(`<span class="px-1.5 py-0.5 rounded text-[9px] font-mono text-neutral-500 bg-neutral-50 border border-neutral-200 truncate max-w-[130px]">Proxy: `), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-9 h-9 rounded-xl text-white text-xs font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-2"><span class="text-sm font-semibold text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-medium text-neutral-700 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/80 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/60 shadow-xs">Configure</button></div><div class="flex items-center gap-1.5 pt-2 border-t border-neutral-100 flex-wrap"><span class="text-[10px] font-semibold text-neutral-400 uppercase tracking-wider shrink-0 mr-1.5">SSO:`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white border border-neutral-300 shadow-xs ring-1 ring-black/5"><div class="relative flex items-center justify-center"><img class="w-3.5 h-3.5 object-contain"><div class="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-emerald-500 ring-1 ring-white"></div></div><span class="font-mono text-[10px] text-neutral-800 font-medium truncate max-w-[140px]">`), _tmpl$6$2 = /* @__PURE__ */ template(`<button type=button class="relative group/pbtn flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-50 hover:bg-white border border-neutral-200/60 hover:border-neutral-300 transition-all cursor-pointer shadow-2xs active:scale-95"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40 group-hover/pbtn:grayscale-0 group-hover/pbtn:opacity-100 transition-all">`);
-const IDENTITY_PROVIDERS = [{
-  id: "google",
-  name: "Google",
-  domain: "google.com",
-  loginUrl: "https://accounts.google.com"
-}, {
-  id: "github",
-  name: "GitHub",
-  domain: "github.com",
-  loginUrl: "https://github.com/login"
-}, {
-  id: "microsoft",
-  name: "Microsoft",
-  domain: "microsoft.com",
-  loginUrl: "https://login.microsoftonline.com"
-}, {
-  id: "apple",
-  name: "Apple",
-  domain: "apple.com",
-  loginUrl: "https://appleid.apple.com"
-}, {
-  id: "x",
-  name: "X (Twitter)",
-  domain: "x.com",
-  loginUrl: "https://twitter.com/login"
-}, {
-  id: "discord",
-  name: "Discord",
-  domain: "discord.com",
-  loginUrl: "https://discord.com/login"
-}, {
-  id: "gitlab",
-  name: "GitLab",
-  domain: "gitlab.com",
-  loginUrl: "https://gitlab.com/users/sign_in"
-}, {
-  id: "slack",
-  name: "Slack",
-  domain: "slack.com",
-  loginUrl: "https://slack.com/signin"
-}];
+var _tmpl$$c = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Default)`), _tmpl$2$a = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Incognito)`), _tmpl$3$8 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400">(+<!>)`), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-neutral-50/90 hover:bg-white border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all cursor-pointer min-w-0 group/pill"><div class="w-4 h-4 rounded-full bg-white border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><span class="text-xs font-normal text-neutral-800 truncate max-w-[190px]">`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-5 h-5 rounded-full bg-neutral-100 ring-2 ring-white border border-neutral-200 text-[8px] font-medium text-neutral-500">+`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="flex items-center -space-x-1.5 cursor-pointer pl-0.5">`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-8 h-8 rounded-xl text-white text-xs font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-sm font-medium text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-normal text-neutral-600 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/70 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/50 shadow-2xs">Configure</button></div><div class="flex items-center justify-between pt-2 border-t border-neutral-100 min-h-[34px]"><div class="flex items-center gap-2 overflow-hidden min-w-0">`), _tmpl$8$1 = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-dashed border-neutral-200 text-xs font-normal text-neutral-400 hover:text-neutral-800 hover:border-neutral-400 transition-colors cursor-pointer"><span>+</span> Connect account`), _tmpl$9 = /* @__PURE__ */ template(`<div class="relative flex items-center justify-center w-5 h-5 rounded-full bg-white ring-2 ring-white border border-neutral-200/80 shadow-2xs overflow-hidden"><img class="w-3 h-3 object-contain">`);
+const PROVIDER_PRIORITY = {
+  google: 100,
+  github: 90,
+  microsoft: 80,
+  apple: 70,
+  slack: 60,
+  x: 50,
+  linear: 40,
+  figma: 39,
+  notion: 38,
+  chatgpt: 37,
+  canva: 36,
+  vercel: 35,
+  stripe: 34,
+  atlassian: 33,
+  discord: 30,
+  gitlab: 29
+};
+function getProviderDomain(id) {
+  switch (id) {
+    case "google":
+      return "google.com";
+    case "github":
+      return "github.com";
+    case "microsoft":
+      return "microsoft.com";
+    case "apple":
+      return "apple.com";
+    case "slack":
+      return "slack.com";
+    case "x":
+      return "x.com";
+    case "linear":
+      return "linear.app";
+    case "notion":
+      return "notion.so";
+    case "chatgpt":
+      return "chatgpt.com";
+    case "canva":
+      return "canva.com";
+    case "atlassian":
+      return "atlassian.com";
+    default:
+      return `${id}.com`;
+  }
+}
 function ProfileCard(props) {
+  const [copied, setCopied] = createSignal(false);
   const getIdentities = () => {
     try {
       return props.profile.identities_json ? JSON.parse(props.profile.identities_json) : {};
@@ -24309,24 +24698,36 @@ function ProfileCard(props) {
       return {};
     }
   };
-  const handleConnect = (loginUrl) => {
-    const api = window.api;
-    if (api?.openGoogleAuth) {
-      api.openGoogleAuth({
-        url: loginUrl,
-        profileId: props.profile.id
-      });
-    } else if (api?.auth?.openGoogleAuth) {
-      api.auth.openGoogleAuth({
-        url: loginUrl,
-        profileId: props.profile.id
-      });
-    }
+  const activeIdentitiesList = () => {
+    const ids = getIdentities();
+    const list = Object.entries(ids).map(([providerId, data]) => ({
+      providerId,
+      ...data
+    }));
+    return list.sort((a, b) => {
+      const aReal = Boolean(a.email?.includes("@") || a.handle?.startsWith("@") && !a.handle.includes("_user"));
+      const bReal = Boolean(b.email?.includes("@") || b.handle?.startsWith("@") && !b.handle.includes("_user"));
+      if (aReal && !bReal) return -1;
+      if (!aReal && bReal) return 1;
+      const pA = PROVIDER_PRIORITY[a.providerId] || 10;
+      const pB = PROVIDER_PRIORITY[b.providerId] || 10;
+      return pB - pA;
+    });
   };
   const isDefault = () => props.profile.id === "main";
+  const primaryIdentity = () => activeIdentitiesList()[0];
+  const secondaryIdentities = () => activeIdentitiesList().slice(1);
+  const handleCopyEmail = (e) => {
+    e.stopPropagation();
+    const text = primaryIdentity()?.email || primaryIdentity()?.handle;
+    if (text) {
+      navigator.clipboard?.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }
+  };
   return (() => {
-    var _el$ = _tmpl$4$6(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$10 = _el$3.nextSibling, _el$11 = _el$2.nextSibling;
-    _el$11.firstChild;
+    var _el$ = _tmpl$7$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$0 = _el$3.nextSibling, _el$1 = _el$2.nextSibling, _el$10 = _el$1.firstChild;
     insert(_el$4, () => props.profile.name.charAt(0).toUpperCase());
     insert(_el$7, () => props.profile.name);
     insert(_el$6, createComponent(Show, {
@@ -24345,75 +24746,114 @@ function ProfileCard(props) {
         return _tmpl$2$a();
       }
     }), null);
-    insert(_el$6, createComponent(Show, {
+    addEventListener(_el$0, "click", props.onConfigure, true);
+    insert(_el$10, createComponent(Show, {
       get when() {
-        return props.profile.proxy_server;
+        return primaryIdentity();
+      },
+      get fallback() {
+        return (() => {
+          var _el$22 = _tmpl$8$1();
+          addEventListener(_el$22, "click", props.onConfigure, true);
+          return _el$22;
+        })();
       },
       get children() {
-        var _el$0 = _tmpl$3$8();
-        _el$0.firstChild;
-        insert(_el$0, () => props.profile.proxy_server, null);
-        createRenderEffect(() => setAttribute(_el$0, "title", props.profile.proxy_server));
-        return _el$0;
-      }
-    }), null);
-    addEventListener(_el$10, "click", props.onConfigure, true);
-    insert(_el$11, createComponent(For, {
-      each: IDENTITY_PROVIDERS,
-      children: (p) => {
-        const identity = () => getIdentities()[p.id];
-        return createComponent(Show, {
+        return [(() => {
+          var _el$11 = _tmpl$4$6(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling;
+          _el$11.$$click = handleCopyEmail;
+          _el$13.addEventListener("error", (e) => {
+            e.currentTarget.style.display = "none";
+          });
+          insert(_el$14, (() => {
+            var _c$ = memo(() => !!copied());
+            return () => _c$() ? "✓ Copied" : primaryIdentity()?.email || primaryIdentity()?.handle;
+          })());
+          insert(_el$11, createComponent(Show, {
+            get when() {
+              return memo(() => !!primaryIdentity()?.aliases?.length)() && !copied();
+            },
+            get children() {
+              var _el$15 = _tmpl$3$8(), _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling;
+              _el$18.nextSibling;
+              insert(_el$15, () => primaryIdentity()?.aliases?.length, _el$18);
+              return _el$15;
+            }
+          }), null);
+          createRenderEffect((_p$) => {
+            var _v$ = `Click to copy: ${primaryIdentity()?.email || primaryIdentity()?.handle}`, _v$2 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(primaryIdentity()?.providerId)}&sz=64`, _v$3 = primaryIdentity()?.providerId;
+            _v$ !== _p$.e && setAttribute(_el$11, "title", _p$.e = _v$);
+            _v$2 !== _p$.t && setAttribute(_el$13, "src", _p$.t = _v$2);
+            _v$3 !== _p$.a && setAttribute(_el$13, "alt", _p$.a = _v$3);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0,
+            a: void 0
+          });
+          return _el$11;
+        })(), createComponent(Show, {
           get when() {
-            return identity();
-          },
-          get fallback() {
-            return (() => {
-              var _el$17 = _tmpl$6$2(), _el$18 = _el$17.firstChild;
-              _el$17.$$click = () => handleConnect(p.loginUrl);
-              _el$18.addEventListener("error", (e) => {
-                e.currentTarget.style.display = "none";
-              });
-              createRenderEffect((_p$) => {
-                var _v$3 = `Sign in with ${p.name}`, _v$4 = `https://www.google.com/s2/favicons?domain=${p.domain}&sz=64`, _v$5 = p.name;
-                _v$3 !== _p$.e && setAttribute(_el$17, "title", _p$.e = _v$3);
-                _v$4 !== _p$.t && setAttribute(_el$18, "src", _p$.t = _v$4);
-                _v$5 !== _p$.a && setAttribute(_el$18, "alt", _p$.a = _v$5);
-                return _p$;
-              }, {
-                e: void 0,
-                t: void 0,
-                a: void 0
-              });
-              return _el$17;
-            })();
+            return secondaryIdentities().length > 0;
           },
           get children() {
-            var _el$13 = _tmpl$5$4(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild, _el$16 = _el$14.nextSibling;
-            _el$15.addEventListener("error", (e) => {
-              e.currentTarget.style.display = "none";
-            });
-            insert(_el$16, () => identity()?.email || identity()?.handle || p.name);
-            createRenderEffect((_p$) => {
-              var _v$ = `https://www.google.com/s2/favicons?domain=${p.domain}&sz=64`, _v$2 = p.name;
-              _v$ !== _p$.e && setAttribute(_el$15, "src", _p$.e = _v$);
-              _v$2 !== _p$.t && setAttribute(_el$15, "alt", _p$.t = _v$2);
-              return _p$;
-            }, {
-              e: void 0,
-              t: void 0
-            });
-            return _el$13;
+            var _el$19 = _tmpl$6$2();
+            addEventListener(_el$19, "click", props.onConfigure, true);
+            insert(_el$19, createComponent(For, {
+              get each() {
+                return secondaryIdentities().slice(0, 3);
+              },
+              children: (s) => (() => {
+                var _el$23 = _tmpl$9(), _el$24 = _el$23.firstChild;
+                _el$24.addEventListener("error", (e) => {
+                  e.currentTarget.style.display = "none";
+                });
+                createRenderEffect((_p$) => {
+                  var _v$4 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(s.providerId)}&sz=64`, _v$5 = s.providerId;
+                  _v$4 !== _p$.e && setAttribute(_el$24, "src", _p$.e = _v$4);
+                  _v$5 !== _p$.t && setAttribute(_el$24, "alt", _p$.t = _v$5);
+                  return _p$;
+                }, {
+                  e: void 0,
+                  t: void 0
+                });
+                return _el$23;
+              })()
+            }), null);
+            insert(_el$19, createComponent(Show, {
+              get when() {
+                return secondaryIdentities().length > 3;
+              },
+              get children() {
+                var _el$20 = _tmpl$5$4();
+                _el$20.firstChild;
+                insert(_el$20, () => secondaryIdentities().length - 3, null);
+                return _el$20;
+              }
+            }), null);
+            createRenderEffect(() => setAttribute(_el$19, "title", secondaryIdentities().map((s) => `${s.providerId}: ${s.email || s.handle}`).join(", ")));
+            return _el$19;
           }
-        });
+        })];
       }
-    }), null);
-    createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", props.profile.color || "#4a4a49"));
+    }));
+    createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", props.profile.color || "#e11d48"));
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><div class=space-y-0.5><h3 class="text-sm font-bold text-neutral-900 tracking-tight">Profiles</h3><p class="text-xs text-neutral-500">Isolated sessions with independent logins, cookies, and cache.</p></div><button class="flex items-center gap-1.5 text-xs font-semibold bg-neutral-900 hover:bg-neutral-800 text-white px-3.5 py-2 rounded-xl transition-colors shadow-xs shrink-0 cursor-pointer"><span>+</span><span>New Profile`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class=p-6>`), _tmpl$4$5 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2 mb-4"><button class="text-xs text-neutral-500 hover:text-neutral-900 transition-colors flex items-center gap-1 cursor-pointer font-medium"><span>←</span> Back to Profiles</button></div><h3 class="text-sm font-bold text-neutral-900 mb-4">`);
+var _tmpl$$b = /* @__PURE__ */ template(`<div class="flex items-center justify-between mb-4"><div class=space-y-0.5><h3 class="text-sm font-medium text-neutral-900">Profiles</h3><p class="text-xs font-normal text-neutral-400">Keep separate accounts, history, and cookies across workspaces.</p></div><button class="flex items-center gap-1.5 text-xs font-normal bg-neutral-900 hover:bg-neutral-800 text-white px-3 py-1.5 rounded-xl transition-all shadow-xs shrink-0 cursor-pointer"><span>+</span><span>New profile`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="grid grid-cols-1 gap-3">`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class=p-6>`), _tmpl$4$5 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2 mb-3"><button class="text-xs text-neutral-400 hover:text-neutral-900 transition-colors flex items-center gap-1 cursor-pointer font-normal"><span>←</span> Back to profiles</button></div><h3 class="text-sm font-medium text-neutral-900 mb-3">`);
 function ProfilesTab(props) {
+  onMount(async () => {
+    try {
+      await window.api?.scanProfileIdentities?.();
+      const profiles = await window.api?.getProfiles?.();
+      if (profiles && Array.isArray(profiles)) {
+        setLayoutStore("profiles", profiles);
+      }
+    } catch {
+    }
+  });
   return (() => {
     var _el$ = _tmpl$3$7();
     insert(_el$, createComponent(Show, {
@@ -24427,7 +24867,7 @@ function ProfilesTab(props) {
             props.setIsCreatingProfile(false);
             props.setEditingProfileId(null);
           };
-          insert(_el$9, () => props.isCreatingProfile ? "Create New Profile" : "Edit Profile");
+          insert(_el$9, () => props.isCreatingProfile ? "Create profile" : "Edit profile");
           insert(_el$6, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((p2) => p2.id === props.editingProfileId);
@@ -25926,6 +26366,20 @@ function useAppLifecycle(ws) {
     } catch (err) {
       console.error("Failed to load initial data", err);
     }
+    const unsubProfiles = window.api?.onProfilesUpdated?.((profiles) => {
+      if (profiles && Array.isArray(profiles)) {
+        setLayoutStore("profiles", profiles);
+      }
+    });
+    const unsubAuth = window.api?.onAuthCompleted?.(async () => {
+      try {
+        const profiles = await window.api?.getProfiles?.();
+        if (profiles && Array.isArray(profiles)) {
+          setLayoutStore("profiles", profiles);
+        }
+      } catch {
+      }
+    });
     const handleEdgeHover = (e) => {
       const dir = e.detail.dir;
       const dragEngineRef = e.detail.dragEngine;
@@ -25955,10 +26409,31 @@ function useAppLifecycle(ws) {
     const handleBeforeUnload = () => {
       ws.saveLayout(true);
     };
+    const handlePaneFocusSync = (e) => {
+      const targetPaneId = e.detail?.paneId;
+      if (targetPaneId && typeof ws.setActivePaneId === "function" && ws.activePaneId() !== targetPaneId) {
+        ws.setActivePaneId(targetPaneId);
+      }
+    };
+    const ipc = window.electron?.ipcRenderer;
+    const onPaneClicked = (_e, clickedPaneId) => {
+      if (clickedPaneId && typeof ws.setActivePaneId === "function" && ws.activePaneId() !== clickedPaneId) {
+        PaneFocusManager.focusPane(clickedPaneId);
+        ws.setActivePaneId(clickedPaneId);
+      }
+    };
+    if (ipc) {
+      ipc.on("pane.clicked", onPaneClicked);
+    }
     window.addEventListener("app:edge-hover", handleEdgeHover);
+    window.addEventListener("app:pane-focus-changed", handlePaneFocusSync);
     window.addEventListener("beforeunload", handleBeforeUnload);
     onCleanup(() => {
+      unsubProfiles?.();
+      unsubAuth?.();
+      if (ipc) ipc.removeListener("pane.clicked", onPaneClicked);
       window.removeEventListener("app:edge-hover", handleEdgeHover);
+      window.removeEventListener("app:pane-focus-changed", handlePaneFocusSync);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     });
   });

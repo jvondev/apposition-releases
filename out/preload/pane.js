@@ -194,6 +194,78 @@ function initScrollContinuity() {
   window.addEventListener("beforeunload", () => syncScrollPosition(true));
 }
 try {
+  electron.webFrame.executeJavaScript(`(function() {
+    try {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+        configurable: true,
+        enumerable: true
+      });
+    } catch {}
+
+    try {
+      if (!navigator.plugins || navigator.plugins.length === 0) {
+        Object.defineProperty(navigator, 'plugins', {
+          get: () => [
+            { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+            { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
+            { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client Executable' }
+          ],
+          configurable: true,
+          enumerable: true
+        });
+      }
+    } catch {}
+
+    try {
+      if (!navigator.languages || navigator.languages.length === 0) {
+        Object.defineProperty(navigator, 'languages', {
+          get: () => ['en-US', 'en'],
+          configurable: true,
+          enumerable: true
+        });
+      }
+    } catch {}
+
+    try {
+      if (!window.chrome) (window).chrome = {};
+      if (!window.chrome.runtime) (window).chrome.runtime = {};
+      if (!window.chrome.csi) {
+        window.chrome.csi = function() {
+          return { startE: Date.now(), onloadT: Date.now(), pageT: performance.now(), tran: 15 };
+        };
+      }
+      if (!window.chrome.loadTimes) {
+        window.chrome.loadTimes = function() {
+          return {
+            commitLoadTime: Date.now() / 1000,
+            connectionInfo: 'h2',
+            finishDocumentLoadTime: Date.now() / 1000,
+            finishLoadTime: Date.now() / 1000,
+            firstPaintAfterLoadTime: 0,
+            firstPaintTime: Date.now() / 1000,
+            navigationType: 'Other',
+            npnNegotiatedProtocol: 'h2',
+            requestTime: Date.now() / 1000 - 0.16,
+            startLoadTime: Date.now() / 1000 - 0.3,
+            wasAlternateProtocolAvailable: false,
+            wasFetchedViaSpdy: true,
+            wasNpnNegotiated: true
+          };
+        };
+      }
+    } catch {}
+
+    try {
+      if (window.PublicKeyCredential) {
+        PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+        PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+      }
+    } catch {}
+  })();`);
+} catch {
+}
+try {
   let isInputFocused = false;
   window.addEventListener(
     "focusin",

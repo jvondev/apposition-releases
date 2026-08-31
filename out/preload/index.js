@@ -79,6 +79,9 @@ const IPC_CHANNELS = {
     CLEAR_SITE_DATA: "auth.clearSiteData",
     START_RELAY: "auth.startRelay",
     OPEN_GOOGLE_AUTH: "auth.openGoogleAuth",
+    CONNECT_ACCOUNT: "auth.connectAccount",
+    DISCONNECT_ACCOUNT: "auth.disconnectAccount",
+    SCAN_IDENTITIES: "auth.scanIdentities",
     EXPORT_VAULT: "vault.exportSession",
     IMPORT_VAULT: "vault.importSession"
   },
@@ -101,6 +104,7 @@ const IPC_CHANNELS = {
     FORWARDED_KEY: "forwarded-key",
     DEVTOOLS_CLOSED: "view.devtools-closed",
     AUTH_COMPLETED: "app.auth-completed",
+    PROFILES_UPDATED: "app.profiles-updated",
     CONTEXT_MENU_NATIVE: "view.context-menu-native",
     VIEW_FOCUS_WC: "view.focus-wc",
     SPLIT_PANE_WC: "app:split-pane-wc",
@@ -225,6 +229,13 @@ function createIpcClient(ipcRenderer) {
         paneId
       ),
       openGoogleAuth: (options) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH, options),
+      connectAccount: (options) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.CONNECT_ACCOUNT, options),
+      disconnectAccount: (providerId, profileId) => ipcRenderer.invoke(
+        IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT,
+        providerId,
+        profileId
+      ),
+      scanIdentities: (profileId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.SCAN_IDENTITIES, profileId),
       exportVault: (profileId, secretKey) => ipcRenderer.invoke(
         IPC_CHANNELS.AUTH.EXPORT_VAULT,
         profileId,
@@ -287,6 +298,14 @@ function createIpcEvents(ipcRenderer) {
       ipcRenderer.on(IPC_CHANNELS.EVENTS.AUTH_COMPLETED, handler);
       return () => ipcRenderer.removeListener(
         IPC_CHANNELS.EVENTS.AUTH_COMPLETED,
+        handler
+      );
+    },
+    onProfilesUpdated: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.PROFILES_UPDATED, handler);
+      return () => ipcRenderer.removeListener(
+        IPC_CHANNELS.EVENTS.PROFILES_UPDATED,
         handler
       );
     },
@@ -589,7 +608,9 @@ function modifiers(e) {
 function isChrome(x, y) {
   const el = document.elementFromPoint(x, y);
   if (!el) return false;
-  return !!el.closest("[data-overlay-chrome]");
+  if (el.closest("[data-overlay-chrome]")) return true;
+  if (el.closest("[role='dialog'], [role='menu'], [role='tooltip'], [role='toolbar'], [data-portal], portal-container, .portal-root, [aria-modal='true']")) return true;
+  return false;
 }
 function buildForwardMsg(type, e) {
   const x = e.clientX;
@@ -776,6 +797,9 @@ const api = {
   clearSiteData: client.auth.clearSiteData,
   startAuthRelay: client.auth.startRelay,
   openGoogleAuth: client.auth.openGoogleAuth,
+  connectAccount: client.auth.connectAccount,
+  disconnectAccount: client.auth.disconnectAccount,
+  scanProfileIdentities: client.auth.scanIdentities,
   exportSessionVault: client.auth.exportVault,
   importSessionVault: client.auth.importVault,
   // Metrics & Network
@@ -894,6 +918,7 @@ const api = {
   onForwardedKey: events.onForwardedKey,
   onDevToolsClosed: events.onDevToolsClosed,
   onAuthCompleted: events.onAuthCompleted,
+  onProfilesUpdated: events.onProfilesUpdated,
   onNativeContextMenu: events.onNativeContextMenu,
   onViewFocusWc: events.onViewFocusWc,
   onSplitPaneWc: events.onSplitPaneWc,

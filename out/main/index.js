@@ -599,9 +599,12 @@ function initInteractiveTerminal(logFilePath = "apposition.log", toggleGuestCall
   }
 }
 const ANTI_DETECTION_SCRIPT = String.raw`(function() {
-
   try {
-    Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    Object.defineProperty(navigator, 'webdriver', {
+      get: () => false,
+      configurable: true,
+      enumerable: true
+    });
   } catch {}
 
   try {
@@ -611,7 +614,9 @@ const ANTI_DETECTION_SCRIPT = String.raw`(function() {
           { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
           { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: 'Portable Document Format' },
           { name: 'Native Client', filename: 'internal-nacl-plugin', description: 'Native Client Executable' }
-        ]
+        ],
+        configurable: true,
+        enumerable: true
       });
     }
   } catch {}
@@ -619,11 +624,61 @@ const ANTI_DETECTION_SCRIPT = String.raw`(function() {
   try {
     if (!navigator.languages || navigator.languages.length === 0) {
       Object.defineProperty(navigator, 'languages', {
-        get: () => ['en-US', 'en']
+        get: () => ['en-US', 'en'],
+        configurable: true,
+        enumerable: true
       });
     }
   } catch {}
 
+  try {
+    if (!window.chrome) window.chrome = {};
+    if (!window.chrome.runtime) window.chrome.runtime = {};
+    if (!window.chrome.csi) {
+      window.chrome.csi = function() {
+        return { startE: Date.now(), onloadT: Date.now(), pageT: performance.now(), tran: 15 };
+      };
+    }
+    if (!window.chrome.loadTimes) {
+      window.chrome.loadTimes = function() {
+        return {
+          commitLoadTime: Date.now() / 1000,
+          connectionInfo: 'h2',
+          finishDocumentLoadTime: Date.now() / 1000,
+          finishLoadTime: Date.now() / 1000,
+          firstPaintAfterLoadTime: 0,
+          firstPaintTime: Date.now() / 1000,
+          navigationType: 'Other',
+          npnNegotiatedProtocol: 'h2',
+          requestTime: Date.now() / 1000 - 0.16,
+          startLoadTime: Date.now() / 1000 - 0.3,
+          wasAlternateProtocolAvailable: false,
+          wasFetchedViaSpdy: true,
+          wasNpnNegotiated: true
+        };
+      };
+    }
+  } catch {}
+
+  try {
+    if (window.PublicKeyCredential) {
+      PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable = () => Promise.resolve(false);
+      PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
+    }
+  } catch {}
+
+  try {
+    const promptPerms = new Set(['geolocation', 'camera', 'microphone', 'midi', 'idle-detection', 'storage-access', 'notifications']);
+    if (window.Permissions && Permissions.prototype.query) {
+      const origQuery = Permissions.prototype.query;
+      Permissions.prototype.query = function(desc) {
+        if (desc && promptPerms.has(desc.name)) {
+          return Promise.resolve({ state: 'prompt', onchange: null });
+        }
+        return origQuery.call(this, desc);
+      };
+    }
+  } catch {}
 
   try {
     const ua = navigator.userAgent || '';
@@ -825,7 +880,11 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    color TEXT
+    color TEXT,
+    is_ephemeral INTEGER DEFAULT 0,
+    proxy_server TEXT DEFAULT NULL,
+    user_agent TEXT DEFAULT NULL,
+    identities_json TEXT DEFAULT NULL
   );
 
   CREATE TABLE IF NOT EXISTS workspaces (
@@ -875,8 +934,17 @@ try {
 }
 try {
   db.exec("ALTER TABLE profiles ADD COLUMN is_ephemeral INTEGER DEFAULT 0");
+} catch (e) {
+}
+try {
   db.exec("ALTER TABLE profiles ADD COLUMN proxy_server TEXT DEFAULT NULL");
+} catch (e) {
+}
+try {
   db.exec("ALTER TABLE profiles ADD COLUMN user_agent TEXT DEFAULT NULL");
+} catch (e) {
+}
+try {
   db.exec("ALTER TABLE profiles ADD COLUMN identities_json TEXT DEFAULT NULL");
 } catch (e) {
 }
@@ -925,6 +993,10 @@ function updateProfile(id, name, color, is_ephemeral = false, proxy_server = nul
   db.prepare(
     "UPDATE profiles SET name = ?, color = ?, is_ephemeral = ?, proxy_server = ?, user_agent = ? WHERE id = ?"
   ).run(name, color, is_ephemeral ? 1 : 0, proxy_server, user_agent, id);
+}
+function updateProfileIdentities(id, identities) {
+  const jsonStr = typeof identities === "string" ? identities : JSON.stringify(identities);
+  db.prepare("UPDATE profiles SET identities_json = ? WHERE id = ?").run(jsonStr, id);
 }
 function deleteProfile(id) {
   if (id === "main") throw new Error("Cannot delete main profile");
@@ -1328,14 +1400,17 @@ const IPC_CHANNELS = {
     CLEAR_SITE_DATA: "auth.clearSiteData",
     START_RELAY: "auth.startRelay",
     OPEN_GOOGLE_AUTH: "auth.openGoogleAuth",
+    CONNECT_ACCOUNT: "auth.connectAccount",
+    DISCONNECT_ACCOUNT: "auth.disconnectAccount",
+    SCAN_IDENTITIES: "auth.scanIdentities",
     EXPORT_VAULT: "vault.exportSession",
     IMPORT_VAULT: "vault.importSession"
   },
   EVENTS: {
-    OPEN_IN_NEW_PANE: "open-in-new-pane",
     VIEW_NAVIGATED: "view.navigated",
     VIEW_MEDIA_STATUS: "view.media-status",
     VIEW_CRASHED: "view.crashed",
+    PROFILES_UPDATED: "app.profiles-updated",
     CONTEXT_MENU_NATIVE: "view.context-menu-native",
     VIEW_LOADED: "view.loaded"
   }
@@ -1675,12 +1750,1093 @@ viewRegistry.webContentsIdToPaneId;
 const viewProfile = viewRegistry.viewProfiles;
 viewRegistry.stashedBounds;
 const hibernatedViews = viewRegistry.hibernatedViews;
+async function extractFromMatchingPane(ses, domainFragment, extractorScript, timeoutMs = 800) {
+  try {
+    const allWc = require$$1$3.webContents.getAllWebContents();
+    for (const wc of allWc) {
+      if (wc.isDestroyed()) continue;
+      if (wc.session !== ses) continue;
+      const url = wc.getURL() || "";
+      if (url.includes(domainFragment)) {
+        const evalPromise = wc.executeJavaScript(extractorScript, true);
+        const timeoutPromise = new Promise(
+          (resolve) => setTimeout(() => resolve(null), timeoutMs)
+        );
+        const result = await Promise.race([evalPromise, timeoutPromise]);
+        if (typeof result === "string" && result.trim()) {
+          return result.trim();
+        }
+      }
+    }
+  } catch {
+  }
+  return null;
+}
+const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+const GOOGLE_AUTH_COOKIE_NAMES = /* @__PURE__ */ new Set([
+  "SAPISID",
+  "SID",
+  "SSID",
+  "HSID",
+  "APISID",
+  "OSID",
+  "__Secure-1PAPISID",
+  "__Secure-3PAPISID",
+  "__Secure-1PSID",
+  "__Secure-3PSID",
+  "ACCOUNT_CHOOSER",
+  "LOGIN_INFO",
+  "SIDCC",
+  "__Secure-1PSIDCC",
+  "__Secure-3PSIDCC",
+  "LSID"
+]);
+const googleResolver = {
+  providerId: "google",
+  domains: ["google.com", "accounts.google.com", "google.co", "google.", "youtube.com", "gmail.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const googleCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("google.") || d.includes("accounts.google") || d.includes("youtube.com") || d.includes("gmail.com");
+    });
+    const hasAuthCookie = googleCookies.some((c) => GOOGLE_AUTH_COOKIE_NAMES.has(c.name));
+    if (!hasAuthCookie) return null;
+    let foundEmail;
+    let foundName;
+    let foundAvatar;
+    let foundAliases = [];
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "google.",
+      `(() => {
+          const a = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], a[href*="SignOutOptions"], a[href*="accounts.google.com/SignOutOptions"]');
+          if (a) {
+            const l = a.getAttribute('aria-label') || a.innerText || a.getAttribute('title') || '';
+            const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+            if (m && !m[1].endsWith('@google.com')) return m[1];
+          }
+          return null;
+        })()`
+    ) || await extractFromMatchingPane(
+      ses,
+      "youtube.com",
+      `(() => {
+          try {
+            if (typeof window !== 'undefined' && window.ytcfg && typeof window.ytcfg.get === 'function') {
+              const u = window.ytcfg.get('USER_DISPLAY_NAME') || window.ytcfg.get('LOGGED_IN_USER');
+              if (u && typeof u === 'string' && u.trim()) return u.trim();
+            }
+            const handleEl = document.querySelector('#channel-handle, ytd-channel-name #text, yt-formatted-string#channel-handle, #email, ytd-active-account-header-renderer #email');
+            if (handleEl && handleEl.textContent && handleEl.textContent.trim()) {
+              return handleEl.textContent.trim();
+            }
+            const btn = document.querySelector('button#avatar-btn, ytd-topbar-menu-button-renderer, yt-img-shadow#avatar');
+            if (btn) {
+              const l = btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.getAttribute('alt') || '';
+              const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+              if (m) return m[1];
+            }
+          } catch {}
+          return null;
+        })()`
+    );
+    if (paneEmail) foundEmail = paneEmail;
+    if (!foundEmail || foundAliases.length === 0) {
+      try {
+        const resp = await ses.fetch(
+          "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard",
+          {
+            headers: { "User-Agent": CHROME_UA, Referer: "https://accounts.google.com/" },
+            signal: AbortSignal.timeout(1200)
+          }
+        );
+        if (resp.ok) {
+          const text = await resp.text();
+          const cleaned = text.startsWith(")]}'") ? text.slice(4) : text;
+          const data = JSON.parse(cleaned);
+          const accounts = data?.[1];
+          if (Array.isArray(accounts) && accounts.length > 0) {
+            const primary = accounts[0];
+            if (!foundName) foundName = primary?.[2] || "";
+            if (!foundEmail) foundEmail = primary?.[3] || "";
+            if (!foundAvatar) foundAvatar = primary?.[4] || void 0;
+            if (accounts.length > 1) {
+              foundAliases = accounts.slice(1).map((acc) => acc?.[3]).filter((e) => typeof e === "string" && e.includes("@"));
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    if (!foundEmail) {
+      try {
+        const myAcc = await ses.fetch("https://myaccount.google.com/", {
+          headers: { "User-Agent": CHROME_UA },
+          signal: AbortSignal.timeout(1200)
+        });
+        if (myAcc.ok) {
+          const html = await myAcc.text();
+          const m = html.match(/aria-label="Google Account:[^"]*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (m && !m[1].endsWith("@google.com")) foundEmail = m[1];
+        }
+      } catch {
+      }
+    }
+    if (!foundEmail) {
+      for (const c of googleCookies) {
+        try {
+          const decoded = decodeURIComponent(c.value);
+          const match = decoded.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/);
+          if (match && !match[1].endsWith("@google.com") && !match[1].endsWith("@example.com")) {
+            foundEmail = match[1];
+            break;
+          }
+        } catch {
+        }
+      }
+    }
+    return {
+      id: "google",
+      providerId: "google",
+      email: foundEmail || "Google Account",
+      displayName: foundName || foundEmail || "Google User",
+      avatarUrl: foundAvatar,
+      aliases: foundAliases.length > 0 ? foundAliases : void 0,
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const githubResolver = {
+  providerId: "github",
+  domains: ["github.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const ghCookies = cookies.filter((c) => (c.domain || "").includes("github.com"));
+    const isLoggedIn = ghCookies.some((c) => c.name === "logged_in" && c.value === "yes");
+    const hasSession = ghCookies.some(
+      (c) => c.name === "user_session" || c.name === "__Host-user_session_same_site" || c.name === "dotcom_user"
+    );
+    if (!isLoggedIn && !hasSession) return null;
+    const userCookie = ghCookies.find((c) => c.name === "dotcom_user");
+    let username = userCookie?.value ? decodeURIComponent(userCookie.value) : "";
+    if (!username) {
+      const paneUser = await extractFromMatchingPane(
+        ses,
+        "github.com",
+        `(() => {
+          const m = document.querySelector('meta[name="user-login"]');
+          return m ? m.content : null;
+        })()`
+      );
+      if (paneUser) username = paneUser;
+    }
+    if (!username) {
+      const savedCookie = ghCookies.find((c) => c.name === "saved_user_sessions");
+      if (savedCookie?.value) {
+        const match = decodeURIComponent(savedCookie.value).match(/:([a-zA-Z0-9_-]+)/);
+        if (match) username = match[1];
+      }
+    }
+    return {
+      id: "github",
+      providerId: "github",
+      handle: username ? `@${username}` : "@github_user",
+      email: username ? `@${username}` : "@github_user",
+      displayName: username || "GitHub User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const microsoftResolver = {
+  providerId: "microsoft",
+  domains: ["microsoft.com", "login.microsoftonline.com", "live.com", "office.com", "microsoft365.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const msCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("microsoft.com") || d.includes("login.microsoftonline.com") || d.includes("live.com") || d.includes("office.com") || d.includes("microsoft365.com");
+    });
+    const hasAuth = msCookies.some(
+      (c) => c.name === "ESTSAUTHPERSISTENT" || c.name === "ESTSAUTH" || c.name === "RPSSecAuth" || c.name === "WLSSC" || c.name === "SignInStateCookie" || c.name === "DefaultAnchorMailbox"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const mailboxCookie = msCookies.find((c) => c.name === "DefaultAnchorMailbox");
+    if (mailboxCookie?.value) {
+      try {
+        const decoded = decodeURIComponent(mailboxCookie.value).replace(/^UPN:/i, "");
+        if (decoded.includes("@")) email = decoded;
+      } catch {
+      }
+    }
+    if (!email) {
+      const paneEmail = await extractFromMatchingPane(
+        ses,
+        "microsoft",
+        `(() => {
+          const el = document.querySelector('#mectrl_currentAccount_secondary, [data-test-id="user-email"]');
+          if (el) {
+            const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+            if (m) return m[1];
+          }
+          return null;
+        })()`
+      );
+      if (paneEmail) email = paneEmail;
+    }
+    if (!email) {
+      for (const c of msCookies) {
+        try {
+          const decoded = decodeURIComponent(c.value);
+          const match = decoded.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (match) {
+            email = match[1];
+            break;
+          }
+        } catch {
+        }
+      }
+    }
+    return {
+      id: "microsoft",
+      providerId: "microsoft",
+      email: email || "Microsoft 365",
+      displayName: email || "Microsoft 365",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const appleResolver = {
+  providerId: "apple",
+  domains: ["apple.com", "appleid.apple.com", "icloud.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const apCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("apple.com") || d.includes("icloud.com");
+    });
+    const hasAuth = apCookies.some(
+      (c) => c.name === "myacinfo" || c.name === "acn01" || c.name === "aid-auth" || c.name === "scnt"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "apple.com",
+      `(() => {
+        const el = document.querySelector('[class*="apple-id"], [class*="account-name"]');
+        if (el) {
+          const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "apple",
+      providerId: "apple",
+      handle: email || "Apple ID",
+      email: email || "Apple Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const slackResolver = {
+  providerId: "slack",
+  domains: ["slack.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const slCookies = cookies.filter((c) => (c.domain || "").includes("slack.com"));
+    const hasAuth = slCookies.some((c) => c.name === "d" && c.value.startsWith("xoxd-"));
+    if (!hasAuth) return null;
+    let label = "";
+    const paneLabel = await extractFromMatchingPane(
+      ses,
+      "slack.com",
+      `(() => {
+        try {
+          if (window.boot_data && window.boot_data.user_name) return '@' + window.boot_data.user_name;
+        } catch {}
+        const el = document.querySelector('[data-qa="channel_sidebar_name_you"], [data-qa="workspace_name"]');
+        return el ? el.innerText.trim() : null;
+      })()`
+    );
+    if (paneLabel) label = paneLabel;
+    return {
+      id: "slack",
+      providerId: "slack",
+      handle: label || "Slack Workspace",
+      email: label || "Slack Connected",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const xResolver = {
+  providerId: "x",
+  domains: ["x.com", "twitter.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const xCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("x.com") || d.includes("twitter.com");
+    });
+    const hasAuth = xCookies.some((c) => c.name === "auth_token");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "x.com",
+      `(() => {
+        const btn = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+        if (btn) {
+          const m = (btn.innerText || '').match(/@([a-zA-Z0-9_]+)/);
+          if (m) return '@' + m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    if (!handle) {
+      const ct0 = xCookies.find((c) => c.name === "ct0")?.value || "";
+      if (ct0) {
+        try {
+          const resp = await ses.fetch("https://api.x.com/1.1/account/settings.json", {
+            headers: {
+              authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+              "x-csrf-token": ct0
+            },
+            signal: AbortSignal.timeout(1200)
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data?.screen_name) {
+              handle = `@${data.screen_name}`;
+            }
+          }
+        } catch {
+        }
+      }
+    }
+    if (!handle) {
+      const twid = xCookies.find((c) => c.name === "twid");
+      handle = twid?.value ? `@user_${decodeURIComponent(twid.value).replace(/\D/g, "").slice(-4)}` : "@x_user";
+    }
+    return {
+      id: "x",
+      providerId: "x",
+      handle,
+      email: handle,
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const discordResolver = {
+  providerId: "discord",
+  domains: ["discord.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const dCookies = cookies.filter((c) => (c.domain || "").includes("discord.com"));
+    const hasAuth = dCookies.some(
+      (c) => c.name === "token" || c.name === "__Secure-user_status" || c.name === "OptanonConsent"
+    );
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneName = await extractFromMatchingPane(
+      ses,
+      "discord.com",
+      `(() => {
+        const panel = document.querySelector('[class*="accountProfileCard"], [class*="nameTag"], [class*="avatarWrapper"]');
+        if (panel) {
+          const t = (panel.innerText || '').split('\\n')[0].trim();
+          if (t) return '@' + t.replace(/^@/, '');
+        }
+        return null;
+      })()`
+    );
+    if (paneName) handle = paneName;
+    return {
+      id: "discord",
+      providerId: "discord",
+      handle: handle || "Discord User",
+      email: handle || "Discord Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const gitlabResolver = {
+  providerId: "gitlab",
+  domains: ["gitlab.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const glCookies = cookies.filter((c) => (c.domain || "").includes("gitlab.com"));
+    const hasAuth = glCookies.some(
+      (c) => c.name === "_gitlab_session" || c.name === "remember_user_token"
+    );
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneUser = await extractFromMatchingPane(
+      ses,
+      "gitlab.com",
+      `(() => {
+        try {
+          if (window.gon && window.gon.current_username) return '@' + window.gon.current_username;
+        } catch {}
+        const m = document.querySelector('meta[name="user-login"]');
+        return m && m.content ? '@' + m.content : null;
+      })()`
+    );
+    if (paneUser) handle = paneUser;
+    return {
+      id: "gitlab",
+      providerId: "gitlab",
+      handle: handle || "@gitlab_user",
+      email: handle || "GitLab Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const figmaResolver = {
+  providerId: "figma",
+  domains: ["figma.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const fCookies = cookies.filter((c) => (c.domain || "").includes("figma.com"));
+    const hasAuth = fCookies.some((c) => c.name === "figma.session" || c.name === "figma.auth_token");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "figma.com",
+      `(() => {
+        try {
+          if (window.INITIAL_OPTIONS && window.INITIAL_OPTIONS.user_data) {
+            return window.INITIAL_OPTIONS.user_data.email || window.INITIAL_OPTIONS.user_data.handle;
+          }
+        } catch {}
+        const el = document.querySelector('[data-testid="user-menu-button"], [aria-label*="@"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    if (!handle) {
+      try {
+        const resp = await ses.fetch("https://www.figma.com/api/user/state", {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+            Accept: "application/json"
+          },
+          signal: AbortSignal.timeout(1200)
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data?.meta?.email) {
+            handle = data.meta.email;
+          } else if (data?.meta?.handle) {
+            handle = `@${data.meta.handle}`;
+          }
+        }
+      } catch {
+      }
+    }
+    return {
+      id: "figma",
+      providerId: "figma",
+      handle: handle || "Figma Workspace",
+      email: handle || "Figma Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const notionResolver = {
+  providerId: "notion",
+  domains: ["notion.so", "notion.site"],
+  resolveIdentity: async (ses, cookies) => {
+    const nCookies = cookies.filter((c) => (c.domain || "").includes("notion.so"));
+    const hasAuth = nCookies.some((c) => c.name === "token_v2" || c.name === "notion_user_id");
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "notion.so",
+      `(() => {
+        try {
+          const u = window.__INITIAL_STATE__?.user;
+          if (u && u.email) return u.email;
+        } catch {}
+        const el = document.querySelector('[role="button"][class*="user"], [data-email]');
+        return el ? el.getAttribute('data-email') || el.innerText : null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "notion",
+      providerId: "notion",
+      email: email || "Notion Workspace",
+      handle: email || "Notion Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const linearResolver = {
+  providerId: "linear",
+  domains: ["linear.app"],
+  resolveIdentity: async (ses, cookies) => {
+    const lCookies = cookies.filter((c) => (c.domain || "").includes("linear.app"));
+    const hasAuth = lCookies.some((c) => c.name === "linear:session" || c.name === "koa.sid");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "linear.app",
+      `(() => {
+        const el = document.querySelector('[data-testid="user-profile-button"], [aria-label*="@"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    return {
+      id: "linear",
+      providerId: "linear",
+      handle: handle || "Linear Workspace",
+      email: handle || "Linear Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const chatgptResolver = {
+  providerId: "chatgpt",
+  domains: ["chatgpt.com", "openai.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const oCookies = cookies.filter(
+      (c) => (c.domain || "").includes("chatgpt.com") || (c.domain || "").includes("openai.com")
+    );
+    const hasAuth = oCookies.some(
+      (c) => c.name.includes("session-token") || c.name === "oai-did" || c.name === "__Secure-next-auth.session-token"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "chatgpt.com",
+      `(() => {
+        const btn = document.querySelector('[data-testid="accounts-profile-button"]');
+        if (btn) {
+          const m = (btn.innerText || btn.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    if (!email) {
+      try {
+        const resp = await ses.fetch("https://chatgpt.com/api/auth/session", {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+            Accept: "application/json"
+          },
+          signal: AbortSignal.timeout(1200)
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data?.user?.email) {
+            email = data.user.email;
+          }
+        }
+      } catch {
+      }
+    }
+    return {
+      id: "chatgpt",
+      providerId: "chatgpt",
+      email: email || "ChatGPT Account",
+      handle: email || "OpenAI User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const canvaResolver = {
+  providerId: "canva",
+  domains: ["canva.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const cCookies = cookies.filter((c) => (c.domain || "").includes("canva.com"));
+    const hasAuth = cCookies.some((c) => c.name === "canva_session" || c.name === "c_user");
+    if (!hasAuth) return null;
+    let name = "";
+    const paneName = await extractFromMatchingPane(
+      ses,
+      "canva.com",
+      `(() => {
+        const el = document.querySelector('[data-testid="user-profile-menu"], [aria-label*="Account"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneName) name = paneName;
+    return {
+      id: "canva",
+      providerId: "canva",
+      handle: name || "Canva Workspace",
+      email: name || "Canva Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const vercelResolver = {
+  providerId: "vercel",
+  domains: ["vercel.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const vCookies = cookies.filter((c) => (c.domain || "").includes("vercel.com"));
+    const hasAuth = vCookies.some((c) => c.name === "_vercel_jwt" || c.name === "current_team");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "vercel.com",
+      `(() => {
+        try {
+          const m = document.querySelector('meta[name="user-login"], [data-testid="header-avatar"]');
+          if (m) return m.getAttribute('content') || m.getAttribute('aria-label');
+        } catch {}
+        const el = document.querySelector('[data-testid="user-avatar"]');
+        return el ? el.getAttribute('aria-label') : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    return {
+      id: "vercel",
+      providerId: "vercel",
+      handle: handle ? `@${handle.replace(/^@/, "")}` : "Vercel User",
+      email: handle ? `@${handle.replace(/^@/, "")}` : "Vercel Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const stripeResolver = {
+  providerId: "stripe",
+  domains: ["stripe.com", "dashboard.stripe.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const sCookies = cookies.filter((c) => (c.domain || "").includes("stripe.com"));
+    const hasAuth = sCookies.some((c) => c.name === "merchant" || c.name === "cid" || c.name === "user");
+    if (!hasAuth) return null;
+    let label = "";
+    const paneLabel = await extractFromMatchingPane(
+      ses,
+      "dashboard.stripe.com",
+      `(() => {
+        const el = document.querySelector('[data-test="user-menu-button"], [aria-label*="@"]');
+        if (el) {
+          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+          return el.innerText.trim();
+        }
+        return null;
+      })()`
+    );
+    if (paneLabel) label = paneLabel;
+    return {
+      id: "stripe",
+      providerId: "stripe",
+      handle: label || "Stripe Merchant",
+      email: label || "Stripe Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const atlassianResolver = {
+  providerId: "atlassian",
+  domains: ["atlassian.com", "atlassian.net", "jira.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const aCookies = cookies.filter(
+      (c) => (c.domain || "").includes("atlassian.com") || (c.domain || "").includes("atlassian.net") || (c.domain || "").includes("jira.com")
+    );
+    const hasAuth = aCookies.some(
+      (c) => c.name === "atlassian.account.xsrf" || c.name === "ajs_user_id" || c.name === "cloud.session.token"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "atlassian",
+      `(() => {
+        const el = document.querySelector('[data-testid="profile-avatar-trigger"], [data-testid="header-profile-menu-button"]');
+        if (el) {
+          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+          return el.getAttribute('aria-label');
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "atlassian",
+      providerId: "atlassian",
+      handle: email || "Atlassian / Jira",
+      email: email || "Atlassian Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const ALL_RESOLVERS = [
+  googleResolver,
+  githubResolver,
+  microsoftResolver,
+  appleResolver,
+  slackResolver,
+  xResolver,
+  figmaResolver,
+  notionResolver,
+  linearResolver,
+  chatgptResolver,
+  canvaResolver,
+  vercelResolver,
+  stripeResolver,
+  atlassianResolver,
+  discordResolver,
+  gitlabResolver
+];
+class SessionIdentityService {
+  observedSessions = /* @__PURE__ */ new Set();
+  debounceTimers = /* @__PURE__ */ new Map();
+  lastScanTime = /* @__PURE__ */ new Map();
+  cachedResults = /* @__PURE__ */ new Map();
+  getPartitionForProfile(profileId) {
+    if (!profileId || profileId === "main") return "persist:main";
+    try {
+      const p = getProfileById(profileId);
+      if (p?.is_ephemeral) return profileId;
+    } catch {
+    }
+    return `persist:${profileId}`;
+  }
+  getSessionForProfile(profileId) {
+    const partition = this.getPartitionForProfile(profileId);
+    return require$$1$3.session.fromPartition(partition);
+  }
+  attachCookieObserver(profileId) {
+    const partition = this.getPartitionForProfile(profileId);
+    if (this.observedSessions.has(partition)) return;
+    this.observedSessions.add(partition);
+    try {
+      const ses = require$$1$3.session.fromPartition(partition);
+      ses.cookies.on("changed", (_event, cookie) => {
+        const domain = (cookie?.domain || "").toLowerCase();
+        const matchesAny = ALL_RESOLVERS.some(
+          (r) => r.domains.some((d) => domain.includes(d))
+        );
+        if (!matchesAny) return;
+        this.lastScanTime.delete(profileId);
+        const timerKey = `${profileId}:${domain}`;
+        if (this.debounceTimers.has(timerKey)) {
+          clearTimeout(this.debounceTimers.get(timerKey));
+        }
+        const timer = setTimeout(() => {
+          this.debounceTimers.delete(timerKey);
+          this.scanProfile(profileId, true).catch(() => {
+          });
+        }, 1e3);
+        this.debounceTimers.set(timerKey, timer);
+      });
+    } catch (e) {
+      console.warn(`[IdentityService] Failed to attach observer for ${profileId}:`, e);
+    }
+  }
+  async scanProfile(profileId, force = false) {
+    const now = Date.now();
+    const last = this.lastScanTime.get(profileId) || 0;
+    if (!force && now - last < 5e3 && this.cachedResults.has(profileId)) {
+      return this.cachedResults.get(profileId);
+    }
+    const ses = this.getSessionForProfile(profileId);
+    const cookies = await ses.cookies.get({});
+    const identities = {};
+    await Promise.all(
+      ALL_RESOLVERS.map(async (resolver) => {
+        try {
+          const identity = await resolver.resolveIdentity(ses, cookies);
+          if (identity) {
+            identities[resolver.providerId] = identity;
+          }
+        } catch (err) {
+          console.warn(`[IdentityService] Resolver error for ${resolver.providerId}:`, err);
+        }
+      })
+    );
+    const serialized = JSON.stringify(identities);
+    this.lastScanTime.set(profileId, now);
+    this.cachedResults.set(profileId, identities);
+    const current = getProfileById(profileId);
+    if (current?.is_ephemeral) {
+      this.broadcastProfilesUpdated();
+    } else if (!current || current.identities_json !== serialized) {
+      updateProfileIdentities(profileId, serialized);
+      this.broadcastProfilesUpdated();
+    }
+    return identities;
+  }
+  async scanAllProfiles() {
+    try {
+      const profiles = getProfiles();
+      for (const p of profiles) {
+        this.attachCookieObserver(p.id);
+        await this.scanProfile(p.id);
+      }
+    } catch (err) {
+      console.error("[IdentityService] Failed to scan all profiles:", err);
+    }
+  }
+  async disconnectProvider(profileId, providerId) {
+    try {
+      this.lastScanTime.delete(profileId);
+      this.cachedResults.delete(profileId);
+      const ses = this.getSessionForProfile(profileId);
+      const resolver = ALL_RESOLVERS.find((r) => r.providerId === providerId);
+      if (resolver) {
+        for (const d of resolver.domains) {
+          try {
+            await ses.clearStorageData({
+              origin: `https://${d}`,
+              storages: ["cookies", "localstorage", "serviceworkers", "cachestorage"]
+            });
+          } catch {
+          }
+          const cookies = await ses.cookies.get({ domain: d });
+          for (const c of cookies) {
+            const scheme = c.secure ? "https" : "http";
+            const domain = c.domain?.startsWith(".") ? c.domain.slice(1) : c.domain;
+            try {
+              await ses.cookies.remove(`${scheme}://${domain}${c.path || "/"}`, c.name);
+            } catch {
+            }
+          }
+        }
+      }
+      const p = getProfileById(profileId);
+      let identities = {};
+      if (p?.identities_json) {
+        try {
+          identities = JSON.parse(p.identities_json);
+        } catch {
+        }
+      }
+      delete identities[providerId];
+      updateProfileIdentities(profileId, JSON.stringify(identities));
+      this.broadcastProfilesUpdated();
+      return { success: true };
+    } catch (err) {
+      console.error(`[IdentityService] Failed to disconnect ${providerId}:`, err);
+      return { success: false, error: err.message };
+    }
+  }
+  broadcastProfilesUpdated() {
+    const updated = getProfiles();
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+      global.appOverlayView.webContents.send(
+        IPC_CHANNELS.EVENTS.PROFILES_UPDATED,
+        updated
+      );
+    }
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send(
+        IPC_CHANNELS.EVENTS.PROFILES_UPDATED,
+        updated
+      );
+    }
+  }
+  init() {
+    this.scanAllProfiles().catch(
+      (e) => console.warn("[IdentityService] Background scan failed:", e)
+    );
+  }
+}
+const sessionIdentityService = new SessionIdentityService();
+const DEFAULT_CHROME_VERSION = "144.0.7550.80";
+const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
+const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
+function cleanUserAgent(ua) {
+  if (!ua) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const raw = Array.isArray(ua) ? ua[0] : ua;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
+}
+function isGoogleAuthUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host === "accounts.youtube.com" || host.endsWith(".accounts.youtube.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.includes("accounts.google.com") || lower.includes("accounts.youtube.com") || lower.includes("google.com/gsi/");
+  }
+}
+function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
+  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
+  const major = cleanVersion.split(".")[0] || "144";
+  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
+  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
+  if (!headers || typeof headers !== "object") return {};
+  const result = { ...headers };
+  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
+    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+    result[uaKey2] = FIREFOX_AUTH_UA;
+    for (const key of Object.keys(result)) {
+      if (key.toLowerCase().startsWith("sec-ch-ua")) {
+        delete result[key];
+      }
+    }
+    return result;
+  }
+  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+  result[uaKey] = cleanUserAgent(result[uaKey]);
+  const clientHintKeys = /* @__PURE__ */ new Set([
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-ch-ua-full-version-list"
+  ]);
+  for (const key of Object.keys(result)) {
+    const lower = key.toLowerCase();
+    if (clientHintKeys.has(lower) && lower !== key) {
+      delete result[key];
+    }
+  }
+  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
+  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
+  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
+  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
+  return result;
+}
+let activeAuthWindow = null;
+function isProviderAuthComplete(providerId, url) {
+  const lower = (url || "").toLowerCase();
+  if (lower.startsWith("apposition://") || lower.includes("#oauth-success")) return true;
+  switch (providerId) {
+    case "google":
+      return !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2") && !lower.includes("accounts.google.com/v3/signin");
+    case "github":
+      return lower.includes("github.com") && !lower.includes("/login") && !lower.includes("/session");
+    case "microsoft":
+      return !lower.includes("login.microsoftonline.com") && !lower.includes("login.live.com") && (lower.includes("microsoft.com") || lower.includes("office.com"));
+    case "x":
+      return (lower.includes("twitter.com") || lower.includes("x.com")) && !lower.includes("/login") && !lower.includes("/i/flow/login");
+    case "discord":
+      return lower.includes("discord.com") && !lower.includes("/login");
+    case "gitlab":
+      return lower.includes("gitlab.com") && !lower.includes("/users/sign_in");
+    case "slack":
+      return lower.includes("slack.com") && !lower.includes("/signin");
+    case "apple":
+      return lower.includes("apple.com") && !lower.includes("appleid.apple.com/auth");
+    default:
+      return false;
+  }
+}
+function openConnectAccountModal(options) {
+  try {
+    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+      activeAuthWindow.focus();
+      return { success: true };
+    }
+    const { providerId, loginUrl, profileId = "main", returnUrl } = options;
+    const partition = sessionIdentityService.getPartitionForProfile(profileId);
+    const isGoogle = providerId === "google";
+    const authWin = new require$$1$3.BrowserWindow({
+      width: 540,
+      height: 700,
+      center: true,
+      title: `${providerId.toUpperCase()} Sign-In`,
+      titleBarStyle: "hidden",
+      titleBarOverlay: {
+        color: "#fafaf9",
+        symbolColor: "#121212",
+        height: 36
+      },
+      backgroundColor: "#FFFFFF",
+      show: false,
+      icon: require$$1.join(
+        __dirname,
+        process.platform === "linux" ? "../../../assets/icon.png" : "../../../assets/icon.ico"
+      ),
+      webPreferences: {
+        partition,
+        preload: isGoogle ? require$$1.join(__dirname, "../../preload/authGuard.js") : void 0,
+        sandbox: true,
+        contextIsolation: !isGoogle
+      }
+    });
+    activeAuthWindow = authWin;
+    const authWebContentsId = authWin.webContents.id;
+    registerOAuthPopup(authWebContentsId);
+    if (isGoogle) {
+      try {
+        authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      } catch {
+      }
+    }
+    authWin.once("ready-to-show", () => {
+      if (!authWin.isDestroyed()) authWin.show();
+    });
+    const notifyAndClose = async () => {
+      const identities = await sessionIdentityService.scanProfile(profileId);
+      const identity = identities[providerId];
+      if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+        global.appOverlayView.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      setTimeout(() => {
+        if (!authWin.isDestroyed()) authWin.close();
+      }, 600);
+    };
+    const handleNavigation = (_e, navUrl) => {
+      if (isProviderAuthComplete(providerId, navUrl)) {
+        notifyAndClose();
+      }
+    };
+    authWin.webContents.on("did-navigate", handleNavigation);
+    authWin.webContents.on("did-navigate-in-page", handleNavigation);
+    authWin.once("closed", () => {
+      unregisterOAuthPopup(authWebContentsId);
+      if (activeAuthWindow === authWin) {
+        activeAuthWindow = null;
+      }
+      sessionIdentityService.scanProfile(profileId).catch(() => {
+      });
+    });
+    authWin.loadURL(loginUrl, isGoogle ? { userAgent: FIREFOX_AUTH_UA } : void 0);
+    return { success: true };
+  } catch (err) {
+    console.error(`Failed to open auth modal for ${options.providerId}:`, err);
+    return { success: false, error: err.message };
+  }
+}
 function configureSessionForProfile(profileId) {
   try {
     const profile = getProfileById(profileId);
     if (!profile) return;
     const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
     const ses = require$$1$3.session.fromPartition(partition);
+    sessionIdentityService.attachCookieObserver(profileId);
     if (profile.proxy_server) {
       ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
         console.error(`Failed to set proxy for session ${profileId}:`, e);
@@ -2061,170 +3217,6 @@ function cleanupRelay(state) {
     }
   }
 }
-const DEFAULT_CHROME_VERSION = "144.0.7550.80";
-const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
-const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
-function cleanUserAgent(ua) {
-  if (!ua) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const raw = Array.isArray(ua) ? ua[0] : ua;
-  if (typeof raw !== "string" || !raw.trim()) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
-  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
-}
-function isGoogleAuthUrl(url) {
-  if (!url || typeof url !== "string") return false;
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
-  } catch {
-    const lower = url.toLowerCase();
-    return lower.includes("accounts.google.com") || lower.includes("google.com/gsi/");
-  }
-}
-function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
-  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
-  const major = cleanVersion.split(".")[0] || "144";
-  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
-  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
-  return {
-    "sec-ch-ua": secChUa,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": `"${platform}"`,
-    "sec-ch-ua-full-version-list": secChUaFull
-  };
-}
-function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
-  if (!headers || typeof headers !== "object") return {};
-  const result = { ...headers };
-  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
-    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-    result[uaKey2] = FIREFOX_AUTH_UA;
-    for (const key of Object.keys(result)) {
-      if (key.toLowerCase().startsWith("sec-ch-ua")) {
-        delete result[key];
-      }
-    }
-    return result;
-  }
-  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-  result[uaKey] = cleanUserAgent(result[uaKey]);
-  const clientHintKeys = /* @__PURE__ */ new Set([
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "sec-ch-ua-full-version-list"
-  ]);
-  for (const key of Object.keys(result)) {
-    const lower = key.toLowerCase();
-    if (clientHintKeys.has(lower) && lower !== key) {
-      delete result[key];
-    }
-  }
-  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
-  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
-  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
-  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
-  return result;
-}
-let activeAuthWindow = null;
-function openGoogleAuthModal(options) {
-  try {
-    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
-      activeAuthWindow.focus();
-      return { success: true };
-    }
-    const { url, profileId = "main", paneId, returnUrl, parentWebContentsId } = options;
-    const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
-    const authWin = new require$$1$3.BrowserWindow({
-      width: 520,
-      height: 680,
-      center: true,
-      title: "Google Sign-In",
-      titleBarStyle: "hidden",
-      titleBarOverlay: {
-        color: "#fafaf9",
-        symbolColor: "#121212",
-        height: 36
-      },
-      backgroundColor: "#FFFFFF",
-      show: false,
-      icon: require$$1.join(
-        __dirname,
-        process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
-      ),
-      webPreferences: {
-        partition,
-        // EXPERIMENT (uncommitted): document-start passkey suppression.
-        // contextIsolation disabled so the guard runs in the page's MAIN
-        // world - the only way it is visible to Google's own scripts.
-        // The preload contains nothing but the probe patch: no require,
-        // no bridges, so exposure equals a page-level <script>.
-        preload: require$$1.join(__dirname, "../preload/authGuard.js"),
-        sandbox: true,
-        contextIsolation: false
-      }
-    });
-    activeAuthWindow = authWin;
-    const authWebContentsId = authWin.webContents.id;
-    registerOAuthPopup(authWebContentsId);
-    try {
-      authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-    } catch {
-    }
-    authWin.once("ready-to-show", () => {
-      if (!authWin.isDestroyed()) authWin.show();
-    });
-    const notifyAndClose = () => {
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.auth-completed", {
-          profileId,
-          paneId,
-          returnUrl,
-          success: true
-        });
-      }
-      if (parentWebContentsId) {
-        const parentWc = require$$1$3.webContents.fromId(parentWebContentsId);
-        if (parentWc && !parentWc.isDestroyed()) {
-          try {
-            if (returnUrl) {
-              parentWc.loadURL(returnUrl);
-            } else {
-              parentWc.reload();
-            }
-          } catch {
-          }
-        }
-      }
-      setTimeout(() => {
-        if (!authWin.isDestroyed()) authWin.close();
-      }, 500);
-    };
-    authWin.webContents.on("did-navigate", (_e, navUrl) => {
-      const lower = (navUrl || "").toLowerCase();
-      const isAuthCompleted = lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success") || returnUrl && lower.startsWith(returnUrl.toLowerCase()) || !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2");
-      if (isAuthCompleted && !lower.includes("accounts.google.com/v3/signin")) {
-        notifyAndClose();
-      }
-    });
-    authWin.once("closed", () => {
-      unregisterOAuthPopup(authWebContentsId);
-      if (activeAuthWindow === authWin) {
-        activeAuthWindow = null;
-      }
-    });
-    authWin.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
-    return { success: true };
-  } catch (err) {
-    console.error("Failed to open Google Auth modal:", err);
-    return { success: false, error: err.message };
-  }
-}
 function initAuthIpc() {
   require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
@@ -2257,9 +3249,42 @@ function initAuthIpc() {
     }
   );
   require$$1$3.ipcMain.handle(
+    IPC_CHANNELS.AUTH.CONNECT_ACCOUNT,
+    async (_event, options) => {
+      return openConnectAccountModal(options);
+    }
+  );
+  require$$1$3.ipcMain.handle(
+    IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT,
+    async (_event, providerId, profileId = "main") => {
+      return sessionIdentityService.disconnectProvider(profileId, providerId);
+    }
+  );
+  require$$1$3.ipcMain.handle(
+    IPC_CHANNELS.AUTH.SCAN_IDENTITIES,
+    async (_event, profileId) => {
+      try {
+        if (profileId) {
+          const identities = await sessionIdentityService.scanProfile(profileId);
+          return { success: true, identities };
+        }
+        await sessionIdentityService.scanAllProfiles();
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  require$$1$3.ipcMain.handle(
     IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH,
     async (_event, options) => {
-      return openGoogleAuthModal(options);
+      return openConnectAccountModal({
+        providerId: "google",
+        loginUrl: options.url,
+        profileId: options.profileId,
+        paneId: options.paneId,
+        returnUrl: options.returnUrl
+      });
     }
   );
   require$$1$3.ipcMain.handle(
@@ -2748,33 +3773,21 @@ function evaluateWindowOpenRequest(url, disposition, features) {
   const isPopup = Boolean(features) && (features.includes("width=") || features.includes("height="));
   const isGoogle = isGoogleOAuthEndpoint(urlLower);
   const isSSO = isOAuthOrAuthEndpoint(urlLower);
-  if (isGoogle) {
-    return {
-      type: "SYSTEM_AUTH_RELAY",
-      url
-    };
-  }
   if (SYSTEM_PROTOCOLS.some((proto) => urlLower.startsWith(proto))) {
     return {
       type: "OPEN_SYSTEM_BROWSER",
       url
     };
   }
-  if (disposition === "new-window" || isPopup || isBlank) {
+  if (disposition === "new-window" || isPopup || isBlank || isGoogle || isSSO) {
     return {
       type: "ALLOW_OAUTH_POPUP",
       width: 600,
       height: 720,
       autoHideMenuBar: true,
       sandbox: true,
-      contextIsolation: true,
-      isGoogle: false
-    };
-  }
-  if (isSSO) {
-    return {
-      type: "NAVIGATE_CURRENT_PANE",
-      url
+      contextIsolation: false,
+      isGoogle
     };
   }
   return {
@@ -3243,10 +4256,13 @@ function bindViewEvents(paneId, view, profileId) {
   });
   view.webContents.on("will-navigate", (event, url) => {
     if (!isGoogleAuthUrl(url)) return;
+    if (view.webContents.getUserAgent() === FIREFOX_AUTH_UA) return;
     event.preventDefault();
     purgeGoogleAuthCookies(profileId).then(() => {
-      view.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      return view.webContents.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.setUserAgent(FIREFOX_AUTH_UA);
+        return view.webContents.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
+      }
     }).catch(() => {
     });
   });
@@ -20704,22 +21720,26 @@ class AudioArbiterService {
   }
 }
 const audioArbiter = new AudioArbiterService();
-const AUTH_URL_FRAGMENTS = ["accounts.google.com", "google.com/gsi", "firebaseapp.com", "/login", "auth"];
 const panes = /* @__PURE__ */ new Map();
-function isAuthUrl(url) {
-  const u = url.toLowerCase();
-  return AUTH_URL_FRAGMENTS.some((f) => u.includes(f));
-}
 function forwardGuestEvents(win, paneId, view, partition) {
   const ov = () => global.appOverlayView?.webContents;
   const wc = view.webContents;
-  const nav = () => {
+  const nav = (_e, navUrl) => {
+    const currentUrl = navUrl || wc.getURL();
+    if (currentUrl && currentUrl.includes("accounts.google.com/v3/signin/rejected")) {
+      const pId = partition ? partition.replace(/^persist:/, "") : "main";
+      purgeGoogleAuthCookies(pId).then(() => {
+        if (!wc.isDestroyed()) wc.loadURL("https://accounts.google.com/");
+      }).catch(() => {
+      });
+      return;
+    }
     const title = wc.getTitle();
     const unread = extractUnreadBadgeFromTitle(title);
     ov()?.send("pane.unread-badge", { paneId, ...unread });
     ov()?.send(IPC_CHANNELS.EVENTS.VIEW_NAVIGATED, {
       paneId,
-      url: wc.getURL(),
+      url: currentUrl,
       title,
       canGoBack: wc.navigationHistory?.canGoBack?.() ?? false,
       canGoForward: wc.navigationHistory?.canGoForward?.() ?? false
@@ -20727,7 +21747,7 @@ function forwardGuestEvents(win, paneId, view, partition) {
   };
   wc.on("did-navigate", nav);
   wc.on("did-navigate-in-page", nav);
-  wc.on("page-title-updated", nav);
+  wc.on("page-title-updated", () => nav());
   wc.on("did-start-loading", () => ov()?.send("pane.load-start", { paneId }));
   wc.on("did-stop-loading", () => ov()?.send("pane.loaded", { paneId }));
   wc.on(
@@ -20766,18 +21786,7 @@ function forwardGuestEvents(win, paneId, view, partition) {
     });
   });
   wc.on("before-input-event", (event, input) => handleBeforeInputEvent(wc, event, input));
-  wc.setWindowOpenHandler((details) => {
-    if (isAuthUrl(details.url)) {
-      wc.loadURL(details.url);
-      return { action: "deny" };
-    }
-    const currentUrl = wc.getURL();
-    if (details.url === currentUrl || details.url.startsWith(currentUrl + "#")) {
-      return { action: "deny" };
-    }
-    ov()?.send(IPC_CHANNELS.EVENTS.OPEN_IN_NEW_PANE, details.url);
-    return { action: "deny" };
-  });
+  handleWebContentsWindowOpen(wc);
 }
 function createPane(win, req) {
   if (panes.has(req.paneId)) destroyPane(win, req.paneId);
@@ -20800,6 +21809,19 @@ function createPane(win, req) {
   view.webContents.session.setPermissionRequestHandler(
     (_, perm, cb) => cb(["clipboard-read", "clipboard-sanitized-write", "media", "display-capture", "fullscreen"].includes(perm))
   );
+  configureWebAuthnForSession(view.webContents.session);
+  try {
+    if (!view.webContents.debugger.isAttached()) {
+      view.webContents.debugger.attach("1.3");
+      view.webContents.debugger.sendCommand("Page.enable").catch(() => {
+      });
+      view.webContents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {
+        source: ANTI_DETECTION_SCRIPT
+      }).catch(() => {
+      });
+    }
+  } catch {
+  }
   bindGuestCursor(view.webContents);
   forwardGuestEvents(win, req.paneId, view, req.partition);
   panes.set(req.paneId, view);
@@ -20829,6 +21851,30 @@ function destroyPane(win, paneId) {
   panes.delete(paneId);
   if (!view.webContents.isDestroyed()) view.webContents.close();
 }
+function updatePaneProfile(win, paneId, profileId) {
+  const existing = panes.get(paneId);
+  if (!existing) return;
+  const currentUrl = existing.webContents.getURL();
+  const userAgent = existing.webContents.getUserAgent();
+  const bounds = existing.getBounds();
+  let partitionString = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
+  try {
+    const p = getProfileById(profileId);
+    if (p && p.is_ephemeral) partitionString = profileId;
+  } catch {
+  }
+  destroyPane(win, paneId);
+  createPane(win, {
+    paneId,
+    url: currentUrl || "https://google.com",
+    partition: partitionString,
+    userAgent,
+    rect: bounds
+  });
+  sessionIdentityService.attachCookieObserver(profileId);
+  sessionIdentityService.scanProfile(profileId).catch(() => {
+  });
+}
 function findPaneIdBySender(senderId) {
   for (const [id, view] of panes.entries()) {
     if (view.webContents.id === senderId) return id;
@@ -20847,6 +21893,10 @@ function initPaneLifecycle(getWindow) {
   require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.DESTROY_PANE, (_e, paneId) => {
     const w = getWindow();
     if (w) destroyPane(w, paneId);
+  });
+  require$$1$3.ipcMain.on("view.updateProfile", (_e, paneId, profileId) => {
+    const w = getWindow();
+    if (w) updatePaneProfile(w, paneId, profileId);
   });
   require$$1$3.ipcMain.on(IPC_CHANNELS.VIEW.NAVIGATE, (_e, id, url) => {
     if (!url?.trim()) return;
@@ -20923,6 +21973,7 @@ if (!gotTheLock) {
     initDbIpc();
     initLicensingIpc();
     initAuthIpc();
+    sessionIdentityService.init();
     initCommunicatorIpc(() => global.mainWindow || void 0);
     initDiagnosticsIpc(logFile);
     initDevCommandBridge(isDevMode);
@@ -20954,7 +22005,11 @@ if (!gotTheLock) {
         syncAppOverlayBounds(win);
       }
     };
-    overlay.webContents.once("dom-ready", showWindow);
+    overlay.webContents.once("dom-ready", () => {
+      showWindow();
+      sessionIdentityService.scanAllProfiles().catch(() => {
+      });
+    });
     setTimeout(showWindow, 1200);
     win.on("resize", () => {
       syncAppOverlayBounds(win);
