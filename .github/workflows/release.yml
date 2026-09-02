@@ -32,6 +32,12 @@ jobs:
         with:
           node-version: 24
 
+      - name: Setup .NET SDK (Windows Velopack)
+        if: matrix.platform == 'win'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Install Dependencies
         run: npm install --legacy-peer-deps
 
@@ -48,18 +54,36 @@ jobs:
             npx electron-builder --mac --arm64 --x64 -c electron-builder.yml -c.npmRebuild=false --publish never || (sleep 10 && npx electron-builder --mac --arm64 --x64 -c electron-builder.yml -c.npmRebuild=false --publish never)
           fi
           if [ "${{ matrix.platform }}" = "win" ]; then
-            npx electron-builder --win --x64 -c electron-builder.yml -c.npmRebuild=false --publish never
+            # 1. Build unpacked electron distribution
+            npx electron-builder --win --dir -c electron-builder.yml -c.npmRebuild=false
+            
+            # 2. Install Velopack CLI
+            dotnet tool install -g vpk
+            
+            # 3. Format clean semver version string (e.g. v1.2.3 -> 1.2.3)
+            VERSION_RAW="${{ github.ref_name }}"
+            VERSION="${VERSION_RAW#v}"
+            
+            # 4. Pull previous release metadata for binary delta generation
+            vpk download github --repoUrl https://github.com/jvondev/apposition-releases --outputDir dist/releases || true
+            
+            # 5. Pack with Velopack
+            vpk pack --packId Apposition --packVersion "$VERSION" --packDir dist/win-unpacked --mainExe Apposition.exe --icon assets/icon.ico --outputDir dist/releases
+            
+            # 6. Upload Velopack release assets & binary deltas to GitHub
+            vpk upload github --repoUrl https://github.com/jvondev/apposition-releases --token "${{ secrets.GITHUB_TOKEN }}" --publish --releaseName "${{ github.ref_name }}" --outputDir dist/releases
           fi
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload Release Assets
+      - name: Upload Release Assets (Mac & Linux)
+        if: matrix.platform != 'win'
         uses: softprops/action-gh-release@v2
         with:
           overwrite_files: true
           files: |
-            dist/*.exe
             dist/*.dmg
             dist/*.AppImage
             dist/*.deb
