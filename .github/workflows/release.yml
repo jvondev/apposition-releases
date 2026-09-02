@@ -70,8 +70,8 @@ jobs:
             # 5. Pack with Velopack
             vpk pack --packId Apposition --packVersion "$VERSION" --packDir dist/win-unpacked --mainExe Apposition.exe --icon assets/icon.ico --outputDir dist/releases
             
-            # 6. Upload Velopack release assets & binary deltas to GitHub
-            vpk upload github --repoUrl https://github.com/jvondev/apposition-releases --token "${{ secrets.GITHUB_TOKEN }}" --publish --releaseName "${{ github.ref_name }}" --outputDir dist/releases
+            # 6. Upload Velopack release assets & binary deltas to GitHub (merge into tag release)
+            vpk upload github --repoUrl https://github.com/jvondev/apposition-releases --token "${{ secrets.GITHUB_TOKEN }}" --tag "${{ github.ref_name }}" --merge --publish --outputDir dist/releases
           fi
         shell: bash
         env:
