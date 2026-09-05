@@ -1201,6 +1201,10 @@ function initCommunicatorTables() {
   seedDefaultCommunicatorData();
 }
 function seedDefaultCommunicatorData() {
+  const mainProf = db.prepare("SELECT id FROM profiles WHERE id = 'main'").get();
+  if (!mainProf) {
+    db.prepare("INSERT INTO profiles (id, name, color) VALUES ('main', 'Main', '#3b82f6')").run();
+  }
   const stackCount = db.prepare("SELECT COUNT(*) as c FROM communicator_stacks").get().c;
   if (stackCount === 0) {
     const now = Date.now();
@@ -1281,10 +1285,24 @@ function deleteCommunicatorStack(id) {
   db.prepare("DELETE FROM communicator_stacks WHERE id = ?").run(id);
 }
 function createCommunicatorApp(id, stackId, profileId, name, url, icon) {
-  const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM communicator_apps WHERE stack_id = ?").get(stackId).m;
+  let targetStackId = stackId;
+  const stackRow = db.prepare("SELECT id FROM communicator_stacks WHERE id = ?").get(targetStackId);
+  if (!stackRow) {
+    const first = db.prepare("SELECT id FROM communicator_stacks ORDER BY sort_order ASC LIMIT 1").get();
+    targetStackId = first ? first.id : "main_stack";
+    if (!first) createCommunicatorStack("main_stack", "Primary", "P");
+  }
+  let targetProfileId = profileId || "main";
+  const profileRow = db.prepare("SELECT id FROM profiles WHERE id = ?").get(targetProfileId);
+  if (!profileRow) {
+    const mainProf = db.prepare("SELECT id FROM profiles WHERE id = 'main'").get();
+    if (!mainProf) db.prepare("INSERT INTO profiles (id, name, color) VALUES ('main', 'Main', '#3b82f6')").run();
+    targetProfileId = "main";
+  }
+  const maxOrder = db.prepare("SELECT COALESCE(MAX(sort_order), 0) as m FROM communicator_apps WHERE stack_id = ?").get(targetStackId)?.m ?? 0;
   db.prepare(
     "INSERT INTO communicator_apps (id, stack_id, profile_id, name, url, icon, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-  ).run(id, stackId, profileId || "main", name, url, icon || "globe", maxOrder + 1, Date.now());
+  ).run(id, targetStackId, targetProfileId, name, url, icon || "globe", maxOrder + 1, Date.now());
 }
 function updateCommunicatorApp(id, updates) {
   const current = db.prepare("SELECT * FROM communicator_apps WHERE id = ?").get(id);
@@ -1292,8 +1310,14 @@ function updateCommunicatorApp(id, updates) {
   const name = updates.name ?? current.name;
   const url = updates.url ?? current.url;
   const icon = updates.icon ?? current.icon;
-  const profileId = updates.profileId ?? current.profile_id;
-  const stackId = updates.stackId ?? current.stack_id;
+  let profileId = updates.profileId ?? current.profile_id;
+  if (updates.profileId && !db.prepare("SELECT id FROM profiles WHERE id = ?").get(profileId)) {
+    profileId = current.profile_id;
+  }
+  let stackId = updates.stackId ?? current.stack_id;
+  if (updates.stackId && !db.prepare("SELECT id FROM communicator_stacks WHERE id = ?").get(stackId)) {
+    stackId = current.stack_id;
+  }
   db.prepare("UPDATE communicator_apps SET name = ?, url = ?, icon = ?, profile_id = ?, stack_id = ? WHERE id = ?").run(
     name,
     url,
@@ -4072,62 +4096,124 @@ class CommunicatorService {
 const communicatorService = new CommunicatorService();
 function initCommunicatorIpc(getWindow) {
   electron.ipcMain.handle("communicator.getState", async () => {
-    return getCommunicatorState();
+    try {
+      return getCommunicatorState();
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to get state:", err);
+      return { stacks: [], providers: [] };
+    }
   });
   electron.ipcMain.handle("communicator.createStack", async (_e, id, name, icon) => {
-    createCommunicatorStack(id, name, icon);
-    return { success: true };
+    try {
+      createCommunicatorStack(id, name, icon);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to create stack:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle("communicator.updateStack", async (_e, id, name, icon) => {
-    updateCommunicatorStack(id, name, icon);
-    return { success: true };
+    try {
+      updateCommunicatorStack(id, name, icon);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to update stack:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle("communicator.deleteStack", async (_e, id) => {
-    deleteCommunicatorStack(id);
-    return { success: true };
+    try {
+      deleteCommunicatorStack(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete stack:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle(
     "communicator.createApp",
     async (_e, id, stackId, profileId, name, url, icon) => {
-      createCommunicatorApp(id, stackId, profileId, name, url, icon);
-      return { success: true };
+      try {
+        createCommunicatorApp(id, stackId, profileId, name, url, icon);
+        return { success: true };
+      } catch (err) {
+        console.error("[Communicator IPC] Failed to create app:", err);
+        return { success: false, error: String(err) };
+      }
     }
   );
   electron.ipcMain.handle(
     "communicator.updateApp",
     async (_e, id, updates) => {
-      updateCommunicatorApp(id, updates);
-      return { success: true };
+      try {
+        updateCommunicatorApp(id, updates);
+        return { success: true };
+      } catch (err) {
+        console.error("[Communicator IPC] Failed to update app:", err);
+        return { success: false, error: String(err) };
+      }
     }
   );
   electron.ipcMain.handle("communicator.deleteApp", async (_e, id) => {
-    const win = getWindow();
-    communicatorService.destroyView(win, id);
-    deleteCommunicatorApp(id);
-    return { success: true };
+    try {
+      const win = getWindow();
+      communicatorService.destroyView(win, id);
+      deleteCommunicatorApp(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete app:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle("communicator.saveProvider", async (_e, provider) => {
-    saveCommunicatorProvider(provider);
-    return { success: true };
+    try {
+      saveCommunicatorProvider(provider);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to save provider:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle("communicator.deleteProvider", async (_e, id) => {
-    deleteCommunicatorProvider(id);
-    return { success: true };
+    try {
+      deleteCommunicatorProvider(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete provider:", err);
+      return { success: false, error: String(err) };
+    }
   });
   electron.ipcMain.handle("communicator.captureSnapshot", async (_e, appId) => {
-    return communicatorService.captureAppSnapshot(appId);
+    try {
+      return await communicatorService.captureAppSnapshot(appId);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to capture snapshot:", err);
+      return null;
+    }
   });
   electron.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
-    const win = getWindow();
-    if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
+    try {
+      const win = getWindow();
+      if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to show drawer view:", err);
+    }
   });
   electron.ipcMain.on("communicator.hideDrawer", () => {
-    const win = getWindow();
-    if (win) communicatorService.hideDrawerView(win);
+    try {
+      const win = getWindow();
+      if (win) communicatorService.hideDrawerView(win);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to hide drawer view:", err);
+    }
   });
   electron.ipcMain.on("communicator.destroyView", (_e, appId) => {
-    const win = getWindow();
-    communicatorService.destroyView(win, appId);
+    try {
+      const win = getWindow();
+      communicatorService.destroyView(win, appId);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to destroy view:", err);
+    }
   });
 }
 const AUTH_SURFACE_URL = "https://accounts.google.com";
