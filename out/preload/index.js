@@ -69,10 +69,13 @@ const IPC_CHANNELS = {
   LICENSING: {
     ACTIVATE: "licensing.activate",
     VALIDATE: "licensing.validate",
+    DEACTIVATE: "licensing.deactivate",
     GET_KEY: "licensing.getKey",
     GET_STATE: "licensing.getState",
     CHECK_PREMIUM: "licensing.checkPremium",
     IS_DEV: "licensing.isDev",
+    GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
+    SAVE_ATTRIBUTION: "licensing.saveAttribution",
     CHECK_FOR_UPDATES: "updater.check"
   },
   AUTH: {
@@ -123,54 +126,18 @@ function createIpcClient(ipcRenderer) {
       createWorkspace: (id, name, icon) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_WORKSPACE, id, name, icon),
       updateWorkspace: (id, name, icon) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_WORKSPACE, id, name, icon),
       deleteWorkspace: (id) => ipcRenderer.invoke(IPC_CHANNELS.DB.DELETE_WORKSPACE, id),
-      setWorkspaceDefaultProfile: (id, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE,
-        id,
-        profileId
-      ),
-      setTabDefaultProfile: (id, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE,
-        id,
-        profileId
-      ),
-      updatePaneProfilesForWorkspace: (workspaceId, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE,
-        workspaceId,
-        profileId
-      ),
-      updatePaneProfilesForTab: (tabId, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB,
-        tabId,
-        profileId
-      ),
+      setWorkspaceDefaultProfile: (id, profileId) => ipcRenderer.invoke(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, id, profileId),
+      setTabDefaultProfile: (id, profileId) => ipcRenderer.invoke(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, id, profileId),
+      updatePaneProfilesForWorkspace: (workspaceId, profileId) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE, workspaceId, profileId),
+      updatePaneProfilesForTab: (tabId, profileId) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, tabId, profileId),
       getTabs: (workspaceId) => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_TABS, workspaceId),
       createTab: (id, workspaceId, name) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_TAB, id, workspaceId, name),
       updateTab: (id, name, customName) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_TAB, id, name, customName),
       deleteTab: (id) => ipcRenderer.invoke(IPC_CHANNELS.DB.DELETE_TAB, id),
-      moveNodeToTab: (nodeId, targetTabId) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.MOVE_NODE_TO_TAB,
-        nodeId,
-        targetTabId
-      ),
+      moveNodeToTab: (nodeId, targetTabId) => ipcRenderer.invoke(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, nodeId, targetTabId),
       getProfiles: () => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_PROFILES),
-      createProfile: (id, name, color, is_ephemeral, proxy_server, user_agent) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.CREATE_PROFILE,
-        id,
-        name,
-        color,
-        is_ephemeral,
-        proxy_server,
-        user_agent
-      ),
-      updateProfile: (id, name, color, is_ephemeral, proxy_server, user_agent) => ipcRenderer.invoke(
-        IPC_CHANNELS.DB.UPDATE_PROFILE,
-        id,
-        name,
-        color,
-        is_ephemeral,
-        proxy_server,
-        user_agent
-      ),
+      createProfile: (id, name, color, is_ephemeral, proxy_server, user_agent) => ipcRenderer.invoke(IPC_CHANNELS.DB.CREATE_PROFILE, id, name, color, is_ephemeral, proxy_server, user_agent),
+      updateProfile: (id, name, color, is_ephemeral, proxy_server, user_agent) => ipcRenderer.invoke(IPC_CHANNELS.DB.UPDATE_PROFILE, id, name, color, is_ephemeral, proxy_server, user_agent),
       deleteProfile: (id) => ipcRenderer.invoke(IPC_CHANNELS.DB.DELETE_PROFILE, id),
       getNodes: (tabId) => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_NODES, tabId),
       saveNode: (node) => ipcRenderer.send(IPC_CHANNELS.DB.SAVE_NODE, node),
@@ -182,11 +149,7 @@ function createIpcClient(ipcRenderer) {
       maximize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.MAXIMIZE),
       close: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.CLOSE),
       openExternal: (url) => ipcRenderer.send(IPC_CHANNELS.WINDOW.OPEN_EXTERNAL, url),
-      setIgnoreMouseEvents: (ignore, options) => ipcRenderer.send(
-        IPC_CHANNELS.WINDOW.SET_IGNORE_MOUSE_EVENTS,
-        ignore,
-        options
-      ),
+      setIgnoreMouseEvents: (ignore, options) => ipcRenderer.send(IPC_CHANNELS.WINDOW.SET_IGNORE_MOUSE_EVENTS, ignore, options),
       setWakeRegions: (rects) => ipcRenderer.send(IPC_CHANNELS.WINDOW.SET_WAKE_REGIONS, rects),
       openInternalDevTools: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.OPEN_INTERNAL_DEVTOOLS),
       closeInternalDevTools: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.CLOSE_INTERNAL_DEVTOOLS)
@@ -195,11 +158,7 @@ function createIpcClient(ipcRenderer) {
       reload: (paneId, hard) => ipcRenderer.send(IPC_CHANNELS.VIEW.RELOAD, paneId, hard),
       screenshot: (paneId) => ipcRenderer.send(IPC_CHANNELS.VIEW.SCREENSHOT, paneId),
       getSearchSuggestions: (query) => ipcRenderer.invoke(IPC_CHANNELS.VIEW.GET_SEARCH_SUGGESTIONS, query),
-      registerWebContents: (paneId, wcId) => ipcRenderer.send(
-        IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS,
-        paneId,
-        wcId
-      ),
+      registerWebContents: (paneId, wcId) => ipcRenderer.send(IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS, paneId, wcId),
       createPane: (req) => ipcRenderer.send(IPC_CHANNELS.VIEW.CREATE_PANE, req),
       setBounds: (paneId, rect) => ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, rect),
       destroyPane: (paneId) => ipcRenderer.send(IPC_CHANNELS.VIEW.DESTROY_PANE, paneId),
@@ -210,42 +169,24 @@ function createIpcClient(ipcRenderer) {
     licensing: {
       activate: (key) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.ACTIVATE, key),
       validate: (key) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.VALIDATE, key),
+      deactivate: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.DEACTIVATE),
       getKey: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_KEY),
       getState: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_STATE),
       checkPremium: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.CHECK_PREMIUM),
       isDev: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.IS_DEV),
+      getCheckoutUrl: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL),
+      saveAttribution: (ref, affiliateId) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION, ref, affiliateId),
       checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.CHECK_FOR_UPDATES)
     },
     auth: {
-      clearSiteData: (origin, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
-        origin,
-        profileId
-      ),
-      startRelay: (targetUrl, profileId, paneId) => ipcRenderer.invoke(
-        IPC_CHANNELS.AUTH.START_RELAY,
-        targetUrl,
-        profileId,
-        paneId
-      ),
+      clearSiteData: (origin, profileId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.CLEAR_SITE_DATA, origin, profileId),
+      startRelay: (targetUrl, profileId, paneId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.START_RELAY, targetUrl, profileId, paneId),
       openGoogleAuth: (options) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH, options),
       connectAccount: (options) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.CONNECT_ACCOUNT, options),
-      disconnectAccount: (providerId, profileId) => ipcRenderer.invoke(
-        IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT,
-        providerId,
-        profileId
-      ),
+      disconnectAccount: (providerId, profileId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT, providerId, profileId),
       scanIdentities: (profileId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.SCAN_IDENTITIES, profileId),
-      exportVault: (profileId, secretKey) => ipcRenderer.invoke(
-        IPC_CHANNELS.AUTH.EXPORT_VAULT,
-        profileId,
-        secretKey
-      ),
-      importVault: (encryptedPayload, secretKey) => ipcRenderer.invoke(
-        IPC_CHANNELS.AUTH.IMPORT_VAULT,
-        encryptedPayload,
-        secretKey
-      )
+      exportVault: (profileId, secretKey) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.EXPORT_VAULT, profileId, secretKey),
+      importVault: (encryptedPayload, secretKey) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.IMPORT_VAULT, encryptedPayload, secretKey)
     },
     metrics: {
       memory: () => ipcRenderer.invoke(IPC_CHANNELS.METRICS.MEMORY),
@@ -788,10 +729,13 @@ const api = {
   // Licensing & Updates
   activateLicenseKey: client.licensing.activate,
   validateLicenseKey: client.licensing.validate,
+  deactivateLicenseKey: client.licensing.deactivate,
   getLicenseKey: client.licensing.getKey,
   getLicenseState: client.licensing.getState,
   checkPremiumStatus: client.licensing.checkPremium,
   isDev: client.licensing.isDev,
+  getCheckoutUrl: client.licensing.getCheckoutUrl,
+  saveAttribution: client.licensing.saveAttribution,
   checkForUpdates: client.licensing.checkForUpdates,
   // Auth & Session
   clearSiteData: client.auth.clearSiteData,

@@ -7,8 +7,8 @@ const fs = require("fs");
 const child_process = require("child_process");
 require("readline");
 const Database = require("better-sqlite3");
-const os = require("os");
 const crypto = require("crypto");
+const os = require("os");
 const http = require("http");
 const Sentry = require("@sentry/electron/main");
 const promises = require("fs/promises");
@@ -60,6 +60,9 @@ const BENIGN_NOISE_PATTERNS = [
 ];
 const SECRET_PATTERNS = [
   [/polar_[a-zA-Z0-9_-]{20,}/g, "polar_[REDACTED]"],
+  [/fs_[a-zA-Z0-9_-]{16,}/g, "fs_[REDACTED]"],
+  [/sk_[a-zA-Z0-9_-]{16,}/g, "sk_[REDACTED]"],
+  [/pk_[a-zA-Z0-9_-]{16,}/g, "pk_[REDACTED]"],
   [
     /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g,
     "[UUID-KEY-REDACTED]"
@@ -1408,10 +1411,13 @@ const IPC_CHANNELS = {
   LICENSING: {
     ACTIVATE: "licensing.activate",
     VALIDATE: "licensing.validate",
+    DEACTIVATE: "licensing.deactivate",
     GET_KEY: "licensing.getKey",
     GET_STATE: "licensing.getState",
     CHECK_PREMIUM: "licensing.checkPremium",
-    IS_DEV: "licensing.isDev"
+    IS_DEV: "licensing.isDev",
+    GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
+    SAVE_ATTRIBUTION: "licensing.saveAttribution"
   },
   AUTH: {
     CLEAR_SITE_DATA: "auth.clearSiteData",
@@ -1433,34 +1439,32 @@ const IPC_CHANNELS = {
   }
 };
 function getMachineKeyFilePath() {
-  const userDataPath = electron.app.getPath("userData");
-  return path.join(userDataPath, "apposition_machine.key");
+  try {
+    const userDataPath = electron.app.getPath("userData");
+    return path.join(userDataPath, "apposition_machine.key");
+  } catch {
+    return path.join(process.cwd(), "apposition_machine.key");
+  }
 }
 function getOrCreateMachineKey() {
   const keyPath = getMachineKeyFilePath();
   if (fs.existsSync(keyPath)) {
     try {
       const hex = fs.readFileSync(keyPath, "utf8").trim();
-      if (hex.length === 64) {
-        return Buffer.from(hex, "hex");
-      }
-    } catch (e) {
-      console.error("Failed to read machine key", e);
+      if (hex.length === 64) return Buffer.from(hex, "hex");
+    } catch {
     }
   }
   const newKey = crypto.randomBytes(32);
   try {
-    const userDataPath = electron.app.getPath("userData");
-    if (!fs.existsSync(userDataPath)) {
-      fs.mkdirSync(userDataPath, { recursive: true });
-    }
+    const dir = path.join(keyPath, "..");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(keyPath, newKey.toString("hex"), "utf8");
-  } catch (e) {
-    console.error("Failed to write machine key", e);
+  } catch {
   }
   return newKey;
 }
-function encrypt(text) {
+function fallbackEncrypt(text) {
   try {
     const key = getOrCreateMachineKey();
     const iv = crypto.randomBytes(12);
@@ -1468,19 +1472,16 @@ function encrypt(text) {
     let encrypted = cipher.update(text, "utf8", "hex");
     encrypted += cipher.final("hex");
     const authTag = cipher.getAuthTag().toString("hex");
-    return `${iv.toString("hex")}:${encrypted}:${authTag}`;
-  } catch (e) {
-    console.error("Encryption error", e);
+    return `$ENC:v1:fb:${iv.toString("hex")}:${encrypted}:${authTag}`;
+  } catch {
     return text;
   }
 }
-function decrypt(encryptedText) {
+function fallbackDecrypt(raw) {
   try {
     const key = getOrCreateMachineKey();
-    const parts = encryptedText.split(":");
-    if (parts.length !== 3) {
-      return "";
-    }
+    const parts = raw.replace("$ENC:v1:fb:", "").split(":");
+    if (parts.length !== 3) return "";
     const iv = Buffer.from(parts[0], "hex");
     const encrypted = parts[1];
     const authTag = Buffer.from(parts[2], "hex");
@@ -1489,19 +1490,269 @@ function decrypt(encryptedText) {
     let decrypted = decipher.update(encrypted, "hex", "utf8");
     decrypted += decipher.final("utf8");
     return decrypted;
-  } catch (e) {
-    console.error("Decryption error", e);
+  } catch {
     return "";
   }
 }
-const POLAR_ORGANIZATION_ID = process.env.MAIN_VITE_POLAR_ORGANIZATION_ID || "5078246f-4a2f-45ff-8efa-0c42ddc4016e";
-const POLAR_API_URL = process.env.MAIN_VITE_POLAR_API_URL || "https://api.polar.sh";
+function encrypt(text) {
+  if (!text) return "";
+  try {
+    if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
+      const encryptedBuffer = electron.safeStorage.encryptString(text);
+      return `$ENC:v1:${encryptedBuffer.toString("base64")}`;
+    }
+  } catch {
+  }
+  return fallbackEncrypt(text);
+}
+function decrypt(encryptedText) {
+  if (!encryptedText) return "";
+  try {
+    if (encryptedText.startsWith("$ENC:v1:") && !encryptedText.startsWith("$ENC:v1:fb:")) {
+      if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
+        const base64 = encryptedText.slice(8);
+        const buf = Buffer.from(base64, "base64");
+        return electron.safeStorage.decryptString(buf);
+      }
+    }
+    if (encryptedText.startsWith("$ENC:v1:fb:")) {
+      return fallbackDecrypt(encryptedText);
+    }
+    if (encryptedText.split(":").length === 3) {
+      return fallbackDecrypt(encryptedText);
+    }
+  } catch {
+  }
+  return "";
+}
+function signHardwarePayload(payload, machineGuid) {
+  const key = getOrCreateMachineKey();
+  return crypto.createHmac("sha256", Buffer.concat([key, Buffer.from(machineGuid)])).update(payload).digest("hex");
+}
+function verifyHardwareSignature(payload, machineGuid, signature) {
+  try {
+    const expected = signHardwarePayload(payload, machineGuid);
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  } catch {
+    return false;
+  }
+}
+let cachedMachineGuid = null;
+function getFallbackSeedPath() {
+  try {
+    const userData = electron.app.getPath("userData");
+    return path.join(userData, ".apposition_guid_seed");
+  } catch {
+    return path.join(os.tmpdir(), ".apposition_guid_seed");
+  }
+}
+function getOrGenerateFallbackSeed() {
+  const seedPath = getFallbackSeedPath();
+  if (fs.existsSync(seedPath)) {
+    try {
+      const seed = fs.readFileSync(seedPath, "utf8").trim();
+      if (seed.length >= 32) return seed;
+    } catch {
+    }
+  }
+  const newSeed = crypto.randomBytes(32).toString("hex");
+  try {
+    const dir = path.join(seedPath, "..");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(seedPath, newSeed, "utf8");
+  } catch {
+  }
+  return newSeed;
+}
+function readPlatformHardwareId() {
+  const platform = os.platform();
+  if (platform === "linux") {
+    for (const p of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+      if (fs.existsSync(p)) {
+        try {
+          const content = fs.readFileSync(p, "utf8").trim();
+          if (content) return content;
+        } catch {
+        }
+      }
+    }
+  }
+  const cpus = os.cpus();
+  const cpuModel = cpus && cpus.length > 0 ? cpus[0].model : "unknown-cpu";
+  const composite = [
+    platform,
+    os.arch(),
+    os.hostname(),
+    os.homedir(),
+    cpuModel,
+    getOrGenerateFallbackSeed()
+  ].join(":");
+  return composite;
+}
+function getMachineGuid() {
+  if (cachedMachineGuid) {
+    return cachedMachineGuid;
+  }
+  try {
+    const rawId = readPlatformHardwareId();
+    const hash = crypto.createHash("sha256").update(`apposition:${rawId}:freemius_v1`).digest("hex").slice(0, 32);
+    cachedMachineGuid = `node-${hash}`;
+  } catch {
+    cachedMachineGuid = `node-${crypto.randomBytes(16).toString("hex")}`;
+  }
+  return cachedMachineGuid;
+}
+function getDeviceLabel() {
+  try {
+    return `${os.platform()}-${os.arch()}-${os.hostname()}`;
+  } catch {
+    return "Desktop-App-User";
+  }
+}
+const FREEMIUS_APP_ID = process.env.MAIN_VITE_FREEMIUS_APP_ID || process.env.FREEMIUS_APP_ID || "38794";
+const FREEMIUS_API_URL = process.env.MAIN_VITE_FREEMIUS_API_URL || "https://api.freemius.com";
+const FREEMIUS_AUTH_TOKEN = process.env.MAIN_VITE_FREEMIUS_BEARER_TOKEN || process.env.FREEMIUS_BEARER_TOKEN || "";
+function getFreemiusUid(machineGuid) {
+  return crypto.createHash("md5").update(machineGuid).digest("hex");
+}
+function getHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json"
+  };
+  if (FREEMIUS_AUTH_TOKEN) {
+    headers["Authorization"] = `Bearer ${FREEMIUS_AUTH_TOKEN}`;
+  }
+  return headers;
+}
+async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel, version = "1.2.4", appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+  try {
+    const cleanKey = licenseKey.trim();
+    const uid = getFreemiusUid(machineGuid);
+    const endpoint = `${apiUrl}/v1/products/${appId}/licenses/activate.json`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: getHeaders(),
+      body: JSON.stringify({
+        uid,
+        license_key: cleanKey,
+        url: machineGuid,
+        title: deviceLabel,
+        version
+      })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      let errMsg = data.error?.message || data.message;
+      if (data.error?.code === "license_utilized") {
+        errMsg = "License seat limit reached. Please deactivate another device.";
+      } else if (data.error?.code === "license_expired") {
+        errMsg = "This license has expired.";
+      } else if (data.error?.code === "invalid_license_key" || data.error?.code === "license_not_found") {
+        errMsg = "Invalid license key. Please check your key and try again.";
+      } else if (!errMsg) {
+        errMsg = response.status === 402 || response.status === 403 ? "License seat limit reached or license expired." : `Activation failed (HTTP ${response.status})`;
+      }
+      return { success: false, data, error: errMsg };
+    }
+    const installId = data.id || data.install_id;
+    if (data.is_active === false) {
+      return {
+        success: false,
+        data,
+        error: "License installation is currently inactive."
+      };
+    }
+    return {
+      success: true,
+      data: {
+        ...data,
+        id: installId,
+        plan_id: data.plan_id || data.license_plan_id
+      }
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network offline. Could not connect to Freemius."
+    };
+  }
+}
+async function validateFreemiusInstallation(installationId, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+  try {
+    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: getHeaders()
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const errMsg = data.error?.message || data.message || `Validation failed (HTTP ${response.status})`;
+      return { success: false, data, error: errMsg };
+    }
+    const isActive = data.is_active !== false;
+    return {
+      success: isActive,
+      data: {
+        ...data,
+        id: data.id || data.install_id || installationId,
+        plan_id: data.plan_id || data.license_plan_id
+      },
+      error: isActive ? void 0 : "Installation is inactive or deactivated."
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network offline. Could not reach Freemius API."
+    };
+  }
+}
+async function deactivateFreemiusInstallation(installationId, licenseKey, machineGuid, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+  try {
+    if (licenseKey && machineGuid) {
+      const endpoint2 = `${apiUrl}/v1/products/${appId}/licenses/deactivate.json`;
+      const response2 = await fetch(endpoint2, {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify({
+          uid: getFreemiusUid(machineGuid),
+          license_key: licenseKey.trim(),
+          install_id: installationId
+        })
+      });
+      if (!response2.ok && response2.status !== 404) {
+        const data = await response2.json().catch(() => ({}));
+        return {
+          success: false,
+          error: data.error?.message || `Deactivation failed (HTTP ${response2.status})`
+        };
+      }
+      return { success: true };
+    }
+    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
+    const response = await fetch(endpoint, {
+      method: "DELETE",
+      headers: getHeaders()
+    });
+    if (!response.ok && response.status !== 404) {
+      const data = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: data.error?.message || `Deactivation failed (HTTP ${response.status})`
+      };
+    }
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network offline. Could not reach Freemius API."
+    };
+  }
+}
 function getSavedLicenseKey() {
   try {
     const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_key'").get();
-    if (row && row.value) {
-      return decrypt(row.value);
-    }
+    if (row && row.value) return decrypt(row.value);
   } catch (e) {
     console.error("Failed to get saved license key", e);
   }
@@ -1510,11 +1761,21 @@ function getSavedLicenseKey() {
 function saveLicenseKey(key) {
   try {
     const encryptedKey = encrypt(key);
-    db.prepare(
-      "INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_key', ?)"
-    ).run(encryptedKey);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_key', ?)").run(
+      encryptedKey
+    );
   } catch (e) {
     console.error("Failed to save license key", e);
+  }
+}
+function deleteLicenseKey() {
+  try {
+    db.prepare("DELETE FROM licensing WHERE key = 'license_key'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'license_state'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'hardware_lease'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'last_validated'").run();
+  } catch (e) {
+    console.error("Failed to delete license key", e);
   }
 }
 function getSavedLicenseState() {
@@ -1522,7 +1783,7 @@ function getSavedLicenseState() {
     const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_state'").get();
     if (row && row.value) {
       const decrypted = decrypt(row.value);
-      return JSON.parse(decrypted);
+      return decrypted ? JSON.parse(decrypted) : null;
     }
   } catch (e) {
     console.error("Failed to get saved license state", e);
@@ -1533,175 +1794,227 @@ function saveLicenseState(state) {
   try {
     const serialized = JSON.stringify(state);
     const encryptedState = encrypt(serialized);
-    db.prepare(
-      "INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_state', ?)"
-    ).run(encryptedState);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_state', ?)").run(
+      encryptedState
+    );
   } catch (e) {
     console.error("Failed to save license state", e);
   }
 }
-function isDevMode$1() {
-  return utils.is.dev;
-}
-function shouldBypassGatekeep() {
-  return utils.is.dev && process.env.FORCE_GATEKEEP !== "1";
-}
-function getDeviceLabel() {
+function getHardwareLease() {
   try {
-    return `${os.platform()}-${os.arch()}-${os.hostname()}`;
-  } catch (e) {
-    return "Desktop App User";
-  }
-}
-async function activateLicenseKey(key) {
-  if (!key || key.trim() === "") {
-    return { success: false, error: "License key is required." };
-  }
-  const label = getDeviceLabel();
-  try {
-    const response = await fetch(
-      `${POLAR_API_URL}/v1/customer-portal/license-keys/activate`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: key.trim(),
-          organization_id: POLAR_ORGANIZATION_ID,
-          label
-        })
-      }
-    );
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.error("[Polar API Error]", response.status, errorData);
-      let message = `Invalid license key (Error ${response.status})`;
-      if (typeof errorData.detail === "string") {
-        message = errorData.detail;
-      } else if (Array.isArray(errorData.detail)) {
-        message = errorData.detail[0]?.msg || message;
-      } else if (errorData.message) {
-        message = errorData.message;
-      }
-      return { success: false, error: message };
+    const row = db.prepare("SELECT value FROM licensing WHERE key = 'hardware_lease'").get();
+    if (row && row.value) {
+      const decrypted = decrypt(row.value);
+      return decrypted ? JSON.parse(decrypted) : null;
     }
-    const data = await response.json();
-    const customer = data.license_key?.customer;
-    saveLicenseKey(key.trim());
-    saveLicenseState({
-      activated: true,
-      lastChecked: Date.now(),
-      key: key.trim(),
-      activationId: data.id,
-      label,
-      expiresAt: data.license_key?.expires_at || null,
-      customer: customer ? {
-        id: customer.id,
-        email: customer.email,
-        name: customer.name,
-        avatar_url: customer.avatar_url
-      } : null
-    });
-    return { success: true };
   } catch (e) {
-    console.error("Failed to activate license key via Polar", e);
-    return {
-      success: false,
-      error: e.message || "Network error. Please check your connection."
-    };
+    console.error("Failed to get hardware lease ticket", e);
   }
+  return null;
+}
+function saveHardwareLease(ticket) {
+  try {
+    const serialized = JSON.stringify(ticket);
+    const encrypted = encrypt(serialized);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('hardware_lease', ?)").run(
+      encrypted
+    );
+  } catch (e) {
+    console.error("Failed to save hardware lease ticket", e);
+  }
+}
+function saveAttribution(params) {
+  try {
+    const serialized = JSON.stringify(params);
+    const encrypted = encrypt(serialized);
+    db.prepare(
+      "INSERT OR REPLACE INTO licensing (key, value) VALUES ('affiliate_attribution', ?)"
+    ).run(encrypted);
+  } catch (e) {
+    console.error("Failed to save affiliate attribution", e);
+  }
+}
+const DEFAULT_CHECKOUT_URL = process.env.MAIN_VITE_FREEMIUS_CHECKOUT_URL || process.env.RENDERER_VITE_FREEMIUS_CHECKOUT_URL || "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
+let memoryAttribution = null;
+function parseAttributionFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl.includes("://") ? rawUrl : `https://dummy/${rawUrl}`);
+    const ref = parsed.searchParams.get("ref") || parsed.searchParams.get("via");
+    const affiliateId = parsed.searchParams.get("affiliate_id") || parsed.searchParams.get("aff_id");
+    if (ref || affiliateId) {
+      return {
+        ref: ref || void 0,
+        affiliateId: affiliateId || void 0,
+        capturedAt: Date.now()
+      };
+    }
+  } catch {
+  }
+  return null;
+}
+function setMemoryAttribution(params) {
+  memoryAttribution = {
+    ...memoryAttribution,
+    ...params,
+    capturedAt: Date.now()
+  };
+}
+function getMemoryAttribution() {
+  return memoryAttribution;
+}
+function buildFreemiusCheckoutUrl(baseCheckoutUrl = DEFAULT_CHECKOUT_URL, attribution = memoryAttribution) {
+  try {
+    const url = new URL(baseCheckoutUrl);
+    if (attribution?.ref) {
+      url.searchParams.set("ref", attribution.ref);
+    }
+    if (attribution?.affiliateId) {
+      url.searchParams.set("affiliate_id", attribution.affiliateId);
+    }
+    url.searchParams.set("title", getDeviceLabel());
+    url.searchParams.set("url", getMachineGuid());
+    return url.toString();
+  } catch {
+    return baseCheckoutUrl;
+  }
+}
+const OFFLINE_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1e3;
+const ONLINE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1e3;
+const isDevMode$1 = () => utils.is.dev;
+const shouldBypassGatekeep = () => utils.is.dev && process.env.FORCE_GATEKEEP !== "1";
+const getCheckoutUrl = () => buildFreemiusCheckoutUrl(void 0, getMemoryAttribution());
+async function activateLicenseKey(key) {
+  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
+  const cleanKey = key.trim();
+  const machineGuid = getMachineGuid();
+  const deviceLabel = getDeviceLabel();
+  const appVersion = electron.app.getVersion?.() || "1.2.4";
+  const res = await activateFreemiusInstallation(cleanKey, machineGuid, deviceLabel, appVersion);
+  if (!res.success || !res.data?.id) return { success: false, error: res.error || "Activation failed." };
+  const now = Date.now();
+  const installationId = res.data.id;
+  const planId = res.data.plan_id || null;
+  const payload = `${cleanKey}:${installationId}:${planId}:${machineGuid}:${now}`;
+  const lease = {
+    licenseKey: cleanKey,
+    installationId,
+    planId,
+    machineGuid,
+    deviceLabel,
+    lastValidatedAt: now,
+    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+    monotonicCounter: Math.floor(process.uptime()),
+    signature: signHardwarePayload(payload, machineGuid),
+    isActive: true
+  };
+  saveLicenseKey(cleanKey);
+  saveHardwareLease(lease);
+  saveLicenseState({
+    activated: true,
+    lastChecked: now,
+    key: cleanKey,
+    installationId,
+    planId,
+    label: deviceLabel,
+    machineGuid,
+    expiresAt: res.data.expiration || null,
+    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+    isGracePeriod: false
+  });
+  return { success: true, isPremium: true };
 }
 async function validateLicenseKey(key) {
-  if (!key || key.trim() === "") {
-    return { success: false, error: "License key is required." };
+  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
+  const cleanKey = key.trim();
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  const installationId = lease?.installationId || cached?.installationId;
+  if (installationId) {
+    const apiRes = await validateFreemiusInstallation(installationId);
+    if (apiRes.success && apiRes.data) {
+      const now = Date.now();
+      const guid = getMachineGuid();
+      const payload = `${cleanKey}:${installationId}:${lease?.planId || null}:${guid}:${now}`;
+      if (lease) {
+        saveHardwareLease({
+          ...lease,
+          lastValidatedAt: now,
+          graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+          signature: signHardwarePayload(payload, guid)
+        });
+      }
+      saveLicenseKey(cleanKey);
+      saveLicenseState({
+        ...cached,
+        activated: true,
+        lastChecked: now,
+        key: cleanKey,
+        installationId,
+        expiresAt: apiRes.data.expiration || cached?.expiresAt || null,
+        graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+        isGracePeriod: false
+      });
+      return { success: true, isPremium: true };
+    }
+    if (apiRes.error && !apiRes.error.toLowerCase().includes("offline")) {
+      deleteLicenseKey();
+      return { success: false, error: apiRes.error, isPremium: false };
+    }
   }
-  try {
-    const response = await fetch(
-      `${POLAR_API_URL}/v1/customer-portal/license-keys/validate`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: key.trim(),
-          organization_id: POLAR_ORGANIZATION_ID
-        })
+  return evaluateOfflineGrace(cleanKey);
+}
+function evaluateOfflineGrace(key) {
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  if (lease && lease.isActive && lease.licenseKey === key) {
+    const guid = getMachineGuid();
+    const payload = `${key}:${lease.installationId}:${lease.planId || null}:${lease.machineGuid}:${lease.lastValidatedAt}`;
+    if (lease.machineGuid === guid && verifyHardwareSignature(payload, guid, lease.signature)) {
+      if (Date.now() - lease.lastValidatedAt <= OFFLINE_GRACE_PERIOD_MS) {
+        if (cached) saveLicenseState({ ...cached, isGracePeriod: true });
+        return { success: true, isPremium: true };
       }
-    );
-    if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      console.error("[Polar API Validation Error]", response.status, errorData);
-      let message = `Validation error (${response.status})`;
-      if (typeof errorData.detail === "string") {
-        message = errorData.detail;
-      } else if (Array.isArray(errorData.detail)) {
-        message = errorData.detail[0]?.msg || message;
-      } else if (errorData.message) {
-        message = errorData.message;
-      }
-      return { success: false, error: message };
+      return { success: false, error: "Offline grace period expired. Please connect to the internet." };
     }
-    const data = await response.json();
-    const isValid = data.status === "granted" || data.valid === true;
-    if (!isValid) {
-      return { success: false, error: "License key is invalid or expired." };
+  }
+  if (cached && cached.activated && cached.key === key) {
+    if (Date.now() - (cached.lastChecked || 0) <= OFFLINE_GRACE_PERIOD_MS) {
+      return { success: true, isPremium: true };
     }
-    saveLicenseKey(key.trim());
-    const cachedState = getSavedLicenseState() || {};
-    const customer = data.customer || data.license_key?.customer;
-    saveLicenseState({
-      ...cachedState,
-      activated: true,
-      lastChecked: Date.now(),
-      key: key.trim(),
-      expiresAt: data.expires_at || data.license_key?.expires_at || null,
-      customer: customer ? {
-        id: customer.id,
-        email: customer.email,
-        name: customer.name,
-        avatar_url: customer.avatar_url
-      } : cachedState.customer
+    return { success: false, error: "Offline grace period expired. Please connect to the internet." };
+  }
+  return { success: false, error: "Network offline and no valid license lease found." };
+}
+async function deactivateLicenseKey() {
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  const installationId = lease?.installationId || cached?.installationId;
+  if (installationId) {
+    const key = lease?.licenseKey || cached?.key || getSavedLicenseKey();
+    const guid = lease?.machineGuid || getMachineGuid();
+    await deactivateFreemiusInstallation(installationId, key || void 0, guid).catch(() => {
     });
-    return { success: true };
-  } catch (e) {
-    console.error("Failed to validate license key via Polar", e);
-    const cachedState = getSavedLicenseState();
-    if (cachedState && cachedState.activated && cachedState.key === key.trim()) {
-      const daysSinceCheck = (Date.now() - (cachedState.lastChecked || 0)) / (1e3 * 60 * 60 * 24);
-      if (daysSinceCheck <= 7) {
-        return { success: true };
-      } else {
-        return {
-          success: false,
-          error: "Offline grace period expired. Please connect to the internet."
-        };
-      }
-    }
-    return {
-      success: false,
-      error: e.message || "Network error. Please check your connection."
-    };
   }
+  deleteLicenseKey();
+  return { success: true, isPremium: false };
 }
 async function checkPremiumStatus() {
   try {
-    if (shouldBypassGatekeep()) {
-      return true;
-    }
+    if (shouldBypassGatekeep()) return true;
     const key = getSavedLicenseKey();
-    if (!key) {
-      return false;
+    if (!key) return false;
+    const cached = getSavedLicenseState();
+    if (!cached || !cached.activated) return false;
+    if (process.env.FORCE_GATEKEEP === "1") {
+      const validation2 = await validateLicenseKey(key);
+      return validation2.success;
     }
-    const cachedState = getSavedLicenseState();
-    if (!cachedState || !cachedState.activated) {
-      return false;
-    }
-    const timeSinceLastCheck = Date.now() - (cachedState.lastChecked || 0);
-    if (timeSinceLastCheck < 12 * 60 * 60 * 1e3) {
-      return true;
-    }
+    if (Date.now() - (cached.lastChecked || 0) < ONLINE_CHECK_INTERVAL_MS) return true;
     const validation = await validateLicenseKey(key);
     return validation.success;
   } catch (e) {
-    console.error("[Licensing] checkPremiumStatus safe error fallback:", e);
+    console.error("[Licensing] checkPremiumStatus fallback:", e);
     return false;
   }
 }
@@ -3015,6 +3328,10 @@ function initLicensingIpc() {
     IPC_CHANNELS.LICENSING.VALIDATE,
     (_, key) => validateLicenseKey(key)
   );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.DEACTIVATE,
+    () => deactivateLicenseKey()
+  );
   electron.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
   electron.ipcMain.handle(
     IPC_CHANNELS.LICENSING.GET_STATE,
@@ -3025,6 +3342,18 @@ function initLicensingIpc() {
     () => checkPremiumStatus()
   );
   electron.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL,
+    () => getCheckoutUrl()
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION,
+    (_, ref, affiliateId) => {
+      setMemoryAttribution({ ref, affiliateId });
+      saveAttribution({ ref, affiliateId });
+      return true;
+    }
+  );
 }
 const ALGORITHM = "aes-256-gcm";
 const KEY_LEN = 32;
@@ -3629,6 +3958,15 @@ function createAppOverlay(win) {
   global.appOverlayView = view;
   global.overlayWindow = win;
   syncAppOverlayBounds(win);
+  view.webContents.on("did-fail-load", (_event, errorCode, _desc, validatedURL) => {
+    if (utils.is.dev && (errorCode === -102 || errorCode === -105)) {
+      setTimeout(() => {
+        if (!view.webContents.isDestroyed()) {
+          view.webContents.loadURL(validatedURL);
+        }
+      }, 600);
+    }
+  });
   view.webContents.once("dom-ready", () => {
     view.webContents.send("app:env", { nativeViews: true });
   });
@@ -5090,6 +5428,11 @@ function initNetworkOptimizer() {
 }
 const handleDeepLink = (url) => {
   if (!url || !url.startsWith("apposition://")) return;
+  const attribution = parseAttributionFromUrl(url);
+  if (attribution) {
+    setMemoryAttribution(attribution);
+    saveAttribution(attribution);
+  }
   const deepPath = url.replace("apposition://", "");
   if (deepPath.startsWith("workspace/")) {
     const workspaceId = deepPath.replace("workspace/", "");
@@ -5251,7 +5594,10 @@ function initDevCommandBridge(isDevMode2) {
       const data = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
       fs.unlinkSync(cmdPath);
       if (data.command === "reload") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+          logger.info("Soft reloading app overlay view via dev command");
+          global.appOverlayView.webContents.reload();
+        } else if (global.mainWindow && !global.mainWindow.isDestroyed()) {
           logger.info("Soft reloading main window via dev command");
           global.mainWindow.webContents.reload();
         }

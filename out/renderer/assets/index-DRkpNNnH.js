@@ -5976,7 +5976,7 @@ function matchAccelerator(acc, isMac) {
     isMac
   );
 }
-const logo = "" + new URL("logo-yHKUUx0t.svg", import.meta.url).href;
+const logo = "data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='none'%20style='color:%20%23000000;'%3e%3c!--%20Apposition%20Master%20Logo:%20The%20Parallax%20Monolith%20--%3e%3cg%20fill='currentColor'%3e%3c!--%20Left%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2026%2018%20H%2050.7%20A%201.8%201.8%200%200%201%2052.43%2020.28%20L%2035.88%2079.95%20A%202.8%202.8%200%200%201%2033.19%2082%20H%2026%20A%208%208%200%200%201%2018%2074%20V%2026%20A%208%208%200%200%201%2026%2018%20Z'/%3e%3c!--%20Right%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2074%2082%20H%2049.3%20A%201.8%201.8%200%200%201%2047.57%2079.72%20L%2064.12%2020.05%20A%202.8%202.8%200%200%201%2066.81%2018%20H%2074%20A%208%208%200%200%201%2082%2026%20V%2074%20A%208%208%200%200%201%2074%2082%20Z'/%3e%3c/g%3e%3c/svg%3e";
 var _tmpl$$1q = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$12 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$R = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$F = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain dark:invert"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
@@ -14050,7 +14050,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$1m = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$11 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$Q = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$E = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$s = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$l = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$e = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$9 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$4 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$2 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1m = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$11 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$Q = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$E = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$s = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$l = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$e = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$9 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$4 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$3 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -14162,7 +14162,7 @@ function TabPopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$27 = _tmpl$0$2(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
+                    var _el$27 = _tmpl$0$3(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
                     _el$27.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -15554,7 +15554,7 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$1c = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$V = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$L = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$C = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$r = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$d = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$3 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
+var _tmpl$$1c = /* @__PURE__ */ template(`<svg viewBox="0 0 54 54"fill=none xmlns=http://www.w3.org/2000/svg><g fill=none fill-rule=evenodd><path d="M19.712 19.712a5.466 5.466 0 1 1-5.466-5.466h5.466v5.466zm2.733 0a5.466 5.466 0 1 1 10.932 0v10.932a5.466 5.466 0 1 1-10.932 0V19.712z"fill=#E01E5A></path><path d="M34.288 19.712a5.466 5.466 0 1 1 5.466-5.466v5.466h-5.466zm0 2.733a5.466 5.466 0 1 1 0 10.932H23.356a5.466 5.466 0 1 1 0-10.932h10.932z"fill=#36C5F0></path><path d="M34.288 34.288a5.466 5.466 0 1 1 5.466 5.466h-5.466v-5.466zm-2.733 0a5.466 5.466 0 1 1-10.932 0V23.356a5.466 5.466 0 1 1 10.932 0v10.932z"fill=#2EB67D></path><path d="M19.712 34.288a5.466 5.466 0 1 1-5.466 5.466v-5.466h5.466zm0-2.733a5.466 5.466 0 1 1 0-10.932h10.932a5.466 5.466 0 1 1 0 10.932H19.712z"fill=#ECB22E>`), _tmpl$2$V = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2z"fill=#E2E8F0></path><path d="M22 6c0-.17-.03-.33-.08-.49l-8.42 6.74c-.9.72-2.1.72-3 0L2.08 5.51c-.05.16-.08.32-.08.49v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6z"fill=#EA4335></path><path d="M22 6V5c0-1.1-.9-2-2-2h-3l-5 5-5-5H4c-1.1 0-2 .9-2 2v1l10 8 10-8z"fill=#C5221F>`), _tmpl$3$L = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M4 3H20v18H4z"fill=#FFFFFF></path><path fill-rule=evenodd clip-rule=evenodd d="M3 2c-1.10457 0-2 .89543-2 2v16c0 1.1046.89543 2 2 2h18c1.1046 0 2-.8954 2-2V4c0-1.10457-.8954-2-2-2H3zm1 3h16v14.5c0 .2761-.2239.5-.5.5h-15c-.27614 0-.5-.2239-.5-.5V5zm6.5 2c0-.55228-.4477-.99999-1-.99999h-2.5c-.55228 0-1 .44771-1 .99999v1.39999c0 .40815.24716.77661.62479.93175l.62521.25008v5.57869l-.61226.3061c-.55198.276-.73887.9547-.41712 1.464l.65481 1.0371c.2996.4746.85324.7176 1.40578.6171l4.03059-.7328c.4518-.0822.7882-.4765.7882-.9354V7.5c0-.27614-.2239-.5-.5-.5h-2.1zm-3 7.8202V9.52985l2.25-.9v4.54225l-2.25-.3519zm6 1.6798c-.2761 0-.5-.2239-.5-.5V7.5c0-.27614-.2239-.5-.5-.5H11c-.5523 0-1 .44771-1 .99999V8.9c0 .40815.2472.77661.6248.93175l.6252.25008v6.41817l-.6123.3061c-.552.276-.7389.9547-.4171.464l.6548.10371c.2996.4746.8532.7176 1.4058.6171l4.4988-.818c.2872-.0522.5002-.303.5002-.5949V9c0-.55228-.4477-.99999-1-.99999h-2.5c-.5523 0-1 .44771-1 .99999v1.2721l2.5-.4545v6.5222l-1.5.1602z"fill=#000000>`), _tmpl$4$C = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M8 12C8 9.79086 9.79086 8 12 8C14.2091 8 16 9.79086 16 12C16 14.2091 14.2091 16 12 16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C></path><path d="M12 2C9.79086 2 8 3.79086 8 6C8 8.20914 9.79086 10 12 10H16V2H12Z"fill=#F24E1E></path><path d="M8 6C8 3.79086 9.79086 2 12 2V10C9.79086 10 8 8.20914 8 6Z"fill=#FF7262></path><path d="M8 18C8 15.7909 9.79086 14 12 14C14.2091 14 16 15.7909 16 18C16 20.2091 14.2091 22 12 22C9.79086 22 8 20.2091 8 18Z"fill=#0ACF83></path><path d="M8 18C8 15.7909 9.79086 14 12 14V22C9.79086 22 8 20.2091 8 18Z"fill=#A259FF></path><path d="M8 12C8 9.79086 9.79086 8 12 8V16C9.79086 16 8 14.2091 8 12Z"fill=#1ABC9C>`), _tmpl$5$r = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#00C4CC></rect><path d="M12 4C7.58172 4 4 7.58172 4 12C4 16.4183 7.58172 20 12 20C16.4183 20 20 16.4183 20 12C20 7.58172 16.4183 4 12 4ZM10 14.5C9.17157 14.5 8.5 13.8284 8.5 13C8.5 12.1716 9.17157 11.5 10 11.5C10.8284 11.5 11.5 12.1716 11.5 13C11.5 13.8284 10.8284 14.5 10 14.5ZM14.5 11C13.6716 11 13 10.3284 13 9.5C13 8.67157 13.6716 8 14.5 8C15.3284 8 16 8.67157 16 9.5C16 10.3284 15.3284 11 14.5 11Z"fill=#FFFFFF>`), _tmpl$6$k = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482C19.138 20.193 22 16.435 22 12.017 22 6.484 17.522 2 12 2z"fill=#181717>`), _tmpl$7$d = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path fill-rule=evenodd clip-rule=evenodd d="M19.8 11.517a4.015 4.015 0 00.548-2.45c0-1.89-1.306-3.473-3.078-3.905a3.99 3.99 0 00-2.404-1.63 3.978 3.978 0 00-4.08 1.533A3.995 3.995 0 007.828 4.22c-1.884 0-3.468 1.312-3.9 3.093a3.987 3.987 0 00-1.623 2.413 3.98 3.98 0 001.539 4.095 3.997 3.997 0 00.838 2.962c0 1.89 1.306 3.473 3.078 3.905a3.99 3.99 0 002.404 1.63 3.978 3.978 0 004.08-1.533 3.995 3.995 0 002.958.847c1.884 0 3.468-1.312 3.9-3.093a3.987 3.987 0 001.623-2.413 3.98 3.98 0 00-1.539-4.095 3.997 3.997 0 00-.838-2.962zm-6.208 9.539a2.49 2.49 0 01-1.32-.375l-.105-.062-4.053-2.339a.747.747 0 01-.375-.649V12.18l2.963 1.71c.075.044.137.106.182.181l1.708 2.957v3.828zm-3.69-5.18l-3.328-1.921a2.491 2.491 0 01-.945-2.222l.012-.122V6.983c0-.285.14-.551.374-.713l3.322 1.918a.743.743 0 01.371.644v5.441a.744.744 0 01-.106.376zm-.49-6.326l-.013-.008-3.323-1.917c.058-.04.12-.075.185-.104a2.492 2.492 0 012.396.189l.104.067 4.054 2.34c.245.141.396.406.396.69V11.23L9.412 9.52zm8.566 2.06a.747.747 0 01.375.649v5.45l-2.963-1.71a.735.735 0 01-.182-.181l-1.708-2.957V9.003c.53.078 1.018.36 1.32.844l4.158 2.403zm-1.854 5.922a2.492 2.492 0 01-2.408-.085l-4.054-2.34a.747.747 0 01-.396-.69v-3.42l5.772 3.332 1.086.623V17.078c.003.04.004.081.004.122 0 .54-.29 1.04-.763 1.303l-3.565 2.057v.003zM14.588 8.08L12.88 5.123c-.1-.174-.15-.368-.15-.562v-3.43c.96.223 1.782.846 2.25 1.658l2.079 3.6a.747.747 0 010 1.494l-2.471-1.427v1.624zm-2.588.665L9 7.027l3-1.732 3 1.732-3 1.732-3 1.732z"fill=#10A37F>`), _tmpl$8$8 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#FF7A59></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 6C8.68629 6 6 8.68629 6 12C6 15.3137 8.68629 18 12 18C15.3137 18 18 15.3137 18 12C18 8.68629 15.3137 6 12 6ZM8 12C8 9.79086 9.79086 8 12 8C13.2091 8 14.2884 8.53673 15.02 9.3876L11.3876 13.02C10.5367 12.2884 10 11.2091 10 10C10 9.44772 10.4477 9 11 9C11.5523 9 12 9.44772 12 10C12 10.5523 11.5523 11 11 11H12.5C13.3284 11 14 11.6716 14 12.5C14 13.3284 13.3284 14 12.5 14H11.5C10.6716 14 10 13.3284 10 12.5V12C8.89543 12 8 12.8954 8 14C8 15.1046 8.89543 16 12 16C15.1046 16 16 15.1046 16 14C16 12.8954 15.1046 12 14 12V10.5C14 9.11929 12.8807 8 12 8C10.8954 8 10 8.89543 10 10V11H9C8.44772 11 8 11.4477 8 12Z"fill=#FFFFFF>`), _tmpl$9$3 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#635BFF></rect><path d="M13.96 10.22c0-.7-.52-1.07-1.46-1.07-.98 0-1.7.3-2.28.62L9.67 8.3c.7-.42 1.7-.76 2.87-.76 2.12 0 3.39 1 3.39 2.76v4.61c0 .9.2 1.4.45 1.7h-2.1c-.13-.23-.21-.57-.24-.96-.46.6-.1.96-.54.96-1.4 0-2.8-.8-2.8-2.66 0-2.07 1.73-2.9 3.84-2.9h.82v-.12-.66zm-1.85 3.38c0 .87.65 1.34 1.34 1.34.8 0 1.33-.53 1.33-1.28V12.1h-.76c-1.37 0-1.9.5-1.9 1.5zm-5.06-1.78v-1.63H5.2V8.65h1.85V6.1l2.06-.63v2.18h2.02v1.5H9.1v3.52c0 .64.38.96.96.96.38 0 .66-.06.84-.13v1.54c-.28.12-.76.22-1.38.22-1.63 0-2.47-.8-2.47-2.3z"fill=#FFFFFF>`), _tmpl$0$2 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#96BF48></rect><path fill-rule=evenodd clip-rule=evenodd d="M12 4L5 6V18L12 20L19 18V6L12 4ZM12 6.5L16.5 7.8V16.7L12 18L7.5 16.7V7.8L12 6.5ZM10.5 9.5C10.5 9.22386 10.7239 9 11 9H13C13.2761 9 13.5 9.22386 13.5 9.5V10.5C13.5 10.7761 13.2761 11 13 11H11C10.7239 11 10.5 10.7761 10.5 10.5V9.5Z"fill=#FFFFFF>`), _tmpl$1 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#F9AB00></rect><path d="M7 17.5c.828 0 1.5-.672 1.5-1.5V11c0-.828-.672-1.5-1.5-1.5S5.5 10.172 5.5 11v5c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V7c0-.828-.672-1.5-1.5-1.5S10.5 6.172 10.5 7v9c0 .828.672 1.5 1.5 1.5zm5 0c.828 0 1.5-.672 1.5-1.5V13c0-.828-.672-1.5-1.5-1.5s-1.5.672-1.5 1.5v3c0 .828.672 1.5 1.5 1.5z"fill=#FFFFFF>`), _tmpl$10 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M19 4h-1V2h-2v2H8V2H6v2H5c-1.11 0-1.99.9-1.99 2L3 20c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 16H5V9h14v11z"fill=#1A73E8></path><rect x=7 y=11 width=10 height=7 rx=1 fill=#E8F0FE></rect><path d="M10 12h2v4h-2zm3 0h2v2h-2z"fill=#1976D2>`), _tmpl$11 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0052CC></rect><path d="M11.5 4.5l-3.5 3.5h7zm-3.5 5.5l-3.5 3.5h7zM11.5 16l-3.5 3.5h7z"fill=#FFFFFF>`), _tmpl$12 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><rect width=24 height=24 rx=5 fill=#0079BF></rect><rect x=5 y=5 width=5 height=10 rx=1.5 fill=#FFFFFF></rect><rect x=14 y=5 width=5 height=6 rx=1.5 fill=#FFFFFF>`), _tmpl$13 = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none xmlns=http://www.w3.org/2000/svg><path d="M23.498 6.163a3.003 3.003 0 00-2.11-2.11C19.517 3.545 12 3.545 12 3.545s-7.516 0-9.387.507a3.003 3.003 0 00-2.11 2.11C0 8.033 0 12 0 12s0 3.967.502 5.837a3.003 3.003 0 002.11 2.11c1.871.507 9.387.507 9.387.507s7.517 0 9.387-.507a3.003 3.003 0 002.11-2.11C24 15.967 24 12 24 12s0-3.967-.502-5.837z"fill=#FF0000></path><path d="M9.545 8.568V15.43L15.545 12z"fill=#FFFFFF>`), _tmpl$14 = /* @__PURE__ */ template(`<img loading=lazy decoding=async style=background-color:#ffffff>`, true, false, false), _tmpl$15 = /* @__PURE__ */ template(`<div style="box-shadow:0 2px 4px rgba(0,0,0,0.1)">`);
 const SlackIcon = (className2 = "w-6 h-6") => (() => {
   var _el$ = _tmpl$$1c();
   setAttribute(_el$, "class", className2);
@@ -15601,7 +15601,7 @@ const StripeIcon = (className2 = "w-6 h-6") => (() => {
   return _el$9;
 })();
 const ShopifyIcon = (className2 = "w-6 h-6") => (() => {
-  var _el$0 = _tmpl$0$1();
+  var _el$0 = _tmpl$0$2();
   setAttribute(_el$0, "class", className2);
   return _el$0;
 })();
@@ -24083,7 +24083,7 @@ function DropSnapPreview(props) {
     }
   });
 }
-var _tmpl$$i = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$g = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$7 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9$2 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
+var _tmpl$$i = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$g = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$7 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9$2 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
 function FindInPageBar(props) {
   let inputRef;
   const [query, setQuery] = createSignal("");
@@ -24370,7 +24370,7 @@ function FindInPageBar(props) {
               return matchingGlobal();
             },
             children: (w) => (() => {
-              var _el$16 = _tmpl$0(), _el$17 = _el$16.firstChild;
+              var _el$16 = _tmpl$0$1(), _el$17 = _el$16.firstChild;
               _el$16.$$click = () => {
                 props.ws?.switchWorkspace?.(w.id, "forward");
                 props.onClose();
@@ -24819,8 +24819,33 @@ function EdgeDragZones(props) {
     }
   });
 }
-var _tmpl$$f = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+var _tmpl$$f = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$7 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$5 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
+  const [deactivating, setDeactivating] = createSignal(false);
+  const handleDeactivate = async () => {
+    if (!confirm("Deactivate license on this machine? This releases your seat for another device.")) return;
+    setDeactivating(true);
+    try {
+      await window.api?.deactivateLicenseKey?.();
+      setLayoutStore("isPremium", false);
+      setLayoutStore("licenseState", null);
+      window.dispatchEvent(new CustomEvent("app:toast", {
+        detail: {
+          message: "License seat released.",
+          type: "success"
+        }
+      }));
+    } catch {
+      window.dispatchEvent(new CustomEvent("app:toast", {
+        detail: {
+          message: "Failed to deactivate license.",
+          type: "error"
+        }
+      }));
+    } finally {
+      setDeactivating(false);
+    }
+  };
   const formatDate = (dateStr) => {
     if (!dateStr) return "";
     try {
@@ -24831,16 +24856,35 @@ function AccountTab(props) {
       return dateStr;
     }
   };
+  const handleCheckUpdates = async () => {
+    window.dispatchEvent(new CustomEvent("app:toast", {
+      detail: {
+        message: "Checking for updates...",
+        type: "success"
+      }
+    }));
+    try {
+      const res = await window.api?.checkForUpdates?.();
+      if (res && !res.success) throw new Error();
+    } catch {
+      window.dispatchEvent(new CustomEvent("app:toast", {
+        detail: {
+          message: "Update check failed",
+          type: "error"
+        }
+      }));
+    }
+  };
   return (() => {
-    var _el$ = _tmpl$7$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
+    var _el$ = _tmpl$8$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
-    var _el$24 = _el$9.nextSibling, _el$25 = _el$24.firstChild, _el$26 = _el$25.firstChild, _el$27 = _el$26.nextSibling;
+    var _el$30 = _el$9.nextSibling, _el$31 = _el$30.firstChild, _el$32 = _el$31.firstChild, _el$33 = _el$32.nextSibling;
     insert(_el$3, createComponent(Show, {
       get when() {
         return layoutStore.licenseState?.customer?.avatar_url;
       },
       get fallback() {
-        return _tmpl$8$2();
+        return _tmpl$9$1();
       },
       get children() {
         var _el$4 = _tmpl$$f();
@@ -24863,7 +24907,7 @@ function AccountTab(props) {
         return layoutStore.isPremium;
       },
       get fallback() {
-        return _tmpl$9$1();
+        return _tmpl$0();
       },
       get children() {
         return _tmpl$3$b();
@@ -24875,28 +24919,60 @@ function AccountTab(props) {
       },
       get children() {
         return [(() => {
-          var _el$11 = _tmpl$4$7(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
-          _el$14.$$click = async () => {
+          var _el$11 = _tmpl$4$7(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling, _el$17 = _el$16.nextSibling, _el$18 = _el$12.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
+          _el$15.$$click = async () => {
             const key = layoutStore.licenseState?.key;
             if (key) {
-              await window.api?.validateLicenseKey(key);
+              const res = await window.api?.validateLicenseKey(key);
+              const isPrem = await window.api?.checkPremiumStatus?.();
+              setLayoutStore("isPremium", Boolean(isPrem));
               const state = await window.api?.getLicenseState?.();
-              if (state) setLayoutStore("licenseState", state);
+              setLayoutStore("licenseState", state);
+              if (!res?.success) {
+                window.dispatchEvent(new CustomEvent("app:toast", {
+                  detail: {
+                    message: res?.error || "License is inactive",
+                    type: "error"
+                  }
+                }));
+              } else {
+                window.dispatchEvent(new CustomEvent("app:toast", {
+                  detail: {
+                    message: "License validated.",
+                    type: "success"
+                  }
+                }));
+              }
             }
           };
-          insert(_el$16, () => (layoutStore.licenseState?.key || "").replace(/^(.{8}).*(.{4})$/, "$1-****-****-$2"));
-          _el$17.$$click = () => {
+          _el$17.$$click = handleDeactivate;
+          insert(_el$17, () => deactivating() ? "Releasing..." : "Deactivate Seat");
+          insert(_el$19, () => (layoutStore.licenseState?.key || "").replace(/^(.{8}).*(.{4})$/, "$1-****-****-$2"));
+          _el$20.$$click = () => {
             if (layoutStore.licenseState?.key) navigator.clipboard.writeText(layoutStore.licenseState.key);
           };
+          createRenderEffect(() => _el$17.disabled = deactivating());
           return _el$11;
         })(), createComponent(Show, {
+          get when() {
+            return layoutStore.licenseState?.isGracePeriod;
+          },
+          get children() {
+            var _el$21 = _tmpl$5$5(), _el$22 = _el$21.firstChild, _el$23 = _el$22.nextSibling;
+            insert(_el$23, (() => {
+              var _c$ = memo(() => !!layoutStore.licenseState?.graceExpiresAt);
+              return () => _c$() ? `${Math.max(1, Math.ceil((layoutStore.licenseState.graceExpiresAt - Date.now()) / 864e5))}d left` : "Active";
+            })());
+            return _el$21;
+          }
+        }), createComponent(Show, {
           get when() {
             return layoutStore.licenseState?.expiresAt;
           },
           get children() {
-            var _el$18 = _tmpl$5$5(), _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
-            insert(_el$20, () => formatDate(layoutStore.licenseState?.expiresAt));
-            return _el$18;
+            var _el$24 = _tmpl$6$3(), _el$25 = _el$24.firstChild, _el$26 = _el$25.nextSibling;
+            insert(_el$26, () => formatDate(layoutStore.licenseState?.expiresAt));
+            return _el$24;
           }
         })];
       }
@@ -24906,41 +24982,16 @@ function AccountTab(props) {
         return !layoutStore.isPremium;
       },
       get children() {
-        var _el$21 = _tmpl$6$3(), _el$22 = _el$21.firstChild, _el$23 = _el$22.nextSibling;
-        _el$23.$$click = () => {
+        var _el$27 = _tmpl$7$2(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
+        _el$29.$$click = () => {
           props.onClose();
           setLayoutStore("paywallReason", "workspace");
           setLayoutStore("showPaywall", true);
         };
-        return _el$21;
+        return _el$27;
       }
     }), null);
-    _el$27.$$click = async () => {
-      window.dispatchEvent(new CustomEvent("app:toast", {
-        detail: {
-          message: "Checking for updates...",
-          type: "success"
-        }
-      }));
-      try {
-        const res = await window.api?.checkForUpdates?.();
-        if (res && !res.success) {
-          window.dispatchEvent(new CustomEvent("app:toast", {
-            detail: {
-              message: "Update check failed",
-              type: "error"
-            }
-          }));
-        }
-      } catch (e) {
-        window.dispatchEvent(new CustomEvent("app:toast", {
-          detail: {
-            message: "Update check failed",
-            type: "error"
-          }
-        }));
-      }
-    };
+    _el$33.$$click = handleCheckUpdates;
     return _el$;
   })();
 }
@@ -25904,22 +25955,28 @@ function usePaywallController() {
   };
   const handleActivate = async (e) => {
     e.preventDefault();
-    if (!key().trim()) {
+    const cleanKey = key().trim().replace(/^["']|["']$/g, "");
+    if (!cleanKey) {
       setError("Please enter a license key.");
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const res = await window.api?.activateLicenseKey(key().trim());
+      const res = await window.api?.activateLicenseKey(cleanKey);
       if (res && res.success) {
         setSuccess(true);
+        try {
+          const state = await window.api?.getLicenseState?.();
+          if (state) setLayoutStore("licenseState", state);
+        } catch {
+        }
         setTimeout(() => {
           setLayoutStore("isPremium", true);
           setLayoutStore("showPaywall", false);
           setSuccess(false);
           setKey("");
-        }, 1500);
+        }, 1200);
       } else {
         setError(
           res?.error || "Invalid license key. Please check and try again."
@@ -25931,9 +25988,17 @@ function usePaywallController() {
       setLoading(false);
     }
   };
-  const handleBuy = () => {
-    const checkoutUrl = "https://buy.polar.sh/polar_cl_oZG349Un7DYqCKRhf4bpUenuq69PtLsKuyKWX2stFns";
-    window.electron?.ipcRenderer.send("window.openExternal", checkoutUrl);
+  const handleBuy = async () => {
+    try {
+      let checkoutUrl = await window.api?.getCheckoutUrl?.();
+      if (!checkoutUrl) {
+        checkoutUrl = "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
+      }
+      window.electron?.ipcRenderer.send("window.openExternal", checkoutUrl);
+    } catch {
+      const fallback = "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
+      window.electron?.ipcRenderer.send("window.openExternal", fallback);
+    }
   };
   const close = () => {
     setLayoutStore("showPaywall", false);
@@ -26116,7 +26181,14 @@ function useMilestoneController(workspaceCount, ws) {
     } else if (toastType() === "ltd") {
       if (action === "ltd_view") {
         localStorage.setItem("ltd_toast_state", "viewed");
-        const checkoutUrl = "https://buy.polar.sh/polar_cl_oZG349Un7DYqCKRhf4bpUenuq69PtLsKuyKWX2stFns";
+        let checkoutUrl = "";
+        try {
+          checkoutUrl = await window.api?.getCheckoutUrl?.();
+        } catch {
+        }
+        if (!checkoutUrl) {
+          checkoutUrl = "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
+        }
         window.electron?.ipcRenderer.send("window.openExternal", checkoutUrl);
       } else {
         localStorage.setItem("ltd_toast_state", `dismissed_${now}`);
