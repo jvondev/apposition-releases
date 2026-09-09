@@ -830,9 +830,25 @@ function applyBrowserSwitches(app) {
     "default_public_interface_only"
   );
 }
-const isDevMode$2 = utils.is.dev || electron.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
-const dbFileName = isDevMode$2 ? "apposition_state_dev.db" : "apposition_state.db";
-const dbPath = path.join(electron.app.getPath("userData"), dbFileName);
+function getDbPath() {
+  const isDevMode2 = utils.is.dev || electron.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
+  const appData = electron.app.getPath("appData");
+  const baseDir = isDevMode2 ? path.join(appData, "AppositionDev") : electron.app.getPath("userData");
+  const dbFileName = isDevMode2 ? "apposition_state_dev.db" : "apposition_state.db";
+  const targetPath = path.join(baseDir, dbFileName);
+  if (isDevMode2) {
+    if (!fs.existsSync(baseDir)) fs.mkdirSync(baseDir, { recursive: true });
+    const legacyPath = path.join(appData, "apposition", dbFileName);
+    if (fs.existsSync(legacyPath) && (!fs.existsSync(targetPath) || fs.statSync(targetPath).size === 0)) {
+      try {
+        fs.copyFileSync(legacyPath, targetPath);
+      } catch {
+      }
+    }
+  }
+  return targetPath;
+}
+const dbPath = getDbPath();
 function applyPragmas(instance) {
   try {
     instance.pragma("journal_mode = WAL");
@@ -922,6 +938,17 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS licensing (
     key TEXT PRIMARY KEY,
     value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS window_state (
+    id TEXT PRIMARY KEY,
+    x INTEGER NOT NULL,
+    y INTEGER NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    is_maximized INTEGER NOT NULL DEFAULT 0,
+    is_fullscreen INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
   );
 `);
 try {
@@ -1340,6 +1367,53 @@ function saveCommunicatorProvider(provider) {
 }
 function deleteCommunicatorProvider(id) {
   db.prepare("DELETE FROM communicator_providers WHERE id = ?").run(id);
+}
+function getSavedWindowState(id = "main") {
+  try {
+    const row = db.prepare(
+      "SELECT id, x, y, width, height, is_maximized, is_fullscreen, updated_at FROM window_state WHERE id = ?"
+    ).get(id);
+    if (!row) return null;
+    return {
+      x: row.x,
+      y: row.y,
+      width: row.width,
+      height: row.height,
+      isMaximized: Boolean(row.is_maximized),
+      isFullScreen: Boolean(row.is_fullscreen)
+    };
+  } catch (err) {
+    console.error("[WindowState DB] Failed to query window state:", err);
+    return null;
+  }
+}
+function saveWindowState(state, id = "main") {
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO window_state (id, x, y, width, height, is_maximized, is_fullscreen, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        x = excluded.x,
+        y = excluded.y,
+        width = excluded.width,
+        height = excluded.height,
+        is_maximized = excluded.is_maximized,
+        is_fullscreen = excluded.is_fullscreen,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(
+      id,
+      Math.round(state.x),
+      Math.round(state.y),
+      Math.round(state.width),
+      Math.round(state.height),
+      state.isMaximized ? 1 : 0,
+      state.isFullScreen ? 1 : 0,
+      Date.now()
+    );
+  } catch (err) {
+    console.error("[WindowState DB] Failed to persist window state:", err);
+  }
 }
 function toPhysicalRect(r, dpr) {
   return {
@@ -3862,7 +3936,6 @@ function toCdpButton(button, isMove = false, buttons = 0) {
 function toCdpModifiers(modifiers) {
   return typeof modifiers === "number" && Number.isFinite(modifiers) ? modifiers : 0;
 }
-const activePaneIdByWin = /* @__PURE__ */ new Map();
 function setAirspaceFocusEmulation(win, enabled) {
   if (!win || win.isDestroyed()) return;
   const s = composers.get(win.id);
@@ -3876,7 +3949,7 @@ function setAirspaceFocusEmulation(win, enabled) {
 }
 function initPointerForwarder(getWindow) {
   electron.ipcMain.on("airspace:chrome-clicked", () => {
-    setAirspaceFocusEmulation(getWindow(), false);
+    FocusArbiter.focusOverlay(getWindow());
   });
   electron.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
     const win = getWindow();
@@ -3902,19 +3975,7 @@ function initPointerForwarder(getWindow) {
       });
     } else {
       if (msg.type === "mousedown") {
-        const prevPaneId = activePaneIdByWin.get(win.id);
-        if (prevPaneId && prevPaneId !== hit.paneId) {
-          const prevView = composers.get(win.id)?.views.get(prevPaneId);
-          if (prevView && !prevView.webContents.isDestroyed() && prevView.webContents.debugger.isAttached()) {
-            prevView.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {
-            });
-          }
-        }
-        activePaneIdByWin.set(win.id, hit.paneId);
-        dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
-        });
-        view.webContents.focus();
-        global.appOverlayView?.webContents.send("pane.focused", hit.paneId);
+        FocusArbiter.focusGuest(win, hit.paneId);
       }
       const isMove = msg.type === "mousemove";
       dbg.sendCommand("Input.dispatchMouseEvent", {
@@ -3943,6 +4004,69 @@ function ensureDebugger(view) {
   dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
   });
   return dbg;
+}
+const activePaneIdByWin = /* @__PURE__ */ new Map();
+const pendingFocusByWin = /* @__PURE__ */ new Map();
+class FocusArbiter {
+  static focusOverlay(win) {
+    const targetWin = win || global.mainWindow;
+    if (!targetWin || targetWin.isDestroyed()) return;
+    setAirspaceFocusEmulation(targetWin, false);
+    activePaneIdByWin.delete(targetWin.id);
+    const ov = global.appOverlayView?.webContents;
+    if (ov && !ov.isDestroyed()) {
+      ov.focus();
+    }
+  }
+  static focusGuest(win, paneId) {
+    if (!win || win.isDestroyed() || !paneId) return;
+    const s = composers.get(win.id);
+    const view = s?.views.get(paneId);
+    if (!view || view.webContents.isDestroyed()) {
+      pendingFocusByWin.set(win.id, paneId);
+      return;
+    }
+    pendingFocusByWin.delete(win.id);
+    const prevPaneId = activePaneIdByWin.get(win.id);
+    if (prevPaneId && prevPaneId !== paneId) {
+      const prevView = s?.views.get(prevPaneId);
+      if (prevView && !prevView.webContents.isDestroyed() && prevView.webContents.debugger.isAttached()) {
+        prevView.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {
+        });
+      }
+    }
+    activePaneIdByWin.set(win.id, paneId);
+    const dbg = ensureDebugger(view);
+    if (dbg) {
+      dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+      });
+    }
+    view.webContents.focus();
+    global.appOverlayView?.webContents.send("pane.focused", paneId);
+  }
+  static handlePendingGuestFocus(win, paneId) {
+    if (!win || win.isDestroyed()) return;
+    if (pendingFocusByWin.get(win.id) === paneId) {
+      this.focusGuest(win, paneId);
+    }
+  }
+  static getActivePaneId(winId) {
+    return activePaneIdByWin.get(winId);
+  }
+  static handlePaneDestroyed(win, paneId) {
+    if (!win || win.isDestroyed()) return;
+    if (pendingFocusByWin.get(win.id) === paneId) {
+      pendingFocusByWin.delete(win.id);
+    }
+    if (activePaneIdByWin.get(win.id) === paneId) {
+      activePaneIdByWin.delete(win.id);
+      this.focusOverlay(win);
+    }
+  }
+  static blur(win) {
+    if (!win || win.isDestroyed()) return;
+    setAirspaceFocusEmulation(win, false);
+  }
 }
 const tearWindows = /* @__PURE__ */ new Map();
 function initTearWindowIpc() {
@@ -4011,6 +4135,244 @@ function initTearWindowIpc() {
     }
   });
 }
+const DEFAULT_WINDOW_DIMENSIONS = {
+  x: 0,
+  y: 0,
+  width: 1200,
+  height: 800
+};
+const MIN_WINDOW_DIMENSIONS = {
+  width: 400,
+  height: 300
+};
+const TITLEBAR_HEIGHT = 40;
+const MIN_TITLEBAR_VISIBLE_WIDTH = 100;
+const MIN_TITLEBAR_VISIBLE_HEIGHT = 20;
+function isFiniteRect(r) {
+  return r != null && typeof r.x === "number" && Number.isFinite(r.x) && typeof r.y === "number" && Number.isFinite(r.y) && typeof r.width === "number" && Number.isFinite(r.width) && r.width > 0 && typeof r.height === "number" && Number.isFinite(r.height) && r.height > 0;
+}
+function computeIntersectionArea(a, b) {
+  const overlapX = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const overlapY = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return { area: overlapX * overlapY, overlapX, overlapY };
+}
+function hasViableTitlebar(bounds, display) {
+  const titlebarRect = {
+    x: bounds.x,
+    y: bounds.y,
+    width: bounds.width,
+    height: Math.min(TITLEBAR_HEIGHT, bounds.height)
+  };
+  const { overlapX, overlapY } = computeIntersectionArea(titlebarRect, display.workArea);
+  if (overlapX < MIN_TITLEBAR_VISIBLE_WIDTH || overlapY < MIN_TITLEBAR_VISIBLE_HEIGHT) {
+    return false;
+  }
+  if (bounds.y < display.workArea.y - 10) {
+    return false;
+  }
+  return true;
+}
+function centerInWorkArea(target, width, height) {
+  const clampedWidth = Math.min(Math.max(width, MIN_WINDOW_DIMENSIONS.width), target.width);
+  const clampedHeight = Math.min(Math.max(height, MIN_WINDOW_DIMENSIONS.height), target.height);
+  const x = Math.round(target.x + (target.width - clampedWidth) / 2);
+  const y = Math.round(target.y + (target.height - clampedHeight) / 2);
+  return { x, y, width: clampedWidth, height: clampedHeight };
+}
+function resolveSafeWindowBounds(saved, displays, defaults = DEFAULT_WINDOW_DIMENSIONS) {
+  const isMaximized = saved != null ? Boolean(saved.isMaximized) : true;
+  const isFullScreen = Boolean(saved?.isFullScreen);
+  const primary = displays.find((d) => d.isPrimary) || displays[0];
+  if (!primary) {
+    return {
+      bounds: { ...defaults },
+      isMaximized,
+      isFullScreen
+    };
+  }
+  const isSane = isFiniteRect(saved) && saved.x > -1e4 && saved.y > -1e4 && saved.width >= MIN_WINDOW_DIMENSIONS.width && saved.height >= MIN_WINDOW_DIMENSIONS.height;
+  if (!isSane || !saved) {
+    const defaultBounds = centerInWorkArea(primary.workArea, defaults.width, defaults.height);
+    return { bounds: defaultBounds, isMaximized, isFullScreen };
+  }
+  const matchingDisplay = displays.find((d) => hasViableTitlebar(saved, d));
+  if (matchingDisplay) {
+    return {
+      bounds: { x: Math.round(saved.x), y: Math.round(saved.y), width: Math.round(saved.width), height: Math.round(saved.height) },
+      isMaximized,
+      isFullScreen
+    };
+  }
+  const projectedBounds = centerInWorkArea(primary.workArea, saved.width, saved.height);
+  return {
+    bounds: projectedBounds,
+    isMaximized,
+    isFullScreen
+  };
+}
+const log = createLogger("WINDOW");
+class WindowStateManager {
+  activeWindow = null;
+  lastNormalBounds = { x: 0, y: 0, width: 1200, height: 800 };
+  maximized = false;
+  fullScreen = false;
+  debounceTimer = null;
+  displayRemovedListener = null;
+  mapDisplays(displays) {
+    const primaryId = electron.screen.getPrimaryDisplay()?.id;
+    return displays.map((d) => ({
+      id: d.id,
+      bounds: d.bounds,
+      workArea: d.workArea,
+      isPrimary: d.id === primaryId
+    }));
+  }
+  getInitialState() {
+    const displays = this.mapDisplays(electron.screen.getAllDisplays());
+    const saved = getSavedWindowState();
+    const resolved = resolveSafeWindowBounds(saved, displays);
+    this.lastNormalBounds = { ...resolved.bounds };
+    this.maximized = resolved.isMaximized;
+    this.fullScreen = resolved.isFullScreen;
+    log.info(`Resolved window state: bounds=${JSON.stringify(resolved.bounds)} max=${resolved.isMaximized}`);
+    return resolved;
+  }
+  shouldMaximize() {
+    return this.maximized;
+  }
+  shouldFullScreen() {
+    return this.fullScreen;
+  }
+  manage(win) {
+    this.activeWindow = win;
+    if (this.maximized) {
+      try {
+        win.maximize();
+      } catch {
+      }
+    } else if (this.fullScreen) {
+      try {
+        win.setFullScreen(true);
+      } catch {
+      }
+    }
+    const onBoundsChange = () => {
+      if (!win || win.isDestroyed() || win.isMinimized()) return;
+      if (win.isMaximized() || win.isFullScreen()) {
+        this.maximized = win.isMaximized();
+        this.fullScreen = win.isFullScreen();
+        this.scheduleDebouncedSave();
+        return;
+      }
+      const bounds = win.getBounds();
+      if (isFiniteRect(bounds)) {
+        this.lastNormalBounds = { ...bounds };
+        this.maximized = false;
+        this.fullScreen = false;
+        this.scheduleDebouncedSave();
+      }
+    };
+    win.on("resize", onBoundsChange);
+    win.on("move", onBoundsChange);
+    win.on("maximize", () => {
+      this.maximized = true;
+      try {
+        const nb = win.getNormalBounds();
+        if (isFiniteRect(nb)) this.lastNormalBounds = { ...nb };
+      } catch {
+      }
+      this.scheduleDebouncedSave(100);
+    });
+    win.on("unmaximize", () => {
+      this.maximized = false;
+      setTimeout(() => {
+        if (!win.isDestroyed() && !win.isMaximized() && !win.isFullScreen()) {
+          const bounds = win.getBounds();
+          if (isFiniteRect(bounds)) this.lastNormalBounds = { ...bounds };
+          this.scheduleDebouncedSave(100);
+        }
+      }, 60);
+    });
+    win.on("enter-full-screen", () => {
+      this.fullScreen = true;
+      this.scheduleDebouncedSave(100);
+    });
+    win.on("leave-full-screen", () => {
+      this.fullScreen = false;
+      this.scheduleDebouncedSave(100);
+    });
+    win.on("close", () => {
+      this.flushSync();
+    });
+    win.on("closed", () => {
+      this.unmanage();
+    });
+    this.displayRemovedListener = () => {
+      if (!this.activeWindow || this.activeWindow.isDestroyed()) return;
+      const displays = this.mapDisplays(electron.screen.getAllDisplays());
+      const currentBounds = this.activeWindow.getBounds();
+      const isVisible = displays.some((d) => hasViableTitlebar(currentBounds, d));
+      if (!isVisible) {
+        log.warn("Active window stranded off-screen after display removal, recovering to primary");
+        const recovered = resolveSafeWindowBounds(
+          { ...this.lastNormalBounds, isMaximized: this.maximized, isFullScreen: this.fullScreen },
+          displays
+        );
+        if (this.activeWindow.isMaximized()) {
+          this.activeWindow.unmaximize();
+          this.activeWindow.setBounds(recovered.bounds);
+          this.activeWindow.maximize();
+        } else {
+          this.activeWindow.setBounds(recovered.bounds);
+          this.lastNormalBounds = recovered.bounds;
+        }
+        this.flushSync();
+      }
+    };
+    electron.screen.on("display-removed", this.displayRemovedListener);
+  }
+  scheduleDebouncedSave(delayMs = 500) {
+    if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    this.debounceTimer = setTimeout(() => {
+      this.flushSync();
+    }, delayMs);
+  }
+  flushSync() {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (!this.lastNormalBounds || !isFiniteRect(this.lastNormalBounds)) return;
+    if (this.activeWindow && !this.activeWindow.isDestroyed()) {
+      if (this.activeWindow.isMaximized()) {
+        this.maximized = true;
+      } else if (!this.activeWindow.isMinimized()) {
+        this.maximized = false;
+      }
+      this.fullScreen = this.activeWindow.isFullScreen();
+    }
+    saveWindowState({
+      x: this.lastNormalBounds.x,
+      y: this.lastNormalBounds.y,
+      width: this.lastNormalBounds.width,
+      height: this.lastNormalBounds.height,
+      isMaximized: this.maximized,
+      isFullScreen: this.fullScreen
+    });
+  }
+  unmanage() {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (this.displayRemovedListener) {
+      electron.screen.removeListener("display-removed", this.displayRemovedListener);
+      this.displayRemovedListener = null;
+    }
+    this.activeWindow = null;
+  }
+}
+const windowStateManager = new WindowStateManager();
 function resolvePreload(name) {
   return path.join(__dirname, "../preload", name);
 }
@@ -4020,9 +4382,12 @@ function resolveAppIcon() {
   return process.platform === "win32" ? ico : png;
 }
 function createWindow() {
+  const initial = windowStateManager.getInitialState();
   const win = new electron.BrowserWindow({
-    width: 1200,
-    height: 800,
+    x: initial.bounds.x,
+    y: initial.bounds.y,
+    width: initial.bounds.width,
+    height: initial.bounds.height,
     icon: resolveAppIcon(),
     transparent: false,
     backgroundColor: "#F7F7F5",
@@ -4035,12 +4400,20 @@ function createWindow() {
       backgroundThrottling: false
     }
   });
+  windowStateManager.manage(win);
   win.__isMainWindow = true;
   global.mainWindow = win;
   global.overlayWindow = win;
   registerComposer(win);
-  win.on("blur", () => setAirspaceFocusEmulation(win, false));
-  win.on("focus", () => setAirspaceFocusEmulation(win, true));
+  win.on("blur", () => FocusArbiter.blur(win));
+  win.on("focus", () => {
+    const activePaneId = FocusArbiter.getActivePaneId(win.id);
+    if (activePaneId) {
+      FocusArbiter.focusGuest(win, activePaneId);
+    } else {
+      FocusArbiter.focusOverlay(win);
+    }
+  });
   return win;
 }
 function createAppOverlay(win) {
@@ -4089,8 +4462,10 @@ function initWindowManagerIpc() {
     global.mainWindow?.minimize();
   });
   electron.ipcMain.on("window.focus-main", () => {
-    global.mainWindow?.focus();
-    global.mainWindow?.webContents.focus();
+    FocusArbiter.focusOverlay(global.mainWindow);
+  });
+  electron.ipcMain.on("app:focus-overlay-window", () => {
+    FocusArbiter.focusOverlay(global.mainWindow);
   });
   electron.ipcMain.on("app.openInternalDevTools", () => {
     if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
@@ -4123,7 +4498,15 @@ function bindGuestCursor(wc) {
   });
 }
 function handleBeforeInputEvent(webContents, event, input) {
-  if (input.type !== "keyDown") return;
+  if (input.type !== "keyDown" && input.type !== "keyUp") return;
+  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
+  if (!ov || ov.isDestroyed()) return;
+  if (global.appOverlayView && webContents.id === global.appOverlayView.webContents.id) {
+    return;
+  }
+  if (global.mainWindow && webContents.id === global.mainWindow.webContents.id) {
+    return;
+  }
   const isMod = Boolean(input.control || input.meta);
   const keyLower = input.key ? input.key.toLowerCase() : "";
   const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
@@ -4135,7 +4518,7 @@ function handleBeforeInputEvent(webContents, event, input) {
   if (isAppShortcut) {
     event.preventDefault();
   }
-  if (isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
+  if (input.type === "keyDown" && isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
     if (input.shift) {
       webContents.reloadIgnoringCache();
     } else {
@@ -4149,6 +4532,7 @@ function handleBeforeInputEvent(webContents, event, input) {
   const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
   const payload = {
     webContentsId: webContents.id,
+    type: input.type === "keyUp" ? "keyup" : "keydown",
     key: input.key,
     code: input.code,
     control: input.control,
@@ -4159,13 +4543,10 @@ function handleBeforeInputEvent(webContents, event, input) {
     isInputFocused: false,
     eventId: sharedId
   };
-  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
-  if (ov && !ov.isDestroyed()) {
-    if (isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
-      ov.focus();
-    }
-    ov.send("forwarded-key", payload);
+  if (input.type === "keyDown" && isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
+    ov.focus();
   }
+  ov.send("forwarded-key", payload);
 }
 function extractUnreadBadgeFromTitle(title) {
   if (!title || typeof title !== "string") {
@@ -4431,6 +4812,10 @@ class CommunicatorService {
       }
     });
     view.setBackgroundColor("#ffffff");
+    try {
+      view.webContents.setZoomMode("isolated");
+    } catch {
+    }
     view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
     bindGuestCursor(view.webContents);
     view.webContents.on("will-navigate", (_e, navUrl) => {
@@ -5338,13 +5723,16 @@ function configureSessionSecurity(session) {
     }
     return true;
   });
+  let flushTimer = null;
   try {
     session.cookies.on("changed", (_event, cookie, cause) => {
-      if (cause === "explicit" || cause === "overwrite") {
-        if (cookie.name.includes("token") || cookie.name.includes("session") || cookie.name.includes("auth") || cookie.name === "d" || cookie.name === "SID") {
+      if ((cause === "explicit" || cause === "overwrite") && (["d", "SID"].includes(cookie.name) || ["token", "session", "auth"].some((k) => cookie.name.includes(k)))) {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
           session.cookies.flushStore().catch(() => {
           });
-        }
+        }, 2e3);
       }
     });
   } catch {
@@ -5352,6 +5740,11 @@ function configureSessionSecurity(session) {
   session.webRequest.onBeforeSendHeaders(
     { urls: ["https://*/*", "http://*/*"] },
     (details, callback) => {
+      const url = details.url || "";
+      if (url.startsWith("http://localhost:") || url.startsWith("http://127.0.0.1:") || url.startsWith("ws://")) {
+        callback({ cancel: false });
+        return;
+      }
       if (details.method === "OPTIONS") {
         callback({ cancel: false });
         return;
@@ -5433,9 +5826,6 @@ function initSessionSecurity() {
           selectionText: params.selectionText || ""
         });
       }
-    });
-    webContents.on("before-input-event", (event, input) => {
-      handleBeforeInputEvent(webContents, event, input);
     });
     handleWebContentsWindowOpen(webContents);
     webContents.on("render-process-gone", (_event, details) => {
@@ -6360,8 +6750,24 @@ function forwardGuestEvents(win, paneId, view, partition) {
     }
   });
   wc.on("page-title-updated", () => nav());
+  wc.on("did-finish-load", () => {
+    try {
+      if (Math.abs(wc.getZoomFactor() - 1) > 1e-3) {
+        wc.setZoomFactor(1);
+      }
+    } catch {
+    }
+  });
   wc.on("did-start-loading", () => ov()?.send("pane.load-start", { paneId }));
-  wc.on("did-stop-loading", () => ov()?.send("pane.loaded", { paneId }));
+  wc.on("did-stop-loading", () => {
+    try {
+      if (Math.abs(wc.getZoomFactor() - 1) > 1e-3) {
+        wc.setZoomFactor(1);
+      }
+    } catch {
+    }
+    ov()?.send("pane.loaded", { paneId });
+  });
   wc.on(
     "render-process-gone",
     (_e, d) => ov()?.send(IPC_CHANNELS.EVENTS.VIEW_CRASHED, { paneId, reason: d?.reason ?? "crashed", exitCode: d?.exitCode ?? 0 })
@@ -6414,6 +6820,11 @@ function createPane(win, req) {
     }
   });
   if (req.userAgent) view.webContents.setUserAgent(req.userAgent);
+  try {
+    view.webContents.setZoomMode("isolated");
+    view.webContents.setZoomFactor(1);
+  } catch {
+  }
   view.setBackgroundColor("#ffffff");
   if (typeof view.setBorderRadius === "function") {
     view.setBorderRadius(12);
@@ -6443,6 +6854,7 @@ function createPane(win, req) {
   const dpr = devicePixelRatioFor(win);
   const phys = toPhysicalRect(req.rect, dpr);
   placePane(win, req.paneId, view, { ...phys, cssLeft: req.rect.x, cssTop: req.rect.y });
+  FocusArbiter.handlePendingGuestFocus(win, req.paneId);
   if (isValidPhysicalRect(req.rect)) view.setBounds(req.rect);
   if (req.url && req.url.trim().length > 0) view.webContents.loadURL(req.url);
 }
@@ -6463,6 +6875,7 @@ function destroyPane(win, paneId) {
   audioArbiter.handlePaneDestroyed(paneId);
   removePane(win, paneId);
   panes.delete(paneId);
+  FocusArbiter.handlePaneDestroyed(win, paneId);
   if (!view.webContents.isDestroyed()) view.webContents.close();
 }
 function updatePaneProfile(win, paneId, profileId) {
@@ -6520,7 +6933,10 @@ function initPaneLifecycle(getWindow) {
     if (cur && (cur === url || cur.replace(/\/+$/, "") === url.replace(/\/+$/, ""))) return;
     view.webContents.loadURL(url);
   });
-  electron.ipcMain.on(IPC_CHANNELS.VIEW.FOCUS, (_e, id) => panes.get(id)?.webContents.focus());
+  electron.ipcMain.on(IPC_CHANNELS.VIEW.FOCUS, (_e, id) => {
+    const w = getWindow();
+    if (w) FocusArbiter.focusGuest(w, id);
+  });
   electron.ipcMain.on(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, (_e, id, muted) => panes.get(id)?.webContents.setAudioMuted(muted));
   electron.ipcMain.on(IPC_CHANNELS.VIEW.RELOAD, (_e, id) => panes.get(id)?.webContents.reload());
   electron.ipcMain.on("view.zoomIn", (_e, id) => {
@@ -6588,7 +7004,6 @@ if (!gotTheLock) {
     initDbIpc();
     initLicensingIpc();
     initAuthIpc();
-    sessionIdentityService.init();
     initCommunicatorIpc(() => global.mainWindow || void 0);
     initDiagnosticsIpc(logFile);
     initDevCommandBridge(isDevMode);
@@ -6615,17 +7030,20 @@ if (!gotTheLock) {
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
         isShown = true;
-        win.maximize();
+        if (windowStateManager.shouldMaximize()) {
+          win.maximize();
+        }
         win.show();
         syncAppOverlayBounds(win);
       }
     };
+    electron.ipcMain.once("app:ui-mounted", showWindow);
     overlay.webContents.once("dom-ready", () => {
-      showWindow();
-      sessionIdentityService.scanAllProfiles().catch(() => {
-      });
+      syncAppOverlayBounds(win);
+      setTimeout(() => sessionIdentityService.scanAllProfiles().catch(() => {
+      }), 15e3);
     });
-    setTimeout(showWindow, 1200);
+    setTimeout(showWindow, 4e3);
     win.on("resize", () => {
       syncAppOverlayBounds(win);
       reRoundAllPanes(win);
@@ -6669,6 +7087,7 @@ if (!gotTheLock) {
   initDeepLinking();
   electron.app.whenReady().then(boot);
   electron.app.on("before-quit", async () => {
+    windowStateManager.flushSync();
     try {
       await flushAllSessions();
     } catch {

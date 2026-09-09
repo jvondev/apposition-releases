@@ -725,10 +725,9 @@ const api = {
   closeWindow: client.window.close,
   openInternalDevTools: client.window.openInternalDevTools,
   closeInternalDevTools: client.window.closeInternalDevTools,
-  focusMainWindow: () => {
-  },
-  focusOverlayWindow: () => {
-  },
+  signalReady: () => electron.ipcRenderer.send("app:ui-mounted"),
+  focusMainWindow: () => electron.ipcRenderer.send("app:focus-overlay-window"),
+  focusOverlayWindow: () => electron.ipcRenderer.send("app:focus-overlay-window"),
   // Licensing & Updates
   activateLicenseKey: client.licensing.activate,
   validateLicenseKey: client.licensing.validate,
