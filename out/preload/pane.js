@@ -262,6 +262,21 @@ try {
         PublicKeyCredential.isConditionalMediationAvailable = () => Promise.resolve(false);
       }
     } catch {}
+
+    try {
+      Document.prototype.hasFocus = function() {
+        return true;
+      };
+      window.addEventListener(
+        "blur",
+        function(e) {
+          if (e.target === window) {
+            e.stopImmediatePropagation();
+          }
+        },
+        true
+      );
+    } catch {}
   })();`);
 } catch {
 }

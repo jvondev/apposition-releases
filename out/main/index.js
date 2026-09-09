@@ -3144,7 +3144,11 @@ function openConnectAccountModal(options) {
       }
     };
     authWin.webContents.on("did-navigate", handleNavigation);
-    authWin.webContents.on("did-navigate-in-page", handleNavigation);
+    authWin.webContents.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
+      if (isMainFrame) {
+        handleNavigation(_e, navUrl);
+      }
+    });
     authWin.once("closed", () => {
       unregisterOAuthPopup(authWebContentsId);
       if (activeAuthWindow === authWin) {
@@ -3843,6 +3847,103 @@ function reRoundAllPanes(win) {
     s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
   }
 }
+function toCdpButton(button, isMove = false, buttons = 0) {
+  if (isMove) {
+    if ((buttons & 1) !== 0) return "left";
+    if ((buttons & 2) !== 0) return "right";
+    if ((buttons & 4) !== 0) return "middle";
+    return "none";
+  }
+  if (button === 0) return "left";
+  if (button === 1) return "middle";
+  if (button === 2) return "right";
+  return "none";
+}
+function toCdpModifiers(modifiers) {
+  return typeof modifiers === "number" && Number.isFinite(modifiers) ? modifiers : 0;
+}
+const activePaneIdByWin = /* @__PURE__ */ new Map();
+function setAirspaceFocusEmulation(win, enabled) {
+  if (!win || win.isDestroyed()) return;
+  const s = composers.get(win.id);
+  if (!s) return;
+  for (const v of s.views.values()) {
+    if (!v.webContents.isDestroyed() && v.webContents.debugger.isAttached()) {
+      v.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled }).catch(() => {
+      });
+    }
+  }
+}
+function initPointerForwarder(getWindow) {
+  electron.ipcMain.on("airspace:chrome-clicked", () => {
+    setAirspaceFocusEmulation(getWindow(), false);
+  });
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
+    const win = getWindow();
+    if (!win) return;
+    const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
+    if (!hit) return;
+    const view = composers.get(win.id)?.views.get(hit.paneId);
+    if (!view || view.webContents.isDestroyed()) return;
+    const dbg = ensureDebugger(view);
+    if (!dbg) return;
+    const localX = Math.round(msg.x - hit.cssLeft);
+    const localY = Math.round(msg.y - hit.cssTop);
+    if (msg.type === "wheel") {
+      dbg.sendCommand("Input.dispatchMouseEvent", {
+        type: "mouseWheel",
+        x: localX,
+        y: localY,
+        deltaX: msg.deltaX,
+        deltaY: msg.deltaY,
+        modifiers: toCdpModifiers(msg.modifiers),
+        pointerType: "mouse"
+      }).catch(() => {
+      });
+    } else {
+      if (msg.type === "mousedown") {
+        const prevPaneId = activePaneIdByWin.get(win.id);
+        if (prevPaneId && prevPaneId !== hit.paneId) {
+          const prevView = composers.get(win.id)?.views.get(prevPaneId);
+          if (prevView && !prevView.webContents.isDestroyed() && prevView.webContents.debugger.isAttached()) {
+            prevView.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {
+            });
+          }
+        }
+        activePaneIdByWin.set(win.id, hit.paneId);
+        dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+        });
+        view.webContents.focus();
+        global.appOverlayView?.webContents.send("pane.focused", hit.paneId);
+      }
+      const isMove = msg.type === "mousemove";
+      dbg.sendCommand("Input.dispatchMouseEvent", {
+        type: msg.type === "mousedown" ? "mousePressed" : msg.type === "mouseup" ? "mouseReleased" : "mouseMoved",
+        x: localX,
+        y: localY,
+        button: toCdpButton(msg.button, isMove, msg.buttons),
+        buttons: msg.buttons,
+        clickCount: isMove ? 0 : msg.clickCount || (msg.type === "mousedown" ? 1 : 0),
+        modifiers: toCdpModifiers(msg.modifiers),
+        pointerType: "mouse"
+      }).catch(() => {
+      });
+    }
+  });
+}
+function ensureDebugger(view) {
+  const dbg = view.webContents.debugger;
+  if (!dbg.isAttached()) {
+    try {
+      dbg.attach("1.3");
+    } catch {
+      return void 0;
+    }
+  }
+  dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+  });
+  return dbg;
+}
 const tearWindows = /* @__PURE__ */ new Map();
 function initTearWindowIpc() {
   electron.ipcMain.on("tear-update", (_event, paneId, x, y) => {
@@ -3938,6 +4039,8 @@ function createWindow() {
   global.mainWindow = win;
   global.overlayWindow = win;
   registerComposer(win);
+  win.on("blur", () => setAirspaceFocusEmulation(win, false));
+  win.on("focus", () => setAirspaceFocusEmulation(win, true));
   return win;
 }
 function createAppOverlay(win) {
@@ -4664,7 +4767,8 @@ function bindViewEvents(paneId, view, profileId) {
   view.webContents.on("dom-ready", () => {
     getTargetWindow()?.webContents.send("view.loaded", { paneId });
   });
-  view.webContents.on("did-fail-load", (_e, errorCode, errorDescription, validatedURL) => {
+  view.webContents.on("did-fail-load", (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame === false) return;
     const win = getTargetWindow();
     if (win) {
       win.webContents.send("view.loaded", { paneId });
@@ -4689,7 +4793,11 @@ function bindViewEvents(paneId, view, profileId) {
     }
     sendNav(url);
   });
-  view.webContents.on("did-navigate-in-page", (_e, url) => sendNav(url));
+  view.webContents.on("did-navigate-in-page", (_e, url, isMainFrame) => {
+    if (isMainFrame) {
+      sendNav(url);
+    }
+  });
   view.webContents.on("page-title-updated", () => sendNav(view.webContents.getURL()));
   view.webContents.on("page-favicon-updated", (_e, favicons) => {
     if (favicons && favicons.length > 0) {
@@ -5686,73 +5794,6 @@ function captureMainException(err, context) {
   } catch {
   }
 }
-function toCdpButton(button, isMove = false, buttons = 0) {
-  if (isMove) {
-    if ((buttons & 1) !== 0) return "left";
-    if ((buttons & 2) !== 0) return "right";
-    if ((buttons & 4) !== 0) return "middle";
-    return "none";
-  }
-  if (button === 0) return "left";
-  if (button === 1) return "middle";
-  if (button === 2) return "right";
-  return "none";
-}
-function toCdpModifiers(modifiers) {
-  return typeof modifiers === "number" && Number.isFinite(modifiers) ? modifiers : 0;
-}
-function initPointerForwarder(getWindow) {
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
-    const win = getWindow();
-    if (!win) return;
-    const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
-    if (!hit) return;
-    const view = composers.get(win.id)?.views.get(hit.paneId);
-    if (!view || view.webContents.isDestroyed()) return;
-    const dbg = ensureDebugger(view);
-    if (!dbg) return;
-    const localX = Math.round(msg.x - hit.cssLeft);
-    const localY = Math.round(msg.y - hit.cssTop);
-    if (msg.type === "wheel") {
-      dbg.sendCommand("Input.dispatchMouseEvent", {
-        type: "mouseWheel",
-        x: localX,
-        y: localY,
-        deltaX: msg.deltaX,
-        deltaY: msg.deltaY,
-        modifiers: toCdpModifiers(msg.modifiers),
-        pointerType: "mouse"
-      }).catch(() => {
-      });
-    } else {
-      if (msg.type === "mousedown") {
-        view.webContents.focus();
-        global.appOverlayView?.webContents.send("pane.focused", hit.paneId);
-      }
-      const isMove = msg.type === "mousemove";
-      dbg.sendCommand("Input.dispatchMouseEvent", {
-        type: msg.type === "mousedown" ? "mousePressed" : msg.type === "mouseup" ? "mouseReleased" : "mouseMoved",
-        x: localX,
-        y: localY,
-        button: toCdpButton(msg.button, isMove, msg.buttons),
-        buttons: msg.buttons,
-        clickCount: isMove ? 0 : msg.clickCount || (msg.type === "mousedown" ? 1 : 0),
-        modifiers: toCdpModifiers(msg.modifiers),
-        pointerType: "mouse"
-      }).catch(() => {
-      });
-    }
-  });
-}
-function ensureDebugger(view) {
-  if (view.webContents.debugger.isAttached()) return view.webContents.debugger;
-  try {
-    view.webContents.debugger.attach("1.3");
-  } catch {
-    return void 0;
-  }
-  return view.webContents.debugger;
-}
 let overlayPreloadPath = "";
 const transientSpecs = /* @__PURE__ */ new Map();
 function initOverlayProjector(getWindow, preloadPath = "") {
@@ -6312,8 +6353,12 @@ function forwardGuestEvents(win, paneId, view, partition) {
       canGoForward: wc.navigationHistory?.canGoForward?.() ?? false
     });
   };
-  wc.on("did-navigate", nav);
-  wc.on("did-navigate-in-page", nav);
+  wc.on("did-navigate", (_e, navUrl) => nav(_e, navUrl));
+  wc.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
+    if (isMainFrame) {
+      nav(_e, navUrl);
+    }
+  });
   wc.on("page-title-updated", () => nav());
   wc.on("did-start-loading", () => ov()?.send("pane.load-start", { paneId }));
   wc.on("did-stop-loading", () => ov()?.send("pane.loaded", { paneId }));
@@ -6381,6 +6426,8 @@ function createPane(win, req) {
     if (!view.webContents.debugger.isAttached()) {
       view.webContents.debugger.attach("1.3");
       view.webContents.debugger.sendCommand("Page.enable").catch(() => {
+      });
+      view.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
       });
       view.webContents.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", {
         source: ANTI_DETECTION_SCRIPT

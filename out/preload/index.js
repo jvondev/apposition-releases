@@ -588,7 +588,10 @@ function installGapPointerForwarding() {
   window.addEventListener(
     "pointerdown",
     (ev) => {
-      if (isChrome(ev.clientX, ev.clientY)) return;
+      if (isChrome(ev.clientX, ev.clientY)) {
+        electron.ipcRenderer.send("airspace:chrome-clicked");
+        return;
+      }
       isDraggingGuest = true;
       ev.preventDefault();
       electron.ipcRenderer.send(

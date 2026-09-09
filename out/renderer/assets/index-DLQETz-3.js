@@ -4071,14 +4071,20 @@ function useLayoutHistory(activeTabId, setActivePaneId, saveLayout) {
     }
   };
 }
+const logo = "data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='none'%20style='color:%20%23000000;'%3e%3c!--%20Apposition%20Master%20Logo:%20The%20Parallax%20Monolith%20--%3e%3cg%20fill='currentColor'%3e%3c!--%20Left%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2026%2018%20H%2050.7%20A%201.8%201.8%200%200%201%2052.43%2020.28%20L%2035.88%2079.95%20A%202.8%202.8%200%200%201%2033.19%2082%20H%2026%20A%208%208%200%200%201%2018%2074%20V%2026%20A%208%208%200%200%201%2026%2018%20Z'/%3e%3c!--%20Right%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2074%2082%20H%2049.3%20A%201.8%201.8%200%200%201%2047.57%2079.72%20L%2064.12%2020.05%20A%202.8%202.8%200%200%201%2066.81%2018%20H%2074%20A%208%208%200%200%201%2082%2026%20V%2074%20A%208%208%200%200%201%2074%2082%20Z'/%3e%3c/g%3e%3c/svg%3e";
 const domainCache = /* @__PURE__ */ new Map();
 const faviconUrlCache = /* @__PURE__ */ new Map();
-const nativeFaviconCache = /* @__PURE__ */ new Map();
+const [nativeFavicons, setNativeFavicons] = createStore({});
 const failedFaviconCache = /* @__PURE__ */ new Set();
+function isAppositionDomain(domain) {
+  if (!domain) return false;
+  return domain === "apposition.app" || domain.endsWith(".apposition.app") || domain === "apposition.com" || domain.endsWith(".apposition.com");
+}
 function setNativeFavicon(rawUrlOrDomain, faviconUrl) {
   const domain = extractDomain(rawUrlOrDomain);
   if (domain && faviconUrl) {
-    nativeFaviconCache.set(domain, faviconUrl);
+    setNativeFavicons(domain, faviconUrl);
+    failedFaviconCache.delete(domain);
   }
 }
 const ROOT_DOMAIN_MAP = {
@@ -4113,7 +4119,10 @@ function getFaviconUrl(rawUrlOrDomain, size = 64) {
   if (!rawUrlOrDomain || rawUrlOrDomain === "about:blank") return "";
   const domain = extractDomain(rawUrlOrDomain);
   if (!domain) return "";
-  const native = nativeFaviconCache.get(domain);
+  if (isAppositionDomain(domain)) {
+    return logo;
+  }
+  const native = nativeFavicons[domain];
   if (native) return native;
   if (domain === "localhost" || domain.startsWith("127.0.0.1")) {
     return "";
@@ -5976,7 +5985,6 @@ function matchAccelerator(acc, isMac) {
     isMac
   );
 }
-const logo = "data:image/svg+xml,%3csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%20fill='none'%20style='color:%20%23000000;'%3e%3c!--%20Apposition%20Master%20Logo:%20The%20Parallax%20Monolith%20--%3e%3cg%20fill='currentColor'%3e%3c!--%20Left%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2026%2018%20H%2050.7%20A%201.8%201.8%200%200%201%2052.43%2020.28%20L%2035.88%2079.95%20A%202.8%202.8%200%200%201%2033.19%2082%20H%2026%20A%208%208%200%200%201%2018%2074%20V%2026%20A%208%208%200%200%201%2026%2018%20Z'/%3e%3c!--%20Right%20Monolithic%20Slab%20--%3e%3cpath%20d='M%2074%2082%20H%2049.3%20A%201.8%201.8%200%200%201%2047.57%2079.72%20L%2064.12%2020.05%20A%202.8%202.8%200%200%201%2066.81%2018%20H%2074%20A%208%208%200%200%201%2082%2026%20V%2074%20A%208%208%200%200%201%2074%2082%20Z'/%3e%3c/g%3e%3c/svg%3e";
 var _tmpl$$1q = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$12 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$R = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$F = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0"><img class="w-[14px] h-[14px] object-contain dark:invert"alt=Logo></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
@@ -14234,6 +14242,7 @@ function Favicon(props) {
   };
   createEffect(() => {
     const url = props.url;
+    faviconUrl();
     setHasError(isFaviconFailed(url));
   });
   const handleError2 = () => {
@@ -23451,7 +23460,10 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
         })
       );
     };
-    const handleNavigate = () => {
+    const handleNavigate = (e) => {
+      if (e && e.type === "did-navigate-in-page" && e.isMainFrame === false) {
+        return;
+      }
       try {
         const currentUrl = el.getURL?.();
         if (currentUrl) dispatchNav(currentUrl, el.getTitle?.());
