@@ -496,11 +496,11 @@ class Logger {
 }
 const logger = new Logger("MAIN");
 const createLogger = (domain, opts) => new Logger(domain, opts);
-function printStartupBanner(version = "1.1.3", logFile = "apposition.log") {
+function printStartupBanner(version2 = "1.1.3", logFile = "apposition.log") {
   const isDev2 = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
   if (!isDev2) return;
   console.log("");
-  console.log("  \x1B[1m\x1B[37mApposition " + version + " (Development Environment)\x1B[0m");
+  console.log("  \x1B[1m\x1B[37mApposition " + version2 + " (Development Environment)\x1B[0m");
   console.log("  \x1B[90mDatabase: Connected · Log File: " + logFile + " · Noise Filter: Active\x1B[0m");
   console.log("");
   console.log("  \x1B[1mTerminal Controls (Press single key):\x1B[0m");
@@ -940,6 +940,11 @@ db.exec(`
     value TEXT
   );
 
+  CREATE TABLE IF NOT EXISTS app_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+
   CREATE TABLE IF NOT EXISTS window_state (
     id TEXT PRIMARY KEY,
     x INTEGER NOT NULL,
@@ -949,6 +954,33 @@ db.exec(`
     is_maximized INTEGER NOT NULL DEFAULT 0,
     is_fullscreen INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS discovered_apps (
+    domain TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    icon_url TEXT,
+    theme_color TEXT,
+    discovered_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS user_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    workspace_id TEXT,
+    layout_state TEXT NOT NULL,
+    preview_apps TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS layout_split_sessions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    apps_json TEXT NOT NULL,
+    layout_state TEXT NOT NULL,
+    timestamp INTEGER NOT NULL
   );
 `);
 try {
@@ -1369,6 +1401,7 @@ function deleteCommunicatorProvider(id) {
   db.prepare("DELETE FROM communicator_providers WHERE id = ?").run(id);
 }
 function getSavedWindowState(id = "main") {
+  if (!db || !db.open) return null;
   try {
     const row = db.prepare(
       "SELECT id, x, y, width, height, is_maximized, is_fullscreen, updated_at FROM window_state WHERE id = ?"
@@ -1388,6 +1421,7 @@ function getSavedWindowState(id = "main") {
   }
 }
 function saveWindowState(state, id = "main") {
+  if (!db || !db.open) return;
   try {
     const stmt = db.prepare(`
       INSERT INTO window_state (id, x, y, width, height, is_maximized, is_fullscreen, updated_at)
@@ -1414,6 +1448,172 @@ function saveWindowState(state, id = "main") {
   } catch (err) {
     console.error("[WindowState DB] Failed to persist window state:", err);
   }
+}
+function saveDiscoveredApp(app) {
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO discovered_apps (domain, name, url, icon_url, theme_color, discovered_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(domain) DO UPDATE SET
+        name = excluded.name,
+        url = excluded.url,
+        icon_url = COALESCE(excluded.icon_url, discovered_apps.icon_url),
+        theme_color = COALESCE(excluded.theme_color, discovered_apps.theme_color),
+        discovered_at = excluded.discovered_at
+    `);
+    stmt.run(
+      app.domain,
+      app.name,
+      app.url,
+      app.iconUrl || null,
+      app.themeColor || null,
+      app.discoveredAt || Date.now()
+    );
+  } catch (err) {
+    console.error("[DB Catalog] Failed to save discovered app:", err);
+  }
+}
+function getDiscoveredApps() {
+  try {
+    const stmt = db.prepare(`
+      SELECT domain, name, url, icon_url as iconUrl, theme_color as themeColor, discovered_at as discoveredAt
+      FROM discovered_apps
+      ORDER BY discovered_at DESC
+      LIMIT 100
+    `);
+    return stmt.all();
+  } catch (err) {
+    console.error("[DB Catalog] Failed to get discovered apps:", err);
+    return [];
+  }
+}
+function deleteDiscoveredApp(domain) {
+  try {
+    const stmt = db.prepare("DELETE FROM discovered_apps WHERE domain = ?");
+    stmt.run(domain);
+  } catch (err) {
+    console.error("[DB Catalog] Failed to delete discovered app:", err);
+  }
+}
+function saveUserPreset(preset) {
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO user_presets (id, name, workspace_id, layout_state, preview_apps, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        name = excluded.name,
+        layout_state = excluded.layout_state,
+        preview_apps = excluded.preview_apps,
+        updated_at = excluded.updated_at
+    `);
+    stmt.run(
+      preset.id,
+      preset.name,
+      preset.workspaceId || null,
+      preset.layoutState,
+      JSON.stringify(preset.previewApps || []),
+      preset.createdAt || Date.now(),
+      preset.updatedAt || Date.now()
+    );
+  } catch (err) {
+    console.error("[DB Catalog] Failed to save user preset:", err);
+  }
+}
+function getUserPresets(workspaceId) {
+  try {
+    const query = workspaceId ? "SELECT * FROM user_presets WHERE workspace_id IS NULL OR workspace_id = ? ORDER BY updated_at DESC" : "SELECT * FROM user_presets ORDER BY updated_at DESC";
+    const stmt = db.prepare(query);
+    const rows = workspaceId ? stmt.all(workspaceId) : stmt.all();
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      workspaceId: r.workspace_id,
+      layoutState: r.layout_state,
+      previewApps: JSON.parse(r.preview_apps || "[]"),
+      createdAt: r.created_at,
+      updatedAt: r.updated_at
+    }));
+  } catch (err) {
+    console.error("[DB Catalog] Failed to get user presets:", err);
+    return [];
+  }
+}
+function deleteUserPreset(id) {
+  try {
+    const stmt = db.prepare("DELETE FROM user_presets WHERE id = ?");
+    stmt.run(id);
+  } catch (err) {
+    console.error("[DB Catalog] Failed to delete user preset:", err);
+  }
+}
+function recordSplitSession(session) {
+  try {
+    const stmt = db.prepare(`
+      INSERT INTO layout_split_sessions (id, workspace_id, apps_json, layout_state, timestamp)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        apps_json = excluded.apps_json,
+        layout_state = excluded.layout_state,
+        timestamp = excluded.timestamp
+    `);
+    stmt.run(
+      session.id,
+      session.workspaceId,
+      JSON.stringify(session.apps || []),
+      session.layoutState,
+      session.timestamp || Date.now()
+    );
+  } catch (err) {
+    console.error("[DB Catalog] Failed to record split session:", err);
+  }
+}
+function getLastSplitSession(workspaceId) {
+  try {
+    const stmt = db.prepare(`
+      SELECT id, workspace_id as workspaceId, apps_json as appsJson, layout_state as layoutState, timestamp
+      FROM layout_split_sessions
+      WHERE workspace_id = ?
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `);
+    const row = stmt.get(workspaceId);
+    if (!row) return null;
+    return {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      apps: JSON.parse(row.appsJson || "[]"),
+      layoutState: row.layoutState,
+      timestamp: row.timestamp
+    };
+  } catch (err) {
+    console.error("[DB Catalog] Failed to get last split session:", err);
+    return null;
+  }
+}
+function getAppMeta(key) {
+  try {
+    const row = db.prepare("SELECT value FROM app_meta WHERE key = ?").get(key);
+    return row?.value || null;
+  } catch (error) {
+    console.error(`[AppMeta] Failed to get key ${key}:`, error);
+    return null;
+  }
+}
+function setAppMeta(key, value) {
+  try {
+    db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)").run(
+      key,
+      value
+    );
+  } catch (error) {
+    console.error(`[AppMeta] Failed to set key ${key}:`, error);
+  }
+}
+function getLastSeenVersion() {
+  return getAppMeta("last_seen_version");
+}
+function setLastSeenVersion(version2) {
+  setAppMeta("last_seen_version", version2.replace(/^v/, "").trim());
 }
 function toPhysicalRect(r, dpr) {
   return {
@@ -1471,6 +1671,16 @@ const IPC_CHANNELS = {
     FIND_IN_ALL_PANES: "search.findInAllPanes",
     STOP_FIND: "search.stopFind"
   },
+  CATALOG: {
+    GET_DISCOVERED: "catalog.getDiscovered",
+    SAVE_DISCOVERED: "catalog.saveDiscovered",
+    DELETE_DISCOVERED: "catalog.deleteDiscovered",
+    SAVE_USER_PRESET: "catalog.saveUserPreset",
+    GET_USER_PRESETS: "catalog.getUserPresets",
+    DELETE_USER_PRESET: "catalog.deleteUserPreset",
+    RECORD_SPLIT_SESSION: "catalog.recordSplitSession",
+    GET_LAST_SPLIT_SESSION: "catalog.getLastSplitSession"
+  },
   MEMORY: {
     GET_STATS: "memory.getStats",
     SUSPEND_PANE: "memory.suspendPane",
@@ -1492,6 +1702,11 @@ const IPC_CHANNELS = {
     IS_DEV: "licensing.isDev",
     GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
     SAVE_ATTRIBUTION: "licensing.saveAttribution"
+  },
+  CHANGELOG: {
+    GET_STATUS: "changelog.getStatus",
+    MARK_SEEN: "changelog.markSeen",
+    GET_RELEASES: "changelog.getReleases"
   },
   AUTH: {
     CLEAR_SITE_DATA: "auth.clearSiteData",
@@ -1699,7 +1914,7 @@ function getHeaders() {
   }
   return headers;
 }
-async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel, version = "1.2.4", appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel, version2 = "1.2.4", appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
   try {
     const cleanKey = licenseKey.trim();
     const uid = getFreemiusUid(machineGuid);
@@ -1712,7 +1927,7 @@ async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel
         license_key: cleanKey,
         url: machineGuid,
         title: deviceLabel,
-        version
+        version: version2
       })
     });
     const data = await response.json().catch(() => ({}));
@@ -3433,6 +3648,129 @@ function initLicensingIpc() {
     }
   );
 }
+const SENSITIVE_QUERY_REGEX = /(token|auth|key|secret|password|session|code|client_secret)=([^&\s]+)/gi;
+const BEARER_REGEX = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
+const USER_PATH_REGEX = /(?:[a-zA-Z]:)?(?:[\\/])Users(?:[\\/])[^\\/\s"':]+/gi;
+const UNIX_USER_PATH_REGEX = /(?:\/home|\/Users)\/[^\\/\s"':]+/gi;
+const REPO_ROOT_REGEX = /[a-zA-Z]:[\\/][^\\/]+[\\/]apposition/gi;
+function sanitizeStringForOpsec(input) {
+  if (!input || typeof input !== "string") return "";
+  return input.replace(SENSITIVE_QUERY_REGEX, "$1=[REDACTED]").replace(BEARER_REGEX, "Bearer [REDACTED]").replace(USER_PATH_REGEX, "[USER_DIR]").replace(UNIX_USER_PATH_REGEX, "[USER_DIR]").replace(REPO_ROOT_REGEX, "[APP_ROOT]");
+}
+function sanitizeSentryEvent(event) {
+  if (!event) return event;
+  if (event.exception?.values) {
+    for (const val of event.exception.values) {
+      if (val.value) val.value = sanitizeStringForOpsec(val.value);
+      if (val.stacktrace?.frames) {
+        for (const frame of val.stacktrace.frames) {
+          if (frame.filename) frame.filename = sanitizeStringForOpsec(frame.filename);
+        }
+      }
+    }
+  }
+  if (event.breadcrumbs) {
+    for (const b of event.breadcrumbs) {
+      if (b.message) b.message = sanitizeStringForOpsec(b.message);
+      if (b.data && typeof b.data === "object") {
+        try {
+          const stringified = sanitizeStringForOpsec(JSON.stringify(b.data));
+          b.data = JSON.parse(stringified);
+        } catch {
+        }
+      }
+    }
+  }
+  return event;
+}
+function compareSemver(a, b) {
+  const cleanA = a.replace(/^v/, "").trim();
+  const cleanB = b.replace(/^v/, "").trim();
+  const partsA = cleanA.split(".").map((p) => parseInt(p, 10) || 0);
+  const partsB = cleanB.split(".").map((p) => parseInt(p, 10) || 0);
+  const maxLen = Math.max(partsA.length, partsB.length, 3);
+  for (let i = 0; i < maxLen; i++) {
+    const valA = partsA[i] || 0;
+    const valB = partsB[i] || 0;
+    if (valA !== valB) return valA - valB;
+  }
+  return 0;
+}
+function evaluateUpgradeState(lastSeenVersion, currentVersion) {
+  const cleanCurrent = currentVersion.replace(/^v/, "").trim();
+  if (!lastSeenVersion) {
+    return {
+      shouldShowWhatsNew: false,
+      nextVersionToCommit: cleanCurrent,
+      isFreshInstall: true
+    };
+  }
+  const cleanLastSeen = lastSeenVersion.replace(/^v/, "").trim();
+  const diff = compareSemver(cleanLastSeen, cleanCurrent);
+  if (diff < 0) {
+    return {
+      shouldShowWhatsNew: true,
+      nextVersionToCommit: cleanCurrent,
+      isFreshInstall: false
+    };
+  }
+  return {
+    shouldShowWhatsNew: false,
+    nextVersionToCommit: cleanLastSeen,
+    isFreshInstall: false
+  };
+}
+const version = "1.3.0";
+const tag = "v1.3.0";
+const title = "Apposition v1.3.0";
+const publishedAt = "2026-09-11";
+const categories = [{ "category": "Features", "items": [{ "title": "Introducing the App Directory", "description": "Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling." }, { "title": "Dedicated Product Changelog", "description": "Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app." }, { "title": "Tactile App Shortcuts & Split Dock", "description": "Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels." }, { "title": "Flexible Annual Plan", "description": "Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License." }] }, { "category": "Improvements", "items": [{ "title": "Minimalist Tab Titles", "description": "Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels." }, { "title": "In-App Release Notes Viewer", "description": "Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation." }, { "title": "Enhanced Motion & Performance", "description": "Optimized motion, panel transitions, and scrolling performance across all workspace navigation views." }, { "title": "Clean App Catalog", "description": "Removed redundant duplicate listings and disambiguated service entries across shared domains." }] }, { "category": "Bug Fixes", "items": [{ "title": "Workspace Airspace & Transitions", "description": "Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen." }, { "title": "Search Input & Sleep Recovery", "description": "Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear." }, { "title": "Command Bar Behavior", "description": "Prevented accidental transitions to notes when pressing Escape in the workspace search bar." }] }];
+const highlights = [{ "title": "Introducing the App Directory", "description": "Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling." }, { "title": "Dedicated Product Changelog", "description": "Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app." }, { "title": "Minimalist Tab Titles", "description": "Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels." }];
+const currentRelease = {
+  version,
+  tag,
+  title,
+  publishedAt,
+  categories,
+  highlights
+};
+const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.0","tag":"v1.3.0","title":"Apposition v1.3.0","publishedAt":"2026-09-11","categories":[{"category":"Features","items":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Tactile App Shortcuts & Split Dock","description":"Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels."},{"title":"Flexible Annual Plan","description":"Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License."}]},{"category":"Improvements","items":[{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."},{"title":"In-App Release Notes Viewer","description":"Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."},{"title":"Enhanced Motion & Performance","description":"Optimized motion, panel transitions, and scrolling performance across all workspace navigation views."},{"title":"Clean App Catalog","description":"Removed redundant duplicate listings and disambiguated service entries across shared domains."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen."},{"title":"Search Input & Sleep Recovery","description":"Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear."},{"title":"Command Bar Behavior","description":"Prevented accidental transitions to notes when pressing Escape in the workspace search bar."}]}],"highlights":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."}]},{"version":"1.2.7","tag":"v1.2.7","title":"Smart Window Persistence, Dynamic Omnibar Expansion, and Instant Cold Starts","publishedAt":"2026-09-09","categories":[{"category":"Features","items":[{"title":"Smart Window Persistence & Multi-Monitor Recovery","description":"The desktop app now seamlessly remembers your window size, position, and maximized state across restarts, and automatically rescues windows onto your main screen if an external monitor is disconnected."},{"title":"Dynamic Omnibar Expansion","description":"The address search bar now smoothly expands into available window space when editing and seamlessly morphs back into place upon dismissal, while tab labels compress smoothly under pressure without visual overlap."},{"title":"Semantic Title Distillation","description":"Tabs now automatically distill deep page titles into concise sub-task labels like Proposals, Pull requests, or Inbox instead of repeating brand names, and single tabs collapse into clean icon capsules to keep your workspace header uncluttered."}]},{"category":"Improvements","items":[{"title":"Instant Cold Starts","description":"App startup and workspace launch times are now significantly faster, eliminating initial launch freezes and accelerating background tab hydration."},{"title":"Zero-Flicker Launch","description":"The application now opens instantaneously with a fully rendered workspace, eliminating initial blank window delays and keeping active tabs immediately responsive."}]},{"category":"Bug Fixes","items":[{"title":"Duplicate Split Prevention","description":"Splitting panes via keyboard shortcuts now reliably creates a single new pane, eliminating accidental duplicate splits."},{"title":"Split View Focus Synchronization","description":"Active pane navigation and panel closing now synchronize flawlessly across split views, ensuring shortcuts like Ctrl+W consistently close the selected pane."}]}],"highlights":[{"title":"Smart Window Persistence","description":"Apposition automatically remembers your window positions and multi-monitor layouts across restarts."},{"title":"Dynamic Omnibar Expansion","description":"The address and search bar smoothly adapts to fit long queries and collapses into a compact capsule."},{"title":"Instant Cold Starts","description":"Workspaces and active panes now launch instantaneously with zero initial blank window lag."}]},{"version":"1.2.6","tag":"v1.2.6","title":"Seamless Workspace Dropdowns & Visual Branding Polish","publishedAt":"2026-09-09","categories":[{"category":"Improvements","items":[{"title":"Consolidated Brand Mark","description":"Updated all application installer assets and web icons to consistently display the refreshed brand mark across tabs and installer dialogs."}]},{"category":"Bug Fixes","items":[{"title":"Dropdown Menu Stability","description":"Resolved an issue where dropdown menus, selection filters, and model pickers in web workspaces would immediately collapse when clicked."},{"title":"Address Bar Hijack Guard","description":"Resolved an issue where websites containing embedded frames or interactive widgets could unexpectedly hijack the active tab address bar."}]}],"highlights":[{"title":"Dropdown Menu Stability","description":"Dropdown pickers and menus in web applications now stay open reliably during interaction."},{"title":"Address Bar Hijack Guard","description":"Embedded iframes are prevented from modifying tab address state unexpectedly."}]},{"version":"1.2.5","tag":"v1.2.5","title":"Self-Serve Device Licensing, Polished Brand Identity & 50% Partner Program","publishedAt":"2026-09-08","categories":[{"category":"Features","items":[{"title":"Self-Serve Device Licensing","description":"Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 50% Partner Program."}]},{"category":"Improvements","items":[{"title":"Refreshed Visual Identity","description":"Updated the official application icon, website branding, and browser tab favicons with our new split-monolith visual identity."}]}],"highlights":[{"title":"Self-Serve Device Licensing","description":"Manage active device seats and license transfers directly from your Account settings screen."},{"title":"50% Partner Program","description":"Earn recurring rewards for referring teams and collaborators to Apposition."}]},{"version":"1.2.4","tag":"v1.2.4","title":"Silent Background Updates & Precision Workspace Controls","publishedAt":"2026-09-05","categories":[{"category":"Features","items":[{"title":"Dedicated Drawer Resize Controls","description":"Dedicated drawer resize controls in the header and settings menu to customize your workspace layout with precision."},{"title":"Silent Background Updates","description":"Seamless background application updates that download quietly and apply instantly upon restart without interrupting your work."}]},{"category":"Improvements","items":[{"title":"Smarter Omnibar Search Classification","description":"Reliably differentiates search queries from web addresses, ensuring terms like code snippets or decimal numbers open web searches correctly."},{"title":"Anchored Popover Dialogs","description":"Add App and Stack configuration menus now open cleanly as anchored popovers without dimming the workspace."}]},{"category":"Bug Fixes","items":[{"title":"Search Query Desync Fix","description":"Fixed an issue where search queries typed into the address bar were intermittently dropped or desynchronized when navigating."},{"title":"Google Search Redirection Guard","description":"Resolved unexpected authentication prompts and redirection loops when browsing Google search results."}]}],"highlights":[{"title":"Silent Background Updates","description":"Updates download in the background without popups or work interruptions."},{"title":"Workspace Drawer Controls","description":"Fine-tune sidebar and drawer dimensions with tactile resize handles."}]},{"version":"1.2.3","tag":"v1.2.3","title":"Workspace Isolation & Tab Management Polish","publishedAt":"2026-09-02","categories":[{"category":"Features","items":[{"title":"Strict Workspace Sandboxing","description":"Dedicated profile cookies and storage partitions across isolated tabs."}]},{"category":"Improvements","items":[{"title":"Fluid Tab Switching","description":"Zero-latency keyboard shortcuts to cycle through workspaces and tabs."}]}],"highlights":[{"title":"Strict Workspace Sandboxing","description":"Completely isolated session cookies and partitions per tab."}]},{"version":"1.2.2","tag":"v1.2.2","title":"Connected Account Detection & Precision Workspace Isolation","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."}]},{"category":"Improvements & Fixes","items":[{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."},{"title":"Enhanced connected account identification and","description":"Enhanced connected account identification and avatar presentation in pane headers, omniboxes, and workspace menus."}]}],"highlights":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."},{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."}]},{"version":"1.2.1","tag":"v1.2.1","title":"Floating Communicator Hub, Fluid Spatial Drag, and Workspace Interaction Polish","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."}]},{"category":"Improvements","items":[{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."},{"title":"Improved modal dialogs and overlay","description":"Improved modal dialogs and overlay menus to close smoothly on outside clicks or the Escape key."}]},{"category":"Bug Fixes","items":[{"title":"The floating Communicator now stays","description":"The floating Communicator now stays reliably on top of all workspace panes, eliminates visual bleed-through from background pages, and smoothly dismisses whenever you click outside."},{"title":"Fixed an issue where interacting","description":"Fixed an issue where interacting with web applications and links inside split panels could cause unexpected page reloads or unrendered views."}]}],"highlights":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."},{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."}]},{"version":"1.2.0","tag":"v1.2.0","title":"Next-Gen Spatial Engine & Universal Communicator","publishedAt":"2026-08-27","categories":[{"category":"Features","items":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for Slack, Gmail, Telegram, and Discord."},{"title":"Dynamic Split Panes","description":"Tactile drag-and-drop spatial multi-pane tiling with zero webview reloads."}]}],"highlights":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for all your daily apps."},{"title":"Dynamic Split Panes","description":"Tactile spatial tiling with zero pane reloads."}]},{"version":"1.1.8","tag":"v1.1.8","title":"Stability Fixes, Install Improvements & Google Sign-in Reliability","publishedAt":"2026-08-23","categories":[{"category":"Bug Fixes","items":[{"title":"Fixed a rare crash that","description":"Fixed a rare crash that could close the entire app unexpectedly while browsing."},{"title":"Resolved an issue where certain","description":"Resolved an issue where certain network requests and cross-origin authentications could cause the application to crash unexpectedly."}]},{"category":"Sign-in & Accounts","items":[{"title":"Signing in with Google now","description":"Signing in with Google now works reliably inside panels as well as the dedicated login window - including retries after a failed attempt."},{"title":"Google sign-in no longer interrupts","description":"Google sign-in no longer interrupts you with Windows passkey popups; it goes straight to password entry."}]},{"category":"Improvements","items":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]}],"highlights":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]},{"version":"1.1.7","tag":"v1.1.7","title":"Resilient Startup & Seamless Session Recovery","publishedAt":"2026-08-22","categories":[{"category":"Improvements & Bug Fixes","items":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]}],"highlights":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]},{"version":"1.1.6","tag":"v1.1.6","title":"Seamless Media Continuity, Instant Tab Restoration & Streamlined Installers","publishedAt":"2026-08-20","categories":[{"category":"Features","items":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Streamlined Setup & Package Managers","description":"Introduced a distraction-free installation assistant with one-click terminal setup for macOS, Windows, and Linux, plus instant cryptographic verification."}]},{"category":"Improvements & Fixes","items":[{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."},{"title":"Immediate Split Pane Reflow","description":"Closing split panes now instantly reflows remaining views with zero delay and completely halts background audio upon close."},{"title":"Reliable Keyboard Navigation","description":"Workspace shortcuts now reliably trigger even when active web apps attempt to capture keyboard focus."}]}],"highlights":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."}]},{"version":"1.1.5","tag":"v1.1.5","title":"Spatial Navigation, Omnibox Browser Bar & Audio Multitasking","publishedAt":"2026-08-18","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.1.5/apposition-v1.1.5-spatial-navigation.png","categories":[{"category":"Features","items":[{"title":"Top-Center Omnibox Browser Bar","description":"Browser navigation bar with omnibox search suggestions, back/forward history, and quick layout actions."},{"title":"3-Way Spatial Layout Mode","description":"Toggle for docked, floating overlap, and full collapse views with persistent user preferences."},{"title":"Panel Dynamic Island & Focus Mode","description":"Distraction-free single-pane work triggered with Alt+F shortcut."}]},{"category":"Improvements","items":[{"title":"Responsive Soundwave Indicator","description":"Tabs display live soundwaves when audio is playing, with instant one-click muting."},{"title":"Synchronized Spatial Grid","description":"Refined window border margins, split gaps, and drop snap ghosts onto a synchronized grid."}]},{"category":"Bug Fixes","items":[{"title":"Window Control Hit-Testing","description":"Optimized window control responsiveness and hit-testing across all edge layout modes."}]}],"highlights":[{"title":"Top-Center Omnibox Browser Bar","description":"Instant search suggestions and quick layout actions right from the header."},{"title":"3-Way Spatial Layout Mode","description":"Docked, floating overlap, and full collapse workspace arrangements."},{"title":"Audio Indicator & 1-Click Mute","description":"Live soundwaves on active tabs with instant one-click muting."}]},{"version":"1.1.4","tag":"v1.1.4","title":"Multi-Profile Single Sign-On & Persistent Session Sync","publishedAt":"2026-08-18","categories":[{"category":"Features","items":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."}]},{"category":"Improvements","items":[{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."},{"title":"Profile switching preserves the exact","description":"Profile switching preserves the exact active webpage without accidental sign-outs."},{"title":"Profile switcher rows now feature","description":"Profile switcher rows now feature full-width selection highlights and floating hover micro-actions."}]},{"category":"Fixes","items":[{"title":"Switching profiles on a split","description":"Switching profiles on a split pane now instantly switches session partitions and cookies without latency."},{"title":"Active account logins and cookies","description":"Active account logins and cookies are now reliably preserved across app restarts and system sleep."},{"title":"Workspace quick-switching via Command Palette","description":"Workspace quick-switching via Command Palette now previews icons with keyboard navigation."}]}],"highlights":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."},{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."}]},{"version":"1.1.3","tag":"v1.1.3","title":"Seamless System Browser Sign-In, Workspace Context Menus & Enhanced Navigation","publishedAt":"2026-08-16","categories":[{"category":"Features","items":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"History Jump Menu & Navigation Shortcuts","description":"Long-press or right-click the back/forward navigation buttons to open a visual jump menu with site icons, or navigate back and forward instantly using Ctrl+[ and Ctrl+]."},{"title":"Power-User Search Keywords","description":"Address inputs now resolve Google Search directly with instant search engine shortcut keywords for YouTube, GitHub, and Google Drive."}]},{"category":"Improvements","items":[{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."},{"title":"Streamlined Single-Click Setup","description":"Windows installation is now completely silent and lock-free, with instant setup and automatic workspace layout restoration on launch."},{"title":"Fluid Floating Island Transitions","description":"Refined hovering and edge cursor tracking for floating window controls, preventing accidental window collapses and preserving direct click access to underlying web elements."}]},{"category":"Bug Fixes","items":[{"title":"Resilient Split Pane Sessions","description":"Closing a split pane no longer triggers unnecessary page reloads or active session interruptions in adjacent open panes."},{"title":"Reliable Embedded Shortcut Handling","description":"Fixed an issue where keyboard navigation shortcuts could become unresponsive while focused inside web panels, restoring instant focus upon clicking into any pane."},{"title":"Display Scaling Alignment","description":"Resolved an issue where interactive workspace preview tiles appeared scaled down or misaligned on smaller displays."},{"title":"Login Compatibility","description":"Eliminated unexpected firewall prompts and resolved authentication dialog blocks across third-party web services."}]}],"highlights":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."}]},{"version":"1.1.2","tag":"v1.1.2","title":"Zero-Reload Split Persistence & 120 FPS Resizing","publishedAt":"2026-08-13","categories":[{"category":"Improvements","items":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"category":"Bug Fixes","items":[{"title":"Fixed an issue where first-time","description":"Fixed an issue where first-time installations could render an empty screen by guaranteeing robust default workspace and tab initialization."}]}],"highlights":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"version":"1.1.1","tag":"v1.1.1","title":"Layout History, Spatial Keyboard Swapping & Crash Recovery","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added visual audio activity indicators","description":"Added visual audio activity indicators on active tabs to easily identify audio sources across complex multi-pane workspaces."},{"title":"Added intelligent address bar navigation","description":"Added intelligent address bar navigation for local development ports, alongside a one-click terminal install option."}]},{"category":"Improvements","items":[{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."},{"title":"Completely redesigned the pane toolbar","description":"Completely redesigned the pane toolbar with a jitter-free tactile aesthetic and refined double-bezel styling."},{"title":"Upgraded tab hover tooltips to","description":"Upgraded tab hover tooltips to instantly display rich session context with a polished tactile feel."},{"title":"Enhanced workspace docking and pane","description":"Enhanced workspace docking and pane splitting reliability with smoother drag transitions and robust offline session persistence."}]},{"category":"Bug Fixes","items":[{"title":"Fixed a startup crash on","description":"Fixed a startup crash on Windows and macOS caused by an engine compilation mismatch, and ensured the official Apposition icon displays correctly across all desktop platforms."},{"title":"Resolved an issue where dragging","description":"Resolved an issue where dragging panels in workspaces with multiple panes could cause duplicate panels, layout freezes, or dropped keyboard shortcuts."},{"title":"Resolved an issue where closing","description":"Resolved an issue where closing the final tab or pane in a workspace could cause the interface to freeze or display an empty background."},{"title":"Resolved navigation bugs that caused","description":"Resolved navigation bugs that caused the search input to occasionally lose typed text or drop focus when switching workspaces."},{"title":"Resolved an issue where rapidly","description":"Resolved an issue where rapidly switching workspaces could cause tabs to display the wrong environment."}]}],"highlights":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."}]},{"version":"1.1.0","tag":"v1.1.0","title":"Seamless Updates, Standalone Inspector & Draggable Tabs","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Opening the Inspector (F12) now","description":"Opening the Inspector (F12) now launches a clean, standalone floating window instead of squeezing into a sidebar."},{"title":"You can now view our","description":"You can now view our latest release notes in a dedicated popover and submit feedback directly from the new sidebar Support Cluster without leaving your workspace."},{"title":"Opening external links from the","description":"Opening external links from the changelog now seamlessly creates a new workspace tab instead of launching an external browser."}]},{"category":"Improvements","items":[{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."},{"title":"Dragging a pane into an","description":"Dragging a pane into an empty tab now cleanly replaces it with a clear visual drop preview, and moving panes between tabs no longer leaves behind orphaned blank tabs."},{"title":"Dragging the last panel out","description":"Dragging the last panel out of a tab or workspace now automatically cleans up the empty space instead of leaving an abandoned tab."}]},{"category":"Bug Fixes","items":[{"title":"Re-engineered the window manager to","description":"Re-engineered the window manager to completely eliminate cursor jitter and flickering when hovering over panes, while ensuring floating buttons and menus remain perfectly responsive."},{"title":"Resolved multi-window shortcut conflicts, ensuring","description":"Resolved multi-window shortcut conflicts, ensuring actions like splitting panels, closing tabs, and swiping between workspaces are perfectly instantaneous and correctly targeted."},{"title":"Fixed an issue where the","description":"Fixed an issue where the search bar would not automatically receive keyboard focus when opening a new tab or switching back to an empty tab."},{"title":"Resolved an issue that caused","description":"Resolved an issue that caused active workspace panels to unexpectedly refresh or blink when opening the settings menu."}]}],"highlights":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."}]},{"version":"1.0.0","tag":"v1.0.0","title":"Initial Launch of Apposition","publishedAt":"2026-08-02","categories":[{"category":"Features","items":[{"title":"Multi-Pane Workspace Canvas","description":"The digital workspace designed for deep parallel work without tab chaos."}]}],"highlights":[{"title":"Multi-Pane Workspace Canvas","description":"Organize web applications and accounts in one unified window."}]}]');
+function initChangelogIpc() {
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
+    const currentVersion = electron.app.getVersion();
+    const lastSeen = getLastSeenVersion();
+    const evaluation = evaluateUpgradeState(lastSeen, currentVersion);
+    if (evaluation.isFreshInstall) {
+      setLastSeenVersion(evaluation.nextVersionToCommit);
+      return {
+        shouldShowWhatsNew: false,
+        currentVersion,
+        lastSeenVersion: null
+      };
+    }
+    if (evaluation.shouldShowWhatsNew) {
+      return {
+        shouldShowWhatsNew: true,
+        currentVersion,
+        lastSeenVersion: lastSeen,
+        latestRelease: currentRelease
+      };
+    }
+    return {
+      shouldShowWhatsNew: false,
+      currentVersion,
+      lastSeenVersion: lastSeen
+    };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, (_, version2) => {
+    const targetVersion = version2 || electron.app.getVersion();
+    setLastSeenVersion(targetVersion);
+    return { success: true, version: targetVersion };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_RELEASES, () => {
+    return allReleases;
+  });
+}
 const ALGORITHM = "aes-256-gcm";
 const KEY_LEN = 32;
 const SALT_LEN = 16;
@@ -3448,12 +3786,12 @@ function encryptSessionPayload(payload, passphrase) {
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
   const jsonStr = JSON.stringify(payload);
   const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
+  const tag2 = cipher.getAuthTag();
   const bundle = {
     version: 1,
     salt: salt.toString("base64"),
     iv: iv.toString("base64"),
-    tag: tag.toString("base64"),
+    tag: tag2.toString("base64"),
     ciphertext: encrypted.toString("base64")
   };
   return JSON.stringify(bundle);
@@ -3470,11 +3808,11 @@ function decryptSessionPayload(bundleJson, passphrase) {
   }
   const salt = Buffer.from(bundle.salt, "base64");
   const iv = Buffer.from(bundle.iv, "base64");
-  const tag = Buffer.from(bundle.tag, "base64");
+  const tag2 = Buffer.from(bundle.tag, "base64");
   const ciphertext = Buffer.from(bundle.ciphertext, "base64");
   const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
   const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag);
+  decipher.setAuthTag(tag2);
   try {
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return JSON.parse(decrypted.toString("utf8"));
@@ -4425,26 +4763,43 @@ function createAppOverlay(win) {
     }
   });
   view.setBackgroundColor("#00000000");
-  if (utils.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
-    view.webContents.loadURL(process.env["ELECTRON_RENDERER_URL"]);
-  } else {
-    view.webContents.loadFile(path.join(__dirname, "../renderer/index.html"));
-  }
+  const loadOverlay = () => {
+    if (view.webContents.isDestroyed()) return;
+    if (utils.is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+      view.webContents.loadURL(process.env["ELECTRON_RENDERER_URL"]);
+    } else {
+      view.webContents.loadFile(path.join(__dirname, "../renderer/index.html"));
+    }
+  };
+  loadOverlay();
   setAppOverlay(win, view);
   global.appOverlayView = view;
   global.overlayWindow = win;
   syncAppOverlayBounds(win);
-  view.webContents.on("did-fail-load", (_event, errorCode, _desc, validatedURL) => {
-    if (utils.is.dev && (errorCode === -102 || errorCode === -105)) {
+  view.webContents.on("render-process-gone", (_event, details) => {
+    logger.warn(`[OVERLAY] Render process gone (${details.reason}, code: ${details.exitCode})`);
+    if (details.reason !== "clean-exit" && !view.webContents.isDestroyed()) {
       setTimeout(() => {
         if (!view.webContents.isDestroyed()) {
-          view.webContents.loadURL(validatedURL);
+          logger.info("[OVERLAY] Reloading app overlay view following crash...");
+          loadOverlay();
         }
-      }, 600);
+      }, 500);
     }
   });
-  view.webContents.once("dom-ready", () => {
+  view.webContents.on("did-fail-load", (_event, errorCode, desc, validatedURL) => {
+    if (utils.is.dev) {
+      logger.warn(`[OVERLAY] Load failed (${errorCode}): ${desc} at ${validatedURL}`);
+      setTimeout(() => {
+        if (!view.webContents.isDestroyed()) {
+          loadOverlay();
+        }
+      }, 1e3);
+    }
+  });
+  view.webContents.on("dom-ready", () => {
     view.webContents.send("app:env", { nativeViews: true });
+    syncAppOverlayBounds(win);
   });
   return view;
 }
@@ -4548,11 +4903,11 @@ function handleBeforeInputEvent(webContents, event, input) {
   }
   ov.send("forwarded-key", payload);
 }
-function extractUnreadBadgeFromTitle(title) {
-  if (!title || typeof title !== "string") {
+function extractUnreadBadgeFromTitle(title2) {
+  if (!title2 || typeof title2 !== "string") {
     return { count: 0, hasUnread: false, rawTitle: "" };
   }
-  const clean = title.trim();
+  const clean = title2.trim();
   const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
   if (parenMatch && parenMatch[1]) {
     const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
@@ -4842,8 +5197,8 @@ class CommunicatorService {
       injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
     });
     view.webContents.on("page-title-updated", () => {
-      const title = view.webContents.getTitle();
-      const info = extractUnreadBadgeFromTitle(title);
+      const title2 = view.webContents.getTitle();
+      const info = extractUnreadBadgeFromTitle(title2);
       this.updateAppUnread(appId, info);
     });
     view.webContents.on("before-input-event", (e, input) => {
@@ -5893,6 +6248,21 @@ function initSessionPersistenceHooks() {
       logger.info("System suspending - flushing session data to disk");
       await flushAllSessions();
     });
+    electron.powerMonitor.on("resume", () => {
+      logger.info("System resumed from suspend - verifying app overlay and views");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        syncAppOverlayBounds(global.mainWindow);
+      }
+      const overlay = global.appOverlayView;
+      if (overlay && !overlay.webContents.isDestroyed()) {
+        if (overlay.webContents.isCrashed()) {
+          logger.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
+          overlay.webContents.reload();
+        } else {
+          overlay.webContents.send("app:env", { nativeViews: true });
+        }
+      }
+    });
     setInterval(() => {
       flushAllSessions().catch(() => {
       });
@@ -6116,41 +6486,6 @@ function initDevCommandBridge(isDevMode2) {
   } catch {
     setInterval(checkCommand, 1e3);
   }
-}
-const SENSITIVE_QUERY_REGEX = /(token|auth|key|secret|password|session|code|client_secret)=([^&\s]+)/gi;
-const BEARER_REGEX = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
-const USER_PATH_REGEX = /(?:[a-zA-Z]:)?(?:[\\/])Users(?:[\\/])[^\\/\s"':]+/gi;
-const UNIX_USER_PATH_REGEX = /(?:\/home|\/Users)\/[^\\/\s"':]+/gi;
-const REPO_ROOT_REGEX = /[a-zA-Z]:[\\/][^\\/]+[\\/]apposition/gi;
-function sanitizeStringForOpsec(input) {
-  if (!input || typeof input !== "string") return "";
-  return input.replace(SENSITIVE_QUERY_REGEX, "$1=[REDACTED]").replace(BEARER_REGEX, "Bearer [REDACTED]").replace(USER_PATH_REGEX, "[USER_DIR]").replace(UNIX_USER_PATH_REGEX, "[USER_DIR]").replace(REPO_ROOT_REGEX, "[APP_ROOT]");
-}
-function sanitizeSentryEvent(event) {
-  if (!event) return event;
-  if (event.exception?.values) {
-    for (const val of event.exception.values) {
-      if (val.value) val.value = sanitizeStringForOpsec(val.value);
-      if (val.stacktrace?.frames) {
-        for (const frame of val.stacktrace.frames) {
-          if (frame.filename) frame.filename = sanitizeStringForOpsec(frame.filename);
-        }
-      }
-    }
-  }
-  if (event.breadcrumbs) {
-    for (const b of event.breadcrumbs) {
-      if (b.message) b.message = sanitizeStringForOpsec(b.message);
-      if (b.data && typeof b.data === "object") {
-        try {
-          const stringified = sanitizeStringForOpsec(JSON.stringify(b.data));
-          b.data = JSON.parse(stringified);
-        } catch {
-        }
-      }
-    }
-  }
-  return event;
 }
 const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
 let isDev = true;
@@ -6655,10 +6990,10 @@ function initPaneSuperpowerIpc(panes2, getWindow) {
   });
   electron.ipcMain.on("pane.notification-posted", (e, data) => {
     const senderWc = e.sender;
-    const title = senderWc?.getTitle() || "App";
+    const title2 = senderWc?.getTitle() || "App";
     global.appOverlayView?.webContents.send("pane.notification-posted", {
       appId: data.appId || "comm_app",
-      appName: data.appName || title.split(" - ")[0] || "Message",
+      appName: data.appName || title2.split(" - ")[0] || "Message",
       title: data.title || "New Notification",
       snippet: data.body || data.snippet || ""
     });
@@ -6732,13 +7067,13 @@ function forwardGuestEvents(win, paneId, view, partition) {
       });
       return;
     }
-    const title = wc.getTitle();
-    const unread = extractUnreadBadgeFromTitle(title);
+    const title2 = wc.getTitle();
+    const unread = extractUnreadBadgeFromTitle(title2);
     ov()?.send("pane.unread-badge", { paneId, ...unread });
     ov()?.send(IPC_CHANNELS.EVENTS.VIEW_NAVIGATED, {
       paneId,
       url: currentUrl,
-      title,
+      title: title2,
       canGoBack: wc.navigationHistory?.canGoBack?.() ?? false,
       canGoForward: wc.navigationHistory?.canGoForward?.() ?? false
     });
@@ -6852,11 +7187,13 @@ function createPane(win, req) {
   panes.set(req.paneId, view);
   global.appOverlayView?.webContents.send(IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS, req.paneId, view.webContents.id);
   const dpr = devicePixelRatioFor(win);
-  const phys = toPhysicalRect(req.rect, dpr);
-  placePane(win, req.paneId, view, { ...phys, cssLeft: req.rect.x, cssTop: req.rect.y });
+  const hasUrl = Boolean(req.url && req.url.trim().length > 0 && req.url !== "about:blank");
+  const targetRect = hasUrl ? req.rect : { x: -1e4, y: -1e4, width: 0, height: 0 };
+  const phys = toPhysicalRect(targetRect, dpr);
+  placePane(win, req.paneId, view, { ...phys, cssLeft: targetRect.x, cssTop: targetRect.y });
   FocusArbiter.handlePendingGuestFocus(win, req.paneId);
-  if (isValidPhysicalRect(req.rect)) view.setBounds(req.rect);
-  if (req.url && req.url.trim().length > 0) view.webContents.loadURL(req.url);
+  if (isValidPhysicalRect(targetRect)) view.setBounds(targetRect);
+  if (hasUrl) view.webContents.loadURL(req.url);
 }
 function setPaneBounds(win, paneId, rect) {
   const view = panes.get(paneId);
@@ -6971,6 +7308,92 @@ function initPaneLifecycle(getWindow) {
 function unregisterAppShortcuts() {
   electron.globalShortcut.unregisterAll();
 }
+function initCatalogService() {
+  electron.ipcMain.handle(IPC_CHANNELS.CATALOG.GET_DISCOVERED, async () => {
+    return getDiscoveredApps();
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.SAVE_DISCOVERED,
+    async (_e, app) => {
+      saveDiscoveredApp(app);
+      return true;
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.DELETE_DISCOVERED,
+    async (_e, domain) => {
+      deleteDiscoveredApp(domain);
+      return true;
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.SAVE_USER_PRESET,
+    async (_e, preset) => {
+      saveUserPreset(preset);
+      return true;
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.GET_USER_PRESETS,
+    async (_e, workspaceId) => {
+      return getUserPresets(workspaceId);
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.DELETE_USER_PRESET,
+    async (_e, id) => {
+      deleteUserPreset(id);
+      return true;
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.RECORD_SPLIT_SESSION,
+    async (_e, session) => {
+      recordSplitSession(session);
+      return true;
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.CATALOG.GET_LAST_SPLIT_SESSION,
+    async (_e, workspaceId) => {
+      return getLastSplitSession(workspaceId);
+    }
+  );
+  electron.ipcMain.on(
+    "pane.manifest-harvested",
+    (_e, data) => {
+      if (!data.url || !data.url.startsWith("http")) return;
+      try {
+        const u = new URL(data.url);
+        const domain = u.hostname;
+        if (domain === "localhost" || domain.endsWith(".local") || domain === "127.0.0.1" || domain.includes("google.com/search")) {
+          return;
+        }
+        let name = data.title || domain;
+        if (name.includes(" - ")) {
+          name = name.split(" - ")[0].trim();
+        } else if (name.includes(" | ")) {
+          name = name.split(" | ")[0].trim();
+        }
+        const discovered = {
+          domain,
+          name: name.slice(0, 40),
+          url: `${u.protocol}//${u.host}`,
+          iconUrl: data.iconUrl,
+          themeColor: data.themeColor,
+          discoveredAt: Date.now()
+        };
+        saveDiscoveredApp(discovered);
+        global.appOverlayView?.webContents.send(
+          "catalog.app-discovered",
+          discovered
+        );
+      } catch (err) {
+        console.warn("[Catalog Manifest] Failed to parse harvested URL:", err);
+      }
+    }
+  );
+}
 velopack.VelopackApp.build().run();
 applyBrowserSwitches(electron.app);
 const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
@@ -7003,7 +7426,10 @@ if (!gotTheLock) {
     initViewManager();
     initDbIpc();
     initLicensingIpc();
+    initChangelogIpc();
     initAuthIpc();
+    sessionIdentityService.init();
+    initCatalogService();
     initCommunicatorIpc(() => global.mainWindow || void 0);
     initDiagnosticsIpc(logFile);
     initDevCommandBridge(isDevMode);
@@ -7107,8 +7533,6 @@ if (!gotTheLock) {
       destroyAllViews();
     } catch {
     }
-    closeDb();
-    defaultFileSink.close();
     if (process.platform !== "darwin") electron.app.quit();
   });
 }

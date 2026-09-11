@@ -59,6 +59,16 @@ const IPC_CHANNELS = {
     FIND_IN_ALL_PANES: "search.findInAllPanes",
     STOP_FIND: "search.stopFind"
   },
+  CATALOG: {
+    GET_DISCOVERED: "catalog.getDiscovered",
+    SAVE_DISCOVERED: "catalog.saveDiscovered",
+    DELETE_DISCOVERED: "catalog.deleteDiscovered",
+    SAVE_USER_PRESET: "catalog.saveUserPreset",
+    GET_USER_PRESETS: "catalog.getUserPresets",
+    DELETE_USER_PRESET: "catalog.deleteUserPreset",
+    RECORD_SPLIT_SESSION: "catalog.recordSplitSession",
+    GET_LAST_SPLIT_SESSION: "catalog.getLastSplitSession"
+  },
   MEMORY: {
     GET_STATS: "memory.getStats"
   },
@@ -77,6 +87,11 @@ const IPC_CHANNELS = {
     GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
     SAVE_ATTRIBUTION: "licensing.saveAttribution",
     CHECK_FOR_UPDATES: "updater.check"
+  },
+  CHANGELOG: {
+    GET_STATUS: "changelog.getStatus",
+    MARK_SEEN: "changelog.markSeen",
+    GET_RELEASES: "changelog.getReleases"
   },
   AUTH: {
     CLEAR_SITE_DATA: "auth.clearSiteData",
@@ -178,6 +193,11 @@ function createIpcClient(ipcRenderer) {
       saveAttribution: (ref, affiliateId) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION, ref, affiliateId),
       checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.CHECK_FOR_UPDATES)
     },
+    changelog: {
+      getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CHANGELOG.GET_STATUS),
+      markSeen: (version) => ipcRenderer.invoke(IPC_CHANNELS.CHANGELOG.MARK_SEEN, version),
+      getReleases: () => ipcRenderer.invoke(IPC_CHANNELS.CHANGELOG.GET_RELEASES)
+    },
     auth: {
       clearSiteData: (origin, profileId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.CLEAR_SITE_DATA, origin, profileId),
       startRelay: (targetUrl, profileId, paneId) => ipcRenderer.invoke(IPC_CHANNELS.AUTH.START_RELAY, targetUrl, profileId, paneId),
@@ -191,6 +211,16 @@ function createIpcClient(ipcRenderer) {
     metrics: {
       memory: () => ipcRenderer.invoke(IPC_CHANNELS.METRICS.MEMORY),
       prefetch: (url) => ipcRenderer.send(IPC_CHANNELS.METRICS.PREFETCH, url)
+    },
+    catalog: {
+      getDiscovered: () => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.GET_DISCOVERED),
+      saveDiscovered: (app) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.SAVE_DISCOVERED, app),
+      deleteDiscovered: (domain) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.DELETE_DISCOVERED, domain),
+      saveUserPreset: (preset) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.SAVE_USER_PRESET, preset),
+      getUserPresets: (workspaceId) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.GET_USER_PRESETS, workspaceId),
+      deleteUserPreset: (id) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.DELETE_USER_PRESET, id),
+      recordSplitSession: (session) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.RECORD_SPLIT_SESSION, session),
+      getLastSplitSession: (workspaceId) => ipcRenderer.invoke(IPC_CHANNELS.CATALOG.GET_LAST_SPLIT_SESSION, workspaceId)
     },
     tearing: {
       update: (paneId, x, y) => ipcRenderer.send(IPC_CHANNELS.TEARING.UPDATE, paneId, x, y),
@@ -739,6 +769,10 @@ const api = {
   getCheckoutUrl: client.licensing.getCheckoutUrl,
   saveAttribution: client.licensing.saveAttribution,
   checkForUpdates: client.licensing.checkForUpdates,
+  // Changelog & What's New
+  getChangelogStatus: client.changelog.getStatus,
+  markChangelogSeen: client.changelog.markSeen,
+  getChangelogReleases: client.changelog.getReleases,
   // Auth & Session
   clearSiteData: client.auth.clearSiteData,
   startAuthRelay: client.auth.startRelay,
@@ -752,6 +786,8 @@ const api = {
   getMemoryInfo: client.metrics.memory,
   prefetchHost: client.metrics.prefetch,
   getSearchSuggestions: client.view.getSearchSuggestions,
+  // Catalog & Discovered Apps
+  catalog: client.catalog,
   // Tearing
   updateTearWindow: client.tearing.update,
   hideTearWindow: client.tearing.hide,

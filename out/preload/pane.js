@@ -193,6 +193,50 @@ function initScrollContinuity() {
   window.addEventListener("pagehide", () => syncScrollPosition(true));
   window.addEventListener("beforeunload", () => syncScrollPosition(true));
 }
+function initManifestHarvester() {
+  try {
+    const harvest = () => {
+      const url = window.location.href;
+      if (!url || !url.startsWith("http")) return;
+      let iconUrl = "";
+      const appleIcon = document.querySelector(
+        'link[rel="apple-touch-icon"], link[rel="apple-touch-icon-precomposed"]'
+      );
+      if (appleIcon?.href) {
+        iconUrl = appleIcon.href;
+      } else {
+        const icon = document.querySelector(
+          'link[rel="icon"][sizes="192x192"], link[rel="icon"][sizes="512x512"], link[rel="icon"]'
+        );
+        if (icon?.href) iconUrl = icon.href;
+      }
+      const ogImage = document.querySelector(
+        'meta[property="og:image"]'
+      );
+      if (!iconUrl && ogImage?.content) {
+        iconUrl = ogImage.content;
+      }
+      const themeColor = document.querySelector(
+        'meta[name="theme-color"]'
+      )?.content;
+      const title = document.querySelector('meta[property="og:site_name"]')?.content || document.title;
+      electron.ipcRenderer.send("pane.manifest-harvested", {
+        url,
+        title,
+        iconUrl,
+        themeColor
+      });
+    };
+    if (document.readyState === "complete" || document.readyState === "interactive") {
+      setTimeout(harvest, 1500);
+    } else {
+      window.addEventListener("DOMContentLoaded", () => {
+        setTimeout(harvest, 1500);
+      });
+    }
+  } catch (err) {
+  }
+}
 try {
   electron.webFrame.executeJavaScript(`(function() {
     try {
@@ -312,6 +356,7 @@ try {
   );
   initMediaContinuity();
   initScrollContinuity();
+  initManifestHarvester();
   try {
     class ProxiedNotification extends EventTarget {
       static permission = "granted";

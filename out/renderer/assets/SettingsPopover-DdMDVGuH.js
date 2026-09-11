@@ -1,4 +1,4 @@
-import { c as createSignal, i as insert, a as createComponent, S as Show, b as createRenderEffect, s as setAttribute, l as layoutStore, d as setLayoutStore, m as memo, t as template, e as delegateEvents, F as For, W as WorkspaceIcon, f as createEffect, A as AppIcon, g as getAppNameFromUrl, h as appDirectory, j as addEventListener, k as setStyleProperty, o as onMount, P as ProfileForm, n as activeShortcuts, p as className, q as saveShortcut, r as onCleanup, u as style, v as use, w as Portal } from "./index-C9c2TOTm.js";
+import { c as createSignal, i as insert, a as createComponent, S as Show, b as createRenderEffect, s as setAttribute, l as layoutStore, d as setLayoutStore, m as memo, t as template, e as delegateEvents, F as For, W as WorkspaceIcon, f as createEffect, A as AppIcon, g as frecencyEngine, h as getAppNameFromUrl, j as addEventListener, k as setStyleProperty, o as onMount, P as ProfileForm, n as activeShortcuts, p as className, q as saveShortcut, r as onCleanup, u as style, v as use, w as Portal } from "./index-BBjkEsio.js";
 var _tmpl$$6 = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const [deactivating, setDeactivating] = createSignal(false);
@@ -237,19 +237,15 @@ function ProfileShortcutsManager(props) {
   const [apps, setApps] = createSignal([]);
   const [newUrl, setNewUrl] = createSignal("");
   const loadApps = () => {
-    const key = `apposition:profile_apps:${props.profileId}`;
-    const stored = localStorage.getItem(key);
-    if (stored) {
-      try {
-        setApps(JSON.parse(stored));
-      } catch (e) {
-        console.error(e);
-      }
-    } else {
-      const defaults = appDirectory.slice(0, 7);
-      setApps(defaults);
-      localStorage.setItem(key, JSON.stringify(defaults));
-    }
+    const top = frecencyEngine.getTopApps(8);
+    setApps(top.map((app) => ({
+      id: app.id,
+      name: app.name,
+      domain: app.domain,
+      url: app.url,
+      category: "Tools",
+      isPinned: app.isPinned
+    })));
   };
   const saveApps = (list) => {
     const key = `apposition:profile_apps:${props.profileId}`;
@@ -544,7 +540,7 @@ function ProfileCard(props) {
         })];
       }
     }));
-    createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", props.profile.color || "#e11d48"));
+    createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", props.profile.color || "#3b82f6"));
     return _el$;
   })();
 }
