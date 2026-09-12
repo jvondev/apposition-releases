@@ -1,9 +1,99 @@
 [
   {
+    "version": "1.3.1",
+    "tag": "v1.3.1",
+    "title": "Apposition v1.3.1",
+    "publishedAt": "2026-09-12",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Persistent Media Playback Continuity",
+            "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+          },
+          {
+            "title": "Interactive Audio Equalizer & Smart Indicator",
+            "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+          },
+          {
+            "title": "Communicator App Reload",
+            "description": "Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Fluid Drag-and-Drop Spatial Previews",
+            "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
+          },
+          {
+            "title": "Tactile Edge Navigation Shelves",
+            "description": "Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."
+          },
+          {
+            "title": "Real-Time Profile Details",
+            "description": "The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Automatic Account Identification",
+            "description": "Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."
+          },
+          {
+            "title": "Workspace Airspace & Transitions",
+            "description": "Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."
+          },
+          {
+            "title": "Continuous Background Web Sessions",
+            "description": "Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."
+          },
+          {
+            "title": "Communicator Popovers & Settings",
+            "description": "Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."
+          },
+          {
+            "title": "Stable Drag Focus & Screen-Edge Navigation",
+            "description": "Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."
+          },
+          {
+            "title": "Intelligent Semantic Tab Naming",
+            "description": "Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."
+          },
+          {
+            "title": "Intelligent Omnibar & Search Navigation",
+            "description": "Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Persistent Media Playback Continuity",
+        "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+      },
+      {
+        "title": "Interactive Audio Equalizer & Smart Indicator",
+        "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+      },
+      {
+        "title": "Fluid Drag-and-Drop Spatial Previews",
+        "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
+      }
+    ]
+  },
+  {
     "version": "1.3.0",
     "tag": "v1.3.0",
-    "title": "Apposition v1.3.0",
+    "title": "Introducing the App Directory, Dedicated Release Feed & Fluid Multi-Pane Navigation",
     "publishedAt": "2026-09-11",
+    "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.3.0/app-directory.webp",
     "categories": [
       {
         "category": "Features",
@@ -36,6 +126,10 @@
           {
             "title": "In-App Release Notes Viewer",
             "description": "Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."
+          },
+          {
+            "title": "Visual Release Previews",
+            "description": "Key milestone release notes now display high-resolution visual previews directly within the in-app release viewer and website feed."
           },
           {
             "title": "Enhanced Motion & Performance",
@@ -188,7 +282,7 @@
   {
     "version": "1.2.5",
     "tag": "v1.2.5",
-    "title": "Self-Serve Device Licensing, Polished Brand Identity & 50% Partner Program",
+    "title": "Self-Serve Device Licensing, Polished Brand Identity & 35% Partner Program",
     "publishedAt": "2026-09-08",
     "categories": [
       {
@@ -196,7 +290,7 @@
         "items": [
           {
             "title": "Self-Serve Device Licensing",
-            "description": "Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 50% Partner Program."
+            "description": "Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 35% Partner Program."
           }
         ]
       },
@@ -216,7 +310,7 @@
         "description": "Manage active device seats and license transfers directly from your Account settings screen."
       },
       {
-        "title": "50% Partner Program",
+        "title": "35% Partner Program",
         "description": "Earn recurring rewards for referring teams and collaborators to Apposition."
       }
     ]
@@ -315,6 +409,7 @@
     "tag": "v1.2.2",
     "title": "Connected Account Detection & Precision Workspace Isolation",
     "publishedAt": "2026-08-31",
+    "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.2.2/profile-isolation.webp",
     "categories": [
       {
         "category": "Features",
@@ -424,6 +519,7 @@
     "tag": "v1.2.0",
     "title": "Next-Gen Spatial Engine & Universal Communicator",
     "publishedAt": "2026-08-27",
+    "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.2.0/communicator-hub.webp",
     "categories": [
       {
         "category": "Features",

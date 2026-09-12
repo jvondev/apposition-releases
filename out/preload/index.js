@@ -890,7 +890,19 @@ const api = {
     captureSnapshot: (appId) => electron.ipcRenderer.invoke("communicator.captureSnapshot", appId),
     showDrawer: (appId, rect, partition, url) => electron.ipcRenderer.send("communicator.showDrawer", appId, rect, partition, url),
     hideDrawer: () => electron.ipcRenderer.send("communicator.hideDrawer"),
-    destroyView: (appId) => electron.ipcRenderer.send("communicator.destroyView", appId)
+    destroyView: (appId) => electron.ipcRenderer.send("communicator.destroyView", appId),
+    reloadApp: (appId) => electron.ipcRenderer.send("communicator.reloadApp", appId)
+  },
+  // Audio Master Matrix
+  audio: {
+    toggleMute: (paneId) => electron.ipcRenderer.invoke("audio:toggle-mute", paneId),
+    toggleMasterMute: () => electron.ipcRenderer.invoke("audio:toggle-master-mute"),
+    getActiveSources: () => electron.ipcRenderer.invoke("audio:get-active-sources"),
+    onActiveSourcesChanged: (callback) => {
+      const handler = (_, sources) => callback(sources);
+      electron.ipcRenderer.on("audio:active-sources-changed", handler);
+      return () => electron.ipcRenderer.removeListener("audio:active-sources-changed", handler);
+    }
   },
   // Push Event Subscriptions
   onNavigated: events.onViewNavigated,
@@ -969,6 +981,22 @@ const api = {
     const handler = (e) => callback(e.detail);
     window.addEventListener("app:webview-context-menu", handler);
     return () => window.removeEventListener("app:webview-context-menu", handler);
+  },
+  invokeTrpc: (path2, input, type = "query") => electron.ipcRenderer.invoke("trpc-ipc", { path: path2, input, type }),
+  onScreenShareRequest: (callback) => {
+    const handler = (_e, d) => callback(d);
+    electron.ipcRenderer.on("screen-share:request", handler);
+    return () => electron.ipcRenderer.removeListener("screen-share:request", handler);
+  },
+  onPaneHibernated: (callback) => {
+    const handler = (_e, d) => callback(d);
+    electron.ipcRenderer.on("app:pane-hibernated", handler);
+    return () => electron.ipcRenderer.removeListener("app:pane-hibernated", handler);
+  },
+  onPaneRestored: (callback) => {
+    const handler = (_e, d) => callback(d);
+    electron.ipcRenderer.on("app:pane-restored", handler);
+    return () => electron.ipcRenderer.removeListener("app:pane-restored", handler);
   }
 };
 electron.ipcRenderer.on("app:env", (_e, env) => {
@@ -989,6 +1017,12 @@ electron.ipcRenderer.on("pane.unread-badge", (_e, data) => {
 });
 electron.ipcRenderer.on("pane.found-in-page", (_e, data) => {
   window.dispatchEvent(new CustomEvent("pane.found-in-page", { detail: data }));
+});
+electron.ipcRenderer.on("audio:active-sources-changed", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("app:audio-sources-changed", { detail: data }));
+});
+electron.ipcRenderer.on("app:dynamic-media-status", (_e, data) => {
+  window.dispatchEvent(new CustomEvent("app:dynamic-media-status", { detail: data }));
 });
 if (process.contextIsolated) {
   try {

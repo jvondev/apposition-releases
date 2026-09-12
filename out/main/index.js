@@ -9,9 +9,11 @@ require("readline");
 const Database = require("better-sqlite3");
 const crypto = require("crypto");
 const os = require("os");
+const promises = require("fs/promises");
 const http = require("http");
 const Sentry = require("@sentry/electron/main");
-const promises = require("fs/promises");
+const server = require("@trpc/server");
+const zod = require("zod");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -819,7 +821,7 @@ function applyBrowserSwitches(app) {
   }
   app.commandLine.appendSwitch(
     "disable-features",
-    "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm"
+    "IntensiveWakeUpThrottling,MediaRouter,WebAuthentication,WebAuthenticationConditionalUI,WebAuthenticationPermitLocalhost,FedCm,AiaFetching"
   );
   app.commandLine.appendSwitch(
     "disable-blink-features",
@@ -1197,8 +1199,8 @@ function updateWorkspace(id, name, icon) {
 }
 function deleteWorkspace(id) {
   const tabs = db.prepare("SELECT id FROM tabs WHERE workspace_id = ?").all(id);
-  for (const t of tabs) {
-    deleteTab(t.id);
+  for (const t2 of tabs) {
+    deleteTab(t2.id);
   }
   db.prepare("DELETE FROM workspaces WHERE id = ?").run(id);
 }
@@ -2369,1741 +2371,6 @@ viewRegistry.webContentsIdToPaneId;
 const viewProfile = viewRegistry.viewProfiles;
 viewRegistry.stashedBounds;
 const hibernatedViews = viewRegistry.hibernatedViews;
-async function extractFromMatchingPane(ses, domainFragment, extractorScript, timeoutMs = 800) {
-  try {
-    const allWc = electron.webContents.getAllWebContents();
-    for (const wc of allWc) {
-      if (wc.isDestroyed()) continue;
-      if (wc.session !== ses) continue;
-      const url = wc.getURL() || "";
-      if (url.includes(domainFragment)) {
-        const evalPromise = wc.executeJavaScript(extractorScript, true);
-        const timeoutPromise = new Promise(
-          (resolve) => setTimeout(() => resolve(null), timeoutMs)
-        );
-        const result = await Promise.race([evalPromise, timeoutPromise]);
-        if (typeof result === "string" && result.trim()) {
-          return result.trim();
-        }
-      }
-    }
-  } catch {
-  }
-  return null;
-}
-const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
-const GOOGLE_AUTH_COOKIE_NAMES = /* @__PURE__ */ new Set([
-  "SAPISID",
-  "SID",
-  "SSID",
-  "HSID",
-  "APISID",
-  "OSID",
-  "__Secure-1PAPISID",
-  "__Secure-3PAPISID",
-  "__Secure-1PSID",
-  "__Secure-3PSID",
-  "ACCOUNT_CHOOSER",
-  "LOGIN_INFO",
-  "SIDCC",
-  "__Secure-1PSIDCC",
-  "__Secure-3PSIDCC",
-  "LSID"
-]);
-const googleResolver = {
-  providerId: "google",
-  domains: ["google.com", "accounts.google.com", "google.co", "google.", "youtube.com", "gmail.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const googleCookies = cookies.filter((c) => {
-      const d = c.domain || "";
-      return d.includes("google.") || d.includes("accounts.google") || d.includes("youtube.com") || d.includes("gmail.com");
-    });
-    const hasAuthCookie = googleCookies.some((c) => GOOGLE_AUTH_COOKIE_NAMES.has(c.name));
-    if (!hasAuthCookie) return null;
-    let foundEmail;
-    let foundName;
-    let foundAvatar;
-    let foundAliases = [];
-    const paneEmail = await extractFromMatchingPane(
-      ses,
-      "google.",
-      `(() => {
-          const a = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], a[href*="SignOutOptions"], a[href*="accounts.google.com/SignOutOptions"]');
-          if (a) {
-            const l = a.getAttribute('aria-label') || a.innerText || a.getAttribute('title') || '';
-            const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-            if (m && !m[1].endsWith('@google.com')) return m[1];
-          }
-          return null;
-        })()`
-    ) || await extractFromMatchingPane(
-      ses,
-      "youtube.com",
-      `(() => {
-          try {
-            if (typeof window !== 'undefined' && window.ytcfg && typeof window.ytcfg.get === 'function') {
-              const u = window.ytcfg.get('USER_DISPLAY_NAME') || window.ytcfg.get('LOGGED_IN_USER');
-              if (u && typeof u === 'string' && u.trim()) return u.trim();
-            }
-            const handleEl = document.querySelector('#channel-handle, ytd-channel-name #text, yt-formatted-string#channel-handle, #email, ytd-active-account-header-renderer #email');
-            if (handleEl && handleEl.textContent && handleEl.textContent.trim()) {
-              return handleEl.textContent.trim();
-            }
-            const btn = document.querySelector('button#avatar-btn, ytd-topbar-menu-button-renderer, yt-img-shadow#avatar');
-            if (btn) {
-              const l = btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.getAttribute('alt') || '';
-              const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-              if (m) return m[1];
-            }
-          } catch {}
-          return null;
-        })()`
-    );
-    if (paneEmail) foundEmail = paneEmail;
-    if (!foundEmail || foundAliases.length === 0) {
-      try {
-        const resp = await ses.fetch(
-          "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard",
-          {
-            headers: { "User-Agent": CHROME_UA, Referer: "https://accounts.google.com/" },
-            signal: AbortSignal.timeout(1200)
-          }
-        );
-        if (resp.ok) {
-          const text = await resp.text();
-          const cleaned = text.startsWith(")]}'") ? text.slice(4) : text;
-          const data = JSON.parse(cleaned);
-          const accounts = data?.[1];
-          if (Array.isArray(accounts) && accounts.length > 0) {
-            const primary = accounts[0];
-            if (!foundName) foundName = primary?.[2] || "";
-            if (!foundEmail) foundEmail = primary?.[3] || "";
-            if (!foundAvatar) foundAvatar = primary?.[4] || void 0;
-            if (accounts.length > 1) {
-              foundAliases = accounts.slice(1).map((acc) => acc?.[3]).filter((e) => typeof e === "string" && e.includes("@"));
-            }
-          }
-        }
-      } catch {
-      }
-    }
-    if (!foundEmail) {
-      try {
-        const myAcc = await ses.fetch("https://myaccount.google.com/", {
-          headers: { "User-Agent": CHROME_UA },
-          signal: AbortSignal.timeout(1200)
-        });
-        if (myAcc.ok) {
-          const html = await myAcc.text();
-          const m = html.match(/aria-label="Google Account:[^"]*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-          if (m && !m[1].endsWith("@google.com")) foundEmail = m[1];
-        }
-      } catch {
-      }
-    }
-    if (!foundEmail) {
-      for (const c of googleCookies) {
-        try {
-          const decoded = decodeURIComponent(c.value);
-          const match = decoded.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/);
-          if (match && !match[1].endsWith("@google.com") && !match[1].endsWith("@example.com")) {
-            foundEmail = match[1];
-            break;
-          }
-        } catch {
-        }
-      }
-    }
-    return {
-      id: "google",
-      providerId: "google",
-      email: foundEmail || "Google Account",
-      displayName: foundName || foundEmail || "Google User",
-      avatarUrl: foundAvatar,
-      aliases: foundAliases.length > 0 ? foundAliases : void 0,
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const githubResolver = {
-  providerId: "github",
-  domains: ["github.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const ghCookies = cookies.filter((c) => (c.domain || "").includes("github.com"));
-    const isLoggedIn = ghCookies.some((c) => c.name === "logged_in" && c.value === "yes");
-    const hasSession = ghCookies.some(
-      (c) => c.name === "user_session" || c.name === "__Host-user_session_same_site" || c.name === "dotcom_user"
-    );
-    if (!isLoggedIn && !hasSession) return null;
-    const userCookie = ghCookies.find((c) => c.name === "dotcom_user");
-    let username = userCookie?.value ? decodeURIComponent(userCookie.value) : "";
-    if (!username) {
-      const paneUser = await extractFromMatchingPane(
-        ses,
-        "github.com",
-        `(() => {
-          const m = document.querySelector('meta[name="user-login"]');
-          return m ? m.content : null;
-        })()`
-      );
-      if (paneUser) username = paneUser;
-    }
-    if (!username) {
-      const savedCookie = ghCookies.find((c) => c.name === "saved_user_sessions");
-      if (savedCookie?.value) {
-        const match = decodeURIComponent(savedCookie.value).match(/:([a-zA-Z0-9_-]+)/);
-        if (match) username = match[1];
-      }
-    }
-    return {
-      id: "github",
-      providerId: "github",
-      handle: username ? `@${username}` : "@github_user",
-      email: username ? `@${username}` : "@github_user",
-      displayName: username || "GitHub User",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const microsoftResolver = {
-  providerId: "microsoft",
-  domains: ["microsoft.com", "login.microsoftonline.com", "live.com", "office.com", "microsoft365.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const msCookies = cookies.filter((c) => {
-      const d = c.domain || "";
-      return d.includes("microsoft.com") || d.includes("login.microsoftonline.com") || d.includes("live.com") || d.includes("office.com") || d.includes("microsoft365.com");
-    });
-    const hasAuth = msCookies.some(
-      (c) => c.name === "ESTSAUTHPERSISTENT" || c.name === "ESTSAUTH" || c.name === "RPSSecAuth" || c.name === "WLSSC" || c.name === "SignInStateCookie" || c.name === "DefaultAnchorMailbox"
-    );
-    if (!hasAuth) return null;
-    let email = "";
-    const mailboxCookie = msCookies.find((c) => c.name === "DefaultAnchorMailbox");
-    if (mailboxCookie?.value) {
-      try {
-        const decoded = decodeURIComponent(mailboxCookie.value).replace(/^UPN:/i, "");
-        if (decoded.includes("@")) email = decoded;
-      } catch {
-      }
-    }
-    if (!email) {
-      const paneEmail = await extractFromMatchingPane(
-        ses,
-        "microsoft",
-        `(() => {
-          const el = document.querySelector('#mectrl_currentAccount_secondary, [data-test-id="user-email"]');
-          if (el) {
-            const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-            if (m) return m[1];
-          }
-          return null;
-        })()`
-      );
-      if (paneEmail) email = paneEmail;
-    }
-    if (!email) {
-      for (const c of msCookies) {
-        try {
-          const decoded = decodeURIComponent(c.value);
-          const match = decoded.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
-          if (match) {
-            email = match[1];
-            break;
-          }
-        } catch {
-        }
-      }
-    }
-    return {
-      id: "microsoft",
-      providerId: "microsoft",
-      email: email || "Microsoft 365",
-      displayName: email || "Microsoft 365",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const appleResolver = {
-  providerId: "apple",
-  domains: ["apple.com", "appleid.apple.com", "icloud.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const apCookies = cookies.filter((c) => {
-      const d = c.domain || "";
-      return d.includes("apple.com") || d.includes("icloud.com");
-    });
-    const hasAuth = apCookies.some(
-      (c) => c.name === "myacinfo" || c.name === "acn01" || c.name === "aid-auth" || c.name === "scnt"
-    );
-    if (!hasAuth) return null;
-    let email = "";
-    const paneEmail = await extractFromMatchingPane(
-      ses,
-      "apple.com",
-      `(() => {
-        const el = document.querySelector('[class*="apple-id"], [class*="account-name"]');
-        if (el) {
-          const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-          if (m) return m[1];
-        }
-        return null;
-      })()`
-    );
-    if (paneEmail) email = paneEmail;
-    return {
-      id: "apple",
-      providerId: "apple",
-      handle: email || "Apple ID",
-      email: email || "Apple Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const slackResolver = {
-  providerId: "slack",
-  domains: ["slack.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const slCookies = cookies.filter((c) => (c.domain || "").includes("slack.com"));
-    const hasAuth = slCookies.some((c) => c.name === "d" && c.value.startsWith("xoxd-"));
-    if (!hasAuth) return null;
-    let label = "";
-    const paneLabel = await extractFromMatchingPane(
-      ses,
-      "slack.com",
-      `(() => {
-        try {
-          if (window.boot_data && window.boot_data.user_name) return '@' + window.boot_data.user_name;
-        } catch {}
-        const el = document.querySelector('[data-qa="channel_sidebar_name_you"], [data-qa="workspace_name"]');
-        return el ? el.innerText.trim() : null;
-      })()`
-    );
-    if (paneLabel) label = paneLabel;
-    return {
-      id: "slack",
-      providerId: "slack",
-      handle: label || "Slack Workspace",
-      email: label || "Slack Connected",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const xResolver = {
-  providerId: "x",
-  domains: ["x.com", "twitter.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const xCookies = cookies.filter((c) => {
-      const d = c.domain || "";
-      return d.includes("x.com") || d.includes("twitter.com");
-    });
-    const hasAuth = xCookies.some((c) => c.name === "auth_token");
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneHandle = await extractFromMatchingPane(
-      ses,
-      "x.com",
-      `(() => {
-        const btn = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
-        if (btn) {
-          const m = (btn.innerText || '').match(/@([a-zA-Z0-9_]+)/);
-          if (m) return '@' + m[1];
-        }
-        return null;
-      })()`
-    );
-    if (paneHandle) handle = paneHandle;
-    if (!handle) {
-      const ct0 = xCookies.find((c) => c.name === "ct0")?.value || "";
-      if (ct0) {
-        try {
-          const resp = await ses.fetch("https://api.x.com/1.1/account/settings.json", {
-            headers: {
-              authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-              "x-csrf-token": ct0
-            },
-            signal: AbortSignal.timeout(1200)
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            if (data?.screen_name) {
-              handle = `@${data.screen_name}`;
-            }
-          }
-        } catch {
-        }
-      }
-    }
-    if (!handle) {
-      const twid = xCookies.find((c) => c.name === "twid");
-      handle = twid?.value ? `@user_${decodeURIComponent(twid.value).replace(/\D/g, "").slice(-4)}` : "@x_user";
-    }
-    return {
-      id: "x",
-      providerId: "x",
-      handle,
-      email: handle,
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const discordResolver = {
-  providerId: "discord",
-  domains: ["discord.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const dCookies = cookies.filter((c) => (c.domain || "").includes("discord.com"));
-    const hasAuth = dCookies.some(
-      (c) => c.name === "token" || c.name === "__Secure-user_status" || c.name === "OptanonConsent"
-    );
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneName = await extractFromMatchingPane(
-      ses,
-      "discord.com",
-      `(() => {
-        const panel = document.querySelector('[class*="accountProfileCard"], [class*="nameTag"], [class*="avatarWrapper"]');
-        if (panel) {
-          const t = (panel.innerText || '').split('\\n')[0].trim();
-          if (t) return '@' + t.replace(/^@/, '');
-        }
-        return null;
-      })()`
-    );
-    if (paneName) handle = paneName;
-    return {
-      id: "discord",
-      providerId: "discord",
-      handle: handle || "Discord User",
-      email: handle || "Discord Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const gitlabResolver = {
-  providerId: "gitlab",
-  domains: ["gitlab.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const glCookies = cookies.filter((c) => (c.domain || "").includes("gitlab.com"));
-    const hasAuth = glCookies.some(
-      (c) => c.name === "_gitlab_session" || c.name === "remember_user_token"
-    );
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneUser = await extractFromMatchingPane(
-      ses,
-      "gitlab.com",
-      `(() => {
-        try {
-          if (window.gon && window.gon.current_username) return '@' + window.gon.current_username;
-        } catch {}
-        const m = document.querySelector('meta[name="user-login"]');
-        return m && m.content ? '@' + m.content : null;
-      })()`
-    );
-    if (paneUser) handle = paneUser;
-    return {
-      id: "gitlab",
-      providerId: "gitlab",
-      handle: handle || "@gitlab_user",
-      email: handle || "GitLab Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const figmaResolver = {
-  providerId: "figma",
-  domains: ["figma.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const fCookies = cookies.filter((c) => (c.domain || "").includes("figma.com"));
-    const hasAuth = fCookies.some((c) => c.name === "figma.session" || c.name === "figma.auth_token");
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneHandle = await extractFromMatchingPane(
-      ses,
-      "figma.com",
-      `(() => {
-        try {
-          if (window.INITIAL_OPTIONS && window.INITIAL_OPTIONS.user_data) {
-            return window.INITIAL_OPTIONS.user_data.email || window.INITIAL_OPTIONS.user_data.handle;
-          }
-        } catch {}
-        const el = document.querySelector('[data-testid="user-menu-button"], [aria-label*="@"]');
-        return el ? el.getAttribute('aria-label') || el.innerText : null;
-      })()`
-    );
-    if (paneHandle) handle = paneHandle;
-    if (!handle) {
-      try {
-        const resp = await ses.fetch("https://www.figma.com/api/user/state", {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-            Accept: "application/json"
-          },
-          signal: AbortSignal.timeout(1200)
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data?.meta?.email) {
-            handle = data.meta.email;
-          } else if (data?.meta?.handle) {
-            handle = `@${data.meta.handle}`;
-          }
-        }
-      } catch {
-      }
-    }
-    return {
-      id: "figma",
-      providerId: "figma",
-      handle: handle || "Figma Workspace",
-      email: handle || "Figma Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const notionResolver = {
-  providerId: "notion",
-  domains: ["notion.so", "notion.site"],
-  resolveIdentity: async (ses, cookies) => {
-    const nCookies = cookies.filter((c) => (c.domain || "").includes("notion.so"));
-    const hasAuth = nCookies.some((c) => c.name === "token_v2" || c.name === "notion_user_id");
-    if (!hasAuth) return null;
-    let email = "";
-    const paneEmail = await extractFromMatchingPane(
-      ses,
-      "notion.so",
-      `(() => {
-        try {
-          const u = window.__INITIAL_STATE__?.user;
-          if (u && u.email) return u.email;
-        } catch {}
-        const el = document.querySelector('[role="button"][class*="user"], [data-email]');
-        return el ? el.getAttribute('data-email') || el.innerText : null;
-      })()`
-    );
-    if (paneEmail) email = paneEmail;
-    return {
-      id: "notion",
-      providerId: "notion",
-      email: email || "Notion Workspace",
-      handle: email || "Notion Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const linearResolver = {
-  providerId: "linear",
-  domains: ["linear.app"],
-  resolveIdentity: async (ses, cookies) => {
-    const lCookies = cookies.filter((c) => (c.domain || "").includes("linear.app"));
-    const hasAuth = lCookies.some((c) => c.name === "linear:session" || c.name === "koa.sid");
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneHandle = await extractFromMatchingPane(
-      ses,
-      "linear.app",
-      `(() => {
-        const el = document.querySelector('[data-testid="user-profile-button"], [aria-label*="@"]');
-        return el ? el.getAttribute('aria-label') || el.innerText : null;
-      })()`
-    );
-    if (paneHandle) handle = paneHandle;
-    return {
-      id: "linear",
-      providerId: "linear",
-      handle: handle || "Linear Workspace",
-      email: handle || "Linear Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const chatgptResolver = {
-  providerId: "chatgpt",
-  domains: ["chatgpt.com", "openai.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const oCookies = cookies.filter(
-      (c) => (c.domain || "").includes("chatgpt.com") || (c.domain || "").includes("openai.com")
-    );
-    const hasAuth = oCookies.some(
-      (c) => c.name.includes("session-token") || c.name === "oai-did" || c.name === "__Secure-next-auth.session-token"
-    );
-    if (!hasAuth) return null;
-    let email = "";
-    const paneEmail = await extractFromMatchingPane(
-      ses,
-      "chatgpt.com",
-      `(() => {
-        const btn = document.querySelector('[data-testid="accounts-profile-button"]');
-        if (btn) {
-          const m = (btn.innerText || btn.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-          if (m) return m[1];
-        }
-        return null;
-      })()`
-    );
-    if (paneEmail) email = paneEmail;
-    if (!email) {
-      try {
-        const resp = await ses.fetch("https://chatgpt.com/api/auth/session", {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-            Accept: "application/json"
-          },
-          signal: AbortSignal.timeout(1200)
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data?.user?.email) {
-            email = data.user.email;
-          }
-        }
-      } catch {
-      }
-    }
-    return {
-      id: "chatgpt",
-      providerId: "chatgpt",
-      email: email || "ChatGPT Account",
-      handle: email || "OpenAI User",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const canvaResolver = {
-  providerId: "canva",
-  domains: ["canva.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const cCookies = cookies.filter((c) => (c.domain || "").includes("canva.com"));
-    const hasAuth = cCookies.some((c) => c.name === "canva_session" || c.name === "c_user");
-    if (!hasAuth) return null;
-    let name = "";
-    const paneName = await extractFromMatchingPane(
-      ses,
-      "canva.com",
-      `(() => {
-        const el = document.querySelector('[data-testid="user-profile-menu"], [aria-label*="Account"]');
-        return el ? el.getAttribute('aria-label') || el.innerText : null;
-      })()`
-    );
-    if (paneName) name = paneName;
-    return {
-      id: "canva",
-      providerId: "canva",
-      handle: name || "Canva Workspace",
-      email: name || "Canva Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const vercelResolver = {
-  providerId: "vercel",
-  domains: ["vercel.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const vCookies = cookies.filter((c) => (c.domain || "").includes("vercel.com"));
-    const hasAuth = vCookies.some((c) => c.name === "_vercel_jwt" || c.name === "current_team");
-    if (!hasAuth) return null;
-    let handle = "";
-    const paneHandle = await extractFromMatchingPane(
-      ses,
-      "vercel.com",
-      `(() => {
-        try {
-          const m = document.querySelector('meta[name="user-login"], [data-testid="header-avatar"]');
-          if (m) return m.getAttribute('content') || m.getAttribute('aria-label');
-        } catch {}
-        const el = document.querySelector('[data-testid="user-avatar"]');
-        return el ? el.getAttribute('aria-label') : null;
-      })()`
-    );
-    if (paneHandle) handle = paneHandle;
-    return {
-      id: "vercel",
-      providerId: "vercel",
-      handle: handle ? `@${handle.replace(/^@/, "")}` : "Vercel User",
-      email: handle ? `@${handle.replace(/^@/, "")}` : "Vercel Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const stripeResolver = {
-  providerId: "stripe",
-  domains: ["stripe.com", "dashboard.stripe.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const sCookies = cookies.filter((c) => (c.domain || "").includes("stripe.com"));
-    const hasAuth = sCookies.some((c) => c.name === "merchant" || c.name === "cid" || c.name === "user");
-    if (!hasAuth) return null;
-    let label = "";
-    const paneLabel = await extractFromMatchingPane(
-      ses,
-      "dashboard.stripe.com",
-      `(() => {
-        const el = document.querySelector('[data-test="user-menu-button"], [aria-label*="@"]');
-        if (el) {
-          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-          if (m) return m[1];
-          return el.innerText.trim();
-        }
-        return null;
-      })()`
-    );
-    if (paneLabel) label = paneLabel;
-    return {
-      id: "stripe",
-      providerId: "stripe",
-      handle: label || "Stripe Merchant",
-      email: label || "Stripe Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const atlassianResolver = {
-  providerId: "atlassian",
-  domains: ["atlassian.com", "atlassian.net", "jira.com"],
-  resolveIdentity: async (ses, cookies) => {
-    const aCookies = cookies.filter(
-      (c) => (c.domain || "").includes("atlassian.com") || (c.domain || "").includes("atlassian.net") || (c.domain || "").includes("jira.com")
-    );
-    const hasAuth = aCookies.some(
-      (c) => c.name === "atlassian.account.xsrf" || c.name === "ajs_user_id" || c.name === "cloud.session.token"
-    );
-    if (!hasAuth) return null;
-    let email = "";
-    const paneEmail = await extractFromMatchingPane(
-      ses,
-      "atlassian",
-      `(() => {
-        const el = document.querySelector('[data-testid="profile-avatar-trigger"], [data-testid="header-profile-menu-button"]');
-        if (el) {
-          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-          if (m) return m[1];
-          return el.getAttribute('aria-label');
-        }
-        return null;
-      })()`
-    );
-    if (paneEmail) email = paneEmail;
-    return {
-      id: "atlassian",
-      providerId: "atlassian",
-      handle: email || "Atlassian / Jira",
-      email: email || "Atlassian Account",
-      lastDetectedAt: Date.now()
-    };
-  }
-};
-const ALL_RESOLVERS = [
-  googleResolver,
-  githubResolver,
-  microsoftResolver,
-  appleResolver,
-  slackResolver,
-  xResolver,
-  figmaResolver,
-  notionResolver,
-  linearResolver,
-  chatgptResolver,
-  canvaResolver,
-  vercelResolver,
-  stripeResolver,
-  atlassianResolver,
-  discordResolver,
-  gitlabResolver
-];
-class SessionIdentityService {
-  observedSessions = /* @__PURE__ */ new Set();
-  debounceTimers = /* @__PURE__ */ new Map();
-  lastScanTime = /* @__PURE__ */ new Map();
-  cachedResults = /* @__PURE__ */ new Map();
-  getPartitionForProfile(profileId) {
-    if (!profileId || profileId === "main") return "persist:main";
-    try {
-      const p = getProfileById(profileId);
-      if (p?.is_ephemeral) return profileId;
-    } catch {
-    }
-    return `persist:${profileId}`;
-  }
-  getSessionForProfile(profileId) {
-    const partition = this.getPartitionForProfile(profileId);
-    return electron.session.fromPartition(partition);
-  }
-  attachCookieObserver(profileId) {
-    const partition = this.getPartitionForProfile(profileId);
-    if (this.observedSessions.has(partition)) return;
-    this.observedSessions.add(partition);
-    try {
-      const ses = electron.session.fromPartition(partition);
-      ses.cookies.on("changed", (_event, cookie) => {
-        const domain = (cookie?.domain || "").toLowerCase();
-        const matchesAny = ALL_RESOLVERS.some(
-          (r) => r.domains.some((d) => domain.includes(d))
-        );
-        if (!matchesAny) return;
-        this.lastScanTime.delete(profileId);
-        const timerKey = `${profileId}:${domain}`;
-        if (this.debounceTimers.has(timerKey)) {
-          clearTimeout(this.debounceTimers.get(timerKey));
-        }
-        const timer = setTimeout(() => {
-          this.debounceTimers.delete(timerKey);
-          this.scanProfile(profileId, true).catch(() => {
-          });
-        }, 1e3);
-        this.debounceTimers.set(timerKey, timer);
-      });
-    } catch (e) {
-      console.warn(`[IdentityService] Failed to attach observer for ${profileId}:`, e);
-    }
-  }
-  async scanProfile(profileId, force = false) {
-    const now = Date.now();
-    const last = this.lastScanTime.get(profileId) || 0;
-    if (!force && now - last < 5e3 && this.cachedResults.has(profileId)) {
-      return this.cachedResults.get(profileId);
-    }
-    const ses = this.getSessionForProfile(profileId);
-    const cookies = await ses.cookies.get({});
-    const identities = {};
-    await Promise.all(
-      ALL_RESOLVERS.map(async (resolver) => {
-        try {
-          const identity = await resolver.resolveIdentity(ses, cookies);
-          if (identity) {
-            identities[resolver.providerId] = identity;
-          }
-        } catch (err) {
-          console.warn(`[IdentityService] Resolver error for ${resolver.providerId}:`, err);
-        }
-      })
-    );
-    const serialized = JSON.stringify(identities);
-    this.lastScanTime.set(profileId, now);
-    this.cachedResults.set(profileId, identities);
-    const current = getProfileById(profileId);
-    if (current?.is_ephemeral) {
-      this.broadcastProfilesUpdated();
-    } else if (!current || current.identities_json !== serialized) {
-      updateProfileIdentities(profileId, serialized);
-      this.broadcastProfilesUpdated();
-    }
-    return identities;
-  }
-  async scanAllProfiles() {
-    try {
-      const profiles = getProfiles();
-      for (const p of profiles) {
-        this.attachCookieObserver(p.id);
-        await this.scanProfile(p.id);
-      }
-    } catch (err) {
-      console.error("[IdentityService] Failed to scan all profiles:", err);
-    }
-  }
-  async disconnectProvider(profileId, providerId) {
-    try {
-      this.lastScanTime.delete(profileId);
-      this.cachedResults.delete(profileId);
-      const ses = this.getSessionForProfile(profileId);
-      const resolver = ALL_RESOLVERS.find((r) => r.providerId === providerId);
-      if (resolver) {
-        for (const d of resolver.domains) {
-          try {
-            await ses.clearStorageData({
-              origin: `https://${d}`,
-              storages: ["cookies", "localstorage", "serviceworkers", "cachestorage"]
-            });
-          } catch {
-          }
-          const cookies = await ses.cookies.get({ domain: d });
-          for (const c of cookies) {
-            const scheme = c.secure ? "https" : "http";
-            const domain = c.domain?.startsWith(".") ? c.domain.slice(1) : c.domain;
-            try {
-              await ses.cookies.remove(`${scheme}://${domain}${c.path || "/"}`, c.name);
-            } catch {
-            }
-          }
-        }
-      }
-      const p = getProfileById(profileId);
-      let identities = {};
-      if (p?.identities_json) {
-        try {
-          identities = JSON.parse(p.identities_json);
-        } catch {
-        }
-      }
-      delete identities[providerId];
-      updateProfileIdentities(profileId, JSON.stringify(identities));
-      this.broadcastProfilesUpdated();
-      return { success: true };
-    } catch (err) {
-      console.error(`[IdentityService] Failed to disconnect ${providerId}:`, err);
-      return { success: false, error: err.message };
-    }
-  }
-  broadcastProfilesUpdated() {
-    const updated = getProfiles();
-    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-      global.appOverlayView.webContents.send(
-        IPC_CHANNELS.EVENTS.PROFILES_UPDATED,
-        updated
-      );
-    }
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send(
-        IPC_CHANNELS.EVENTS.PROFILES_UPDATED,
-        updated
-      );
-    }
-  }
-  init() {
-    this.scanAllProfiles().catch(
-      (e) => console.warn("[IdentityService] Background scan failed:", e)
-    );
-  }
-}
-const sessionIdentityService = new SessionIdentityService();
-const DEFAULT_CHROME_VERSION = "144.0.7550.80";
-const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
-const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
-function cleanUserAgent(ua) {
-  if (!ua) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const raw = Array.isArray(ua) ? ua[0] : ua;
-  if (typeof raw !== "string" || !raw.trim()) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
-  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
-}
-function isGoogleAuthUrl(url) {
-  if (!url || typeof url !== "string") return false;
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host === "accounts.youtube.com" || host.endsWith(".accounts.youtube.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
-  } catch {
-    const lower = url.toLowerCase();
-    return lower.includes("accounts.google.com") || lower.includes("accounts.youtube.com") || lower.includes("google.com/gsi/");
-  }
-}
-function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
-  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
-  const major = cleanVersion.split(".")[0] || "144";
-  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
-  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
-  return {
-    "sec-ch-ua": secChUa,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": `"${platform}"`,
-    "sec-ch-ua-full-version-list": secChUaFull
-  };
-}
-function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
-  if (!headers || typeof headers !== "object") return {};
-  const result = { ...headers };
-  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
-    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-    result[uaKey2] = FIREFOX_AUTH_UA;
-    for (const key of Object.keys(result)) {
-      if (key.toLowerCase().startsWith("sec-ch-ua")) {
-        delete result[key];
-      }
-    }
-    return result;
-  }
-  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-  result[uaKey] = cleanUserAgent(result[uaKey]);
-  const clientHintKeys = /* @__PURE__ */ new Set([
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "sec-ch-ua-full-version-list"
-  ]);
-  for (const key of Object.keys(result)) {
-    const lower = key.toLowerCase();
-    if (clientHintKeys.has(lower) && lower !== key) {
-      delete result[key];
-    }
-  }
-  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
-  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
-  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
-  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
-  return result;
-}
-let activeAuthWindow = null;
-function isProviderAuthComplete(providerId, url) {
-  const lower = (url || "").toLowerCase();
-  if (lower.startsWith("apposition://") || lower.includes("#oauth-success")) return true;
-  switch (providerId) {
-    case "google":
-      return !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2") && !lower.includes("accounts.google.com/v3/signin");
-    case "github":
-      return lower.includes("github.com") && !lower.includes("/login") && !lower.includes("/session");
-    case "microsoft":
-      return !lower.includes("login.microsoftonline.com") && !lower.includes("login.live.com") && (lower.includes("microsoft.com") || lower.includes("office.com"));
-    case "x":
-      return (lower.includes("twitter.com") || lower.includes("x.com")) && !lower.includes("/login") && !lower.includes("/i/flow/login");
-    case "discord":
-      return lower.includes("discord.com") && !lower.includes("/login");
-    case "gitlab":
-      return lower.includes("gitlab.com") && !lower.includes("/users/sign_in");
-    case "slack":
-      return lower.includes("slack.com") && !lower.includes("/signin");
-    case "apple":
-      return lower.includes("apple.com") && !lower.includes("appleid.apple.com/auth");
-    default:
-      return false;
-  }
-}
-function openConnectAccountModal(options) {
-  try {
-    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
-      activeAuthWindow.focus();
-      return { success: true };
-    }
-    const { providerId, loginUrl, profileId = "main", returnUrl } = options;
-    const partition = sessionIdentityService.getPartitionForProfile(profileId);
-    const isGoogle = providerId === "google";
-    const authWin = new electron.BrowserWindow({
-      width: 540,
-      height: 700,
-      center: true,
-      title: `${providerId.toUpperCase()} Sign-In`,
-      titleBarStyle: "hidden",
-      titleBarOverlay: {
-        color: "#fafaf9",
-        symbolColor: "#121212",
-        height: 36
-      },
-      backgroundColor: "#FFFFFF",
-      show: false,
-      icon: path.join(
-        __dirname,
-        process.platform === "linux" ? "../../../assets/icon.png" : "../../../assets/icon.ico"
-      ),
-      webPreferences: {
-        partition,
-        preload: isGoogle ? path.join(__dirname, "../../preload/authGuard.js") : void 0,
-        sandbox: true,
-        contextIsolation: !isGoogle
-      }
-    });
-    activeAuthWindow = authWin;
-    const authWebContentsId = authWin.webContents.id;
-    registerOAuthPopup(authWebContentsId);
-    if (isGoogle) {
-      try {
-        authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      } catch {
-      }
-    }
-    authWin.once("ready-to-show", () => {
-      if (!authWin.isDestroyed()) authWin.show();
-    });
-    const notifyAndClose = async () => {
-      const identities = await sessionIdentityService.scanProfile(profileId);
-      const identity = identities[providerId];
-      if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-        global.appOverlayView.webContents.send("app.auth-completed", {
-          profileId,
-          providerId,
-          returnUrl,
-          identity,
-          success: true
-        });
-      }
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.auth-completed", {
-          profileId,
-          providerId,
-          returnUrl,
-          identity,
-          success: true
-        });
-      }
-      setTimeout(() => {
-        if (!authWin.isDestroyed()) authWin.close();
-      }, 600);
-    };
-    const handleNavigation = (_e, navUrl) => {
-      if (isProviderAuthComplete(providerId, navUrl)) {
-        notifyAndClose();
-      }
-    };
-    authWin.webContents.on("did-navigate", handleNavigation);
-    authWin.webContents.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
-      if (isMainFrame) {
-        handleNavigation(_e, navUrl);
-      }
-    });
-    authWin.once("closed", () => {
-      unregisterOAuthPopup(authWebContentsId);
-      if (activeAuthWindow === authWin) {
-        activeAuthWindow = null;
-      }
-      sessionIdentityService.scanProfile(profileId).catch(() => {
-      });
-    });
-    authWin.loadURL(loginUrl, isGoogle ? { userAgent: FIREFOX_AUTH_UA } : void 0);
-    return { success: true };
-  } catch (err) {
-    console.error(`Failed to open auth modal for ${options.providerId}:`, err);
-    return { success: false, error: err.message };
-  }
-}
-function configureSessionForProfile(profileId) {
-  try {
-    const profile = getProfileById(profileId);
-    if (!profile) return;
-    const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
-    const ses = electron.session.fromPartition(partition);
-    sessionIdentityService.attachCookieObserver(profileId);
-    if (profile.proxy_server) {
-      ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
-        console.error(`Failed to set proxy for session ${profileId}:`, e);
-      });
-    } else {
-      ses.setProxy({}).catch(() => {
-      });
-    }
-    if (profile.user_agent && profile.user_agent.trim()) {
-      ses.setUserAgent(profile.user_agent.trim());
-    }
-    ses.setPermissionRequestHandler((_webContents, permission, callback) => {
-      const allowed = ["notifications", "geolocation", "media", "screen"];
-      callback(allowed.includes(permission));
-    });
-  } catch (e) {
-    console.error("Failed to configure session for profile", profileId, e);
-  }
-}
-function configureAllSessions() {
-  try {
-    const profiles = getProfiles();
-    for (const profile of profiles) {
-      configureSessionForProfile(profile.id);
-    }
-  } catch (e) {
-    console.error("Failed to configure sessions on startup", e);
-  }
-}
-function initDbIpc() {
-  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_PROFILES, () => {
-    configureAllSessions();
-    return getProfiles();
-  });
-  electron.ipcMain.handle(
-    IPC_CHANNELS.DB.CREATE_PROFILE,
-    async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
-      const isPremium = await checkPremiumStatus();
-      if (!isPremium) {
-        const profiles = getProfiles();
-        if (profiles.length >= 2) {
-          throw new Error("Free tier limits exceeded: Max 2 session profiles.");
-        }
-      }
-      createProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
-      configureSessionForProfile(id);
-      return { id, name, color, is_ephemeral, proxy_server, user_agent };
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.DB.UPDATE_PROFILE,
-    (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
-      updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
-      configureSessionForProfile(id);
-      return { id, name, color, is_ephemeral, proxy_server, user_agent };
-    }
-  );
-  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_PROFILE, async (_, id) => {
-    for (const [paneId, profileId] of viewProfile.entries()) {
-      if (profileId === id) {
-        const view = activeViews.get(paneId);
-        if (view) {
-          const currentUrl = view.webContents.getURL();
-          if (global.mainWindow) {
-            global.mainWindow.contentView.removeChildView(view);
-          }
-          activeViews.delete(paneId);
-          viewProfile.delete(paneId);
-          electron.ipcMain.removeAllListeners(`view.updateProfile.${paneId}`);
-          const createHandler = electron.ipcMain.listeners("view.create")[0];
-          if (createHandler) {
-            createHandler(null, paneId, currentUrl, "main");
-          }
-        }
-      }
-    }
-    let isEphemeral = false;
-    try {
-      const p = getProfileById(id);
-      if (p) isEphemeral = !!p.is_ephemeral;
-    } catch {
-    }
-    deleteProfile(id);
-    try {
-      const ses = electron.session.fromPartition(isEphemeral ? id : `persist:${id}`);
-      await ses.clearStorageData();
-    } catch (e) {
-      console.error("[Profile Engine] Failed to wipe session data:", e);
-    }
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
-  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
-  electron.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name, icon) => {
-    const isPremium = await checkPremiumStatus();
-    if (!isPremium) {
-      const workspaces = getWorkspaces();
-      if (workspaces.length >= 2) {
-        throw new Error("Free tier limits exceeded: Max 2 workspaces.");
-      }
-    }
-    createWorkspace(id, name, icon);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name, icon) => {
-    updateWorkspace(id, name, icon);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
-    deleteWorkspace(id);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, (_, id, profileId) => {
-    setWorkspaceDefaultProfile(id, profileId);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, (_, id, profileId) => {
-    setTabDefaultProfile(id, profileId);
-  });
-  electron.ipcMain.handle(
-    IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE,
-    (_, workspaceId, profileId) => {
-      updatePaneProfilesForWorkspace(workspaceId, profileId);
-    }
-  );
-  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, (_, tabId, profileId) => {
-    updatePaneProfilesForTab(tabId, profileId);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_TABS, (_, workspaceId) => getTabs(workspaceId));
-  electron.ipcMain.handle(IPC_CHANNELS.DB.CREATE_TAB, async (_, id, workspaceId, name) => {
-    const isPremium = await checkPremiumStatus();
-    if (!isPremium) {
-      const tabs = getTabs(workspaceId);
-      if (tabs.length >= 3) {
-        throw new Error("Free tier limits exceeded: Max 3 tabs per workspace.");
-      }
-    }
-    createTab(id, workspaceId, name);
-    return { id, workspaceId, name };
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name, customName) => {
-    updateTab(id, name, customName);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
-    deleteTab(id);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, (_, nodeId, targetTabId) => {
-    moveNodeToTab(nodeId, targetTabId);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_NODES, (_, tabId) => getNodesForTab(tabId));
-  electron.ipcMain.on(IPC_CHANNELS.DB.SAVE_NODE, (_, node) => saveNode(node));
-  electron.ipcMain.on(IPC_CHANNELS.DB.DELETE_NODE, (_, id) => deleteNode(id));
-  electron.ipcMain.on(
-    IPC_CHANNELS.DB.SAVE_TAB_LAYOUT,
-    (_, tabId, layoutState) => saveTabLayout(tabId, layoutState)
-  );
-}
-function initLicensingIpc() {
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.ACTIVATE,
-    (_, key) => activateLicenseKey(key)
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.VALIDATE,
-    (_, key) => validateLicenseKey(key)
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.DEACTIVATE,
-    () => deactivateLicenseKey()
-  );
-  electron.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.GET_STATE,
-    () => getSavedLicenseState()
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.CHECK_PREMIUM,
-    () => checkPremiumStatus()
-  );
-  electron.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL,
-    () => getCheckoutUrl()
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION,
-    (_, ref, affiliateId) => {
-      setMemoryAttribution({ ref, affiliateId });
-      saveAttribution({ ref, affiliateId });
-      return true;
-    }
-  );
-}
-const SENSITIVE_QUERY_REGEX = /(token|auth|key|secret|password|session|code|client_secret)=([^&\s]+)/gi;
-const BEARER_REGEX = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
-const USER_PATH_REGEX = /(?:[a-zA-Z]:)?(?:[\\/])Users(?:[\\/])[^\\/\s"':]+/gi;
-const UNIX_USER_PATH_REGEX = /(?:\/home|\/Users)\/[^\\/\s"':]+/gi;
-const REPO_ROOT_REGEX = /[a-zA-Z]:[\\/][^\\/]+[\\/]apposition/gi;
-function sanitizeStringForOpsec(input) {
-  if (!input || typeof input !== "string") return "";
-  return input.replace(SENSITIVE_QUERY_REGEX, "$1=[REDACTED]").replace(BEARER_REGEX, "Bearer [REDACTED]").replace(USER_PATH_REGEX, "[USER_DIR]").replace(UNIX_USER_PATH_REGEX, "[USER_DIR]").replace(REPO_ROOT_REGEX, "[APP_ROOT]");
-}
-function sanitizeSentryEvent(event) {
-  if (!event) return event;
-  if (event.exception?.values) {
-    for (const val of event.exception.values) {
-      if (val.value) val.value = sanitizeStringForOpsec(val.value);
-      if (val.stacktrace?.frames) {
-        for (const frame of val.stacktrace.frames) {
-          if (frame.filename) frame.filename = sanitizeStringForOpsec(frame.filename);
-        }
-      }
-    }
-  }
-  if (event.breadcrumbs) {
-    for (const b of event.breadcrumbs) {
-      if (b.message) b.message = sanitizeStringForOpsec(b.message);
-      if (b.data && typeof b.data === "object") {
-        try {
-          const stringified = sanitizeStringForOpsec(JSON.stringify(b.data));
-          b.data = JSON.parse(stringified);
-        } catch {
-        }
-      }
-    }
-  }
-  return event;
-}
-function compareSemver(a, b) {
-  const cleanA = a.replace(/^v/, "").trim();
-  const cleanB = b.replace(/^v/, "").trim();
-  const partsA = cleanA.split(".").map((p) => parseInt(p, 10) || 0);
-  const partsB = cleanB.split(".").map((p) => parseInt(p, 10) || 0);
-  const maxLen = Math.max(partsA.length, partsB.length, 3);
-  for (let i = 0; i < maxLen; i++) {
-    const valA = partsA[i] || 0;
-    const valB = partsB[i] || 0;
-    if (valA !== valB) return valA - valB;
-  }
-  return 0;
-}
-function evaluateUpgradeState(lastSeenVersion, currentVersion) {
-  const cleanCurrent = currentVersion.replace(/^v/, "").trim();
-  if (!lastSeenVersion) {
-    return {
-      shouldShowWhatsNew: false,
-      nextVersionToCommit: cleanCurrent,
-      isFreshInstall: true
-    };
-  }
-  const cleanLastSeen = lastSeenVersion.replace(/^v/, "").trim();
-  const diff = compareSemver(cleanLastSeen, cleanCurrent);
-  if (diff < 0) {
-    return {
-      shouldShowWhatsNew: true,
-      nextVersionToCommit: cleanCurrent,
-      isFreshInstall: false
-    };
-  }
-  return {
-    shouldShowWhatsNew: false,
-    nextVersionToCommit: cleanLastSeen,
-    isFreshInstall: false
-  };
-}
-const version = "1.3.0";
-const tag = "v1.3.0";
-const title = "Apposition v1.3.0";
-const publishedAt = "2026-09-11";
-const categories = [{ "category": "Features", "items": [{ "title": "Introducing the App Directory", "description": "Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling." }, { "title": "Dedicated Product Changelog", "description": "Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app." }, { "title": "Tactile App Shortcuts & Split Dock", "description": "Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels." }, { "title": "Flexible Annual Plan", "description": "Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License." }] }, { "category": "Improvements", "items": [{ "title": "Minimalist Tab Titles", "description": "Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels." }, { "title": "In-App Release Notes Viewer", "description": "Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation." }, { "title": "Enhanced Motion & Performance", "description": "Optimized motion, panel transitions, and scrolling performance across all workspace navigation views." }, { "title": "Clean App Catalog", "description": "Removed redundant duplicate listings and disambiguated service entries across shared domains." }] }, { "category": "Bug Fixes", "items": [{ "title": "Workspace Airspace & Transitions", "description": "Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen." }, { "title": "Search Input & Sleep Recovery", "description": "Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear." }, { "title": "Command Bar Behavior", "description": "Prevented accidental transitions to notes when pressing Escape in the workspace search bar." }] }];
-const highlights = [{ "title": "Introducing the App Directory", "description": "Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling." }, { "title": "Dedicated Product Changelog", "description": "Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app." }, { "title": "Minimalist Tab Titles", "description": "Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels." }];
-const currentRelease = {
-  version,
-  tag,
-  title,
-  publishedAt,
-  categories,
-  highlights
-};
-const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.0","tag":"v1.3.0","title":"Apposition v1.3.0","publishedAt":"2026-09-11","categories":[{"category":"Features","items":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Tactile App Shortcuts & Split Dock","description":"Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels."},{"title":"Flexible Annual Plan","description":"Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License."}]},{"category":"Improvements","items":[{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."},{"title":"In-App Release Notes Viewer","description":"Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."},{"title":"Enhanced Motion & Performance","description":"Optimized motion, panel transitions, and scrolling performance across all workspace navigation views."},{"title":"Clean App Catalog","description":"Removed redundant duplicate listings and disambiguated service entries across shared domains."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen."},{"title":"Search Input & Sleep Recovery","description":"Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear."},{"title":"Command Bar Behavior","description":"Prevented accidental transitions to notes when pressing Escape in the workspace search bar."}]}],"highlights":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."}]},{"version":"1.2.7","tag":"v1.2.7","title":"Smart Window Persistence, Dynamic Omnibar Expansion, and Instant Cold Starts","publishedAt":"2026-09-09","categories":[{"category":"Features","items":[{"title":"Smart Window Persistence & Multi-Monitor Recovery","description":"The desktop app now seamlessly remembers your window size, position, and maximized state across restarts, and automatically rescues windows onto your main screen if an external monitor is disconnected."},{"title":"Dynamic Omnibar Expansion","description":"The address search bar now smoothly expands into available window space when editing and seamlessly morphs back into place upon dismissal, while tab labels compress smoothly under pressure without visual overlap."},{"title":"Semantic Title Distillation","description":"Tabs now automatically distill deep page titles into concise sub-task labels like Proposals, Pull requests, or Inbox instead of repeating brand names, and single tabs collapse into clean icon capsules to keep your workspace header uncluttered."}]},{"category":"Improvements","items":[{"title":"Instant Cold Starts","description":"App startup and workspace launch times are now significantly faster, eliminating initial launch freezes and accelerating background tab hydration."},{"title":"Zero-Flicker Launch","description":"The application now opens instantaneously with a fully rendered workspace, eliminating initial blank window delays and keeping active tabs immediately responsive."}]},{"category":"Bug Fixes","items":[{"title":"Duplicate Split Prevention","description":"Splitting panes via keyboard shortcuts now reliably creates a single new pane, eliminating accidental duplicate splits."},{"title":"Split View Focus Synchronization","description":"Active pane navigation and panel closing now synchronize flawlessly across split views, ensuring shortcuts like Ctrl+W consistently close the selected pane."}]}],"highlights":[{"title":"Smart Window Persistence","description":"Apposition automatically remembers your window positions and multi-monitor layouts across restarts."},{"title":"Dynamic Omnibar Expansion","description":"The address and search bar smoothly adapts to fit long queries and collapses into a compact capsule."},{"title":"Instant Cold Starts","description":"Workspaces and active panes now launch instantaneously with zero initial blank window lag."}]},{"version":"1.2.6","tag":"v1.2.6","title":"Seamless Workspace Dropdowns & Visual Branding Polish","publishedAt":"2026-09-09","categories":[{"category":"Improvements","items":[{"title":"Consolidated Brand Mark","description":"Updated all application installer assets and web icons to consistently display the refreshed brand mark across tabs and installer dialogs."}]},{"category":"Bug Fixes","items":[{"title":"Dropdown Menu Stability","description":"Resolved an issue where dropdown menus, selection filters, and model pickers in web workspaces would immediately collapse when clicked."},{"title":"Address Bar Hijack Guard","description":"Resolved an issue where websites containing embedded frames or interactive widgets could unexpectedly hijack the active tab address bar."}]}],"highlights":[{"title":"Dropdown Menu Stability","description":"Dropdown pickers and menus in web applications now stay open reliably during interaction."},{"title":"Address Bar Hijack Guard","description":"Embedded iframes are prevented from modifying tab address state unexpectedly."}]},{"version":"1.2.5","tag":"v1.2.5","title":"Self-Serve Device Licensing, Polished Brand Identity & 50% Partner Program","publishedAt":"2026-09-08","categories":[{"category":"Features","items":[{"title":"Self-Serve Device Licensing","description":"Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 50% Partner Program."}]},{"category":"Improvements","items":[{"title":"Refreshed Visual Identity","description":"Updated the official application icon, website branding, and browser tab favicons with our new split-monolith visual identity."}]}],"highlights":[{"title":"Self-Serve Device Licensing","description":"Manage active device seats and license transfers directly from your Account settings screen."},{"title":"50% Partner Program","description":"Earn recurring rewards for referring teams and collaborators to Apposition."}]},{"version":"1.2.4","tag":"v1.2.4","title":"Silent Background Updates & Precision Workspace Controls","publishedAt":"2026-09-05","categories":[{"category":"Features","items":[{"title":"Dedicated Drawer Resize Controls","description":"Dedicated drawer resize controls in the header and settings menu to customize your workspace layout with precision."},{"title":"Silent Background Updates","description":"Seamless background application updates that download quietly and apply instantly upon restart without interrupting your work."}]},{"category":"Improvements","items":[{"title":"Smarter Omnibar Search Classification","description":"Reliably differentiates search queries from web addresses, ensuring terms like code snippets or decimal numbers open web searches correctly."},{"title":"Anchored Popover Dialogs","description":"Add App and Stack configuration menus now open cleanly as anchored popovers without dimming the workspace."}]},{"category":"Bug Fixes","items":[{"title":"Search Query Desync Fix","description":"Fixed an issue where search queries typed into the address bar were intermittently dropped or desynchronized when navigating."},{"title":"Google Search Redirection Guard","description":"Resolved unexpected authentication prompts and redirection loops when browsing Google search results."}]}],"highlights":[{"title":"Silent Background Updates","description":"Updates download in the background without popups or work interruptions."},{"title":"Workspace Drawer Controls","description":"Fine-tune sidebar and drawer dimensions with tactile resize handles."}]},{"version":"1.2.3","tag":"v1.2.3","title":"Workspace Isolation & Tab Management Polish","publishedAt":"2026-09-02","categories":[{"category":"Features","items":[{"title":"Strict Workspace Sandboxing","description":"Dedicated profile cookies and storage partitions across isolated tabs."}]},{"category":"Improvements","items":[{"title":"Fluid Tab Switching","description":"Zero-latency keyboard shortcuts to cycle through workspaces and tabs."}]}],"highlights":[{"title":"Strict Workspace Sandboxing","description":"Completely isolated session cookies and partitions per tab."}]},{"version":"1.2.2","tag":"v1.2.2","title":"Connected Account Detection & Precision Workspace Isolation","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."}]},{"category":"Improvements & Fixes","items":[{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."},{"title":"Enhanced connected account identification and","description":"Enhanced connected account identification and avatar presentation in pane headers, omniboxes, and workspace menus."}]}],"highlights":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."},{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."}]},{"version":"1.2.1","tag":"v1.2.1","title":"Floating Communicator Hub, Fluid Spatial Drag, and Workspace Interaction Polish","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."}]},{"category":"Improvements","items":[{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."},{"title":"Improved modal dialogs and overlay","description":"Improved modal dialogs and overlay menus to close smoothly on outside clicks or the Escape key."}]},{"category":"Bug Fixes","items":[{"title":"The floating Communicator now stays","description":"The floating Communicator now stays reliably on top of all workspace panes, eliminates visual bleed-through from background pages, and smoothly dismisses whenever you click outside."},{"title":"Fixed an issue where interacting","description":"Fixed an issue where interacting with web applications and links inside split panels could cause unexpected page reloads or unrendered views."}]}],"highlights":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."},{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."}]},{"version":"1.2.0","tag":"v1.2.0","title":"Next-Gen Spatial Engine & Universal Communicator","publishedAt":"2026-08-27","categories":[{"category":"Features","items":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for Slack, Gmail, Telegram, and Discord."},{"title":"Dynamic Split Panes","description":"Tactile drag-and-drop spatial multi-pane tiling with zero webview reloads."}]}],"highlights":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for all your daily apps."},{"title":"Dynamic Split Panes","description":"Tactile spatial tiling with zero pane reloads."}]},{"version":"1.1.8","tag":"v1.1.8","title":"Stability Fixes, Install Improvements & Google Sign-in Reliability","publishedAt":"2026-08-23","categories":[{"category":"Bug Fixes","items":[{"title":"Fixed a rare crash that","description":"Fixed a rare crash that could close the entire app unexpectedly while browsing."},{"title":"Resolved an issue where certain","description":"Resolved an issue where certain network requests and cross-origin authentications could cause the application to crash unexpectedly."}]},{"category":"Sign-in & Accounts","items":[{"title":"Signing in with Google now","description":"Signing in with Google now works reliably inside panels as well as the dedicated login window - including retries after a failed attempt."},{"title":"Google sign-in no longer interrupts","description":"Google sign-in no longer interrupts you with Windows passkey popups; it goes straight to password entry."}]},{"category":"Improvements","items":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]}],"highlights":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]},{"version":"1.1.7","tag":"v1.1.7","title":"Resilient Startup & Seamless Session Recovery","publishedAt":"2026-08-22","categories":[{"category":"Improvements & Bug Fixes","items":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]}],"highlights":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]},{"version":"1.1.6","tag":"v1.1.6","title":"Seamless Media Continuity, Instant Tab Restoration & Streamlined Installers","publishedAt":"2026-08-20","categories":[{"category":"Features","items":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Streamlined Setup & Package Managers","description":"Introduced a distraction-free installation assistant with one-click terminal setup for macOS, Windows, and Linux, plus instant cryptographic verification."}]},{"category":"Improvements & Fixes","items":[{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."},{"title":"Immediate Split Pane Reflow","description":"Closing split panes now instantly reflows remaining views with zero delay and completely halts background audio upon close."},{"title":"Reliable Keyboard Navigation","description":"Workspace shortcuts now reliably trigger even when active web apps attempt to capture keyboard focus."}]}],"highlights":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."}]},{"version":"1.1.5","tag":"v1.1.5","title":"Spatial Navigation, Omnibox Browser Bar & Audio Multitasking","publishedAt":"2026-08-18","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.1.5/apposition-v1.1.5-spatial-navigation.png","categories":[{"category":"Features","items":[{"title":"Top-Center Omnibox Browser Bar","description":"Browser navigation bar with omnibox search suggestions, back/forward history, and quick layout actions."},{"title":"3-Way Spatial Layout Mode","description":"Toggle for docked, floating overlap, and full collapse views with persistent user preferences."},{"title":"Panel Dynamic Island & Focus Mode","description":"Distraction-free single-pane work triggered with Alt+F shortcut."}]},{"category":"Improvements","items":[{"title":"Responsive Soundwave Indicator","description":"Tabs display live soundwaves when audio is playing, with instant one-click muting."},{"title":"Synchronized Spatial Grid","description":"Refined window border margins, split gaps, and drop snap ghosts onto a synchronized grid."}]},{"category":"Bug Fixes","items":[{"title":"Window Control Hit-Testing","description":"Optimized window control responsiveness and hit-testing across all edge layout modes."}]}],"highlights":[{"title":"Top-Center Omnibox Browser Bar","description":"Instant search suggestions and quick layout actions right from the header."},{"title":"3-Way Spatial Layout Mode","description":"Docked, floating overlap, and full collapse workspace arrangements."},{"title":"Audio Indicator & 1-Click Mute","description":"Live soundwaves on active tabs with instant one-click muting."}]},{"version":"1.1.4","tag":"v1.1.4","title":"Multi-Profile Single Sign-On & Persistent Session Sync","publishedAt":"2026-08-18","categories":[{"category":"Features","items":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."}]},{"category":"Improvements","items":[{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."},{"title":"Profile switching preserves the exact","description":"Profile switching preserves the exact active webpage without accidental sign-outs."},{"title":"Profile switcher rows now feature","description":"Profile switcher rows now feature full-width selection highlights and floating hover micro-actions."}]},{"category":"Fixes","items":[{"title":"Switching profiles on a split","description":"Switching profiles on a split pane now instantly switches session partitions and cookies without latency."},{"title":"Active account logins and cookies","description":"Active account logins and cookies are now reliably preserved across app restarts and system sleep."},{"title":"Workspace quick-switching via Command Palette","description":"Workspace quick-switching via Command Palette now previews icons with keyboard navigation."}]}],"highlights":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."},{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."}]},{"version":"1.1.3","tag":"v1.1.3","title":"Seamless System Browser Sign-In, Workspace Context Menus & Enhanced Navigation","publishedAt":"2026-08-16","categories":[{"category":"Features","items":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"History Jump Menu & Navigation Shortcuts","description":"Long-press or right-click the back/forward navigation buttons to open a visual jump menu with site icons, or navigate back and forward instantly using Ctrl+[ and Ctrl+]."},{"title":"Power-User Search Keywords","description":"Address inputs now resolve Google Search directly with instant search engine shortcut keywords for YouTube, GitHub, and Google Drive."}]},{"category":"Improvements","items":[{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."},{"title":"Streamlined Single-Click Setup","description":"Windows installation is now completely silent and lock-free, with instant setup and automatic workspace layout restoration on launch."},{"title":"Fluid Floating Island Transitions","description":"Refined hovering and edge cursor tracking for floating window controls, preventing accidental window collapses and preserving direct click access to underlying web elements."}]},{"category":"Bug Fixes","items":[{"title":"Resilient Split Pane Sessions","description":"Closing a split pane no longer triggers unnecessary page reloads or active session interruptions in adjacent open panes."},{"title":"Reliable Embedded Shortcut Handling","description":"Fixed an issue where keyboard navigation shortcuts could become unresponsive while focused inside web panels, restoring instant focus upon clicking into any pane."},{"title":"Display Scaling Alignment","description":"Resolved an issue where interactive workspace preview tiles appeared scaled down or misaligned on smaller displays."},{"title":"Login Compatibility","description":"Eliminated unexpected firewall prompts and resolved authentication dialog blocks across third-party web services."}]}],"highlights":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."}]},{"version":"1.1.2","tag":"v1.1.2","title":"Zero-Reload Split Persistence & 120 FPS Resizing","publishedAt":"2026-08-13","categories":[{"category":"Improvements","items":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"category":"Bug Fixes","items":[{"title":"Fixed an issue where first-time","description":"Fixed an issue where first-time installations could render an empty screen by guaranteeing robust default workspace and tab initialization."}]}],"highlights":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"version":"1.1.1","tag":"v1.1.1","title":"Layout History, Spatial Keyboard Swapping & Crash Recovery","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added visual audio activity indicators","description":"Added visual audio activity indicators on active tabs to easily identify audio sources across complex multi-pane workspaces."},{"title":"Added intelligent address bar navigation","description":"Added intelligent address bar navigation for local development ports, alongside a one-click terminal install option."}]},{"category":"Improvements","items":[{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."},{"title":"Completely redesigned the pane toolbar","description":"Completely redesigned the pane toolbar with a jitter-free tactile aesthetic and refined double-bezel styling."},{"title":"Upgraded tab hover tooltips to","description":"Upgraded tab hover tooltips to instantly display rich session context with a polished tactile feel."},{"title":"Enhanced workspace docking and pane","description":"Enhanced workspace docking and pane splitting reliability with smoother drag transitions and robust offline session persistence."}]},{"category":"Bug Fixes","items":[{"title":"Fixed a startup crash on","description":"Fixed a startup crash on Windows and macOS caused by an engine compilation mismatch, and ensured the official Apposition icon displays correctly across all desktop platforms."},{"title":"Resolved an issue where dragging","description":"Resolved an issue where dragging panels in workspaces with multiple panes could cause duplicate panels, layout freezes, or dropped keyboard shortcuts."},{"title":"Resolved an issue where closing","description":"Resolved an issue where closing the final tab or pane in a workspace could cause the interface to freeze or display an empty background."},{"title":"Resolved navigation bugs that caused","description":"Resolved navigation bugs that caused the search input to occasionally lose typed text or drop focus when switching workspaces."},{"title":"Resolved an issue where rapidly","description":"Resolved an issue where rapidly switching workspaces could cause tabs to display the wrong environment."}]}],"highlights":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."}]},{"version":"1.1.0","tag":"v1.1.0","title":"Seamless Updates, Standalone Inspector & Draggable Tabs","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Opening the Inspector (F12) now","description":"Opening the Inspector (F12) now launches a clean, standalone floating window instead of squeezing into a sidebar."},{"title":"You can now view our","description":"You can now view our latest release notes in a dedicated popover and submit feedback directly from the new sidebar Support Cluster without leaving your workspace."},{"title":"Opening external links from the","description":"Opening external links from the changelog now seamlessly creates a new workspace tab instead of launching an external browser."}]},{"category":"Improvements","items":[{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."},{"title":"Dragging a pane into an","description":"Dragging a pane into an empty tab now cleanly replaces it with a clear visual drop preview, and moving panes between tabs no longer leaves behind orphaned blank tabs."},{"title":"Dragging the last panel out","description":"Dragging the last panel out of a tab or workspace now automatically cleans up the empty space instead of leaving an abandoned tab."}]},{"category":"Bug Fixes","items":[{"title":"Re-engineered the window manager to","description":"Re-engineered the window manager to completely eliminate cursor jitter and flickering when hovering over panes, while ensuring floating buttons and menus remain perfectly responsive."},{"title":"Resolved multi-window shortcut conflicts, ensuring","description":"Resolved multi-window shortcut conflicts, ensuring actions like splitting panels, closing tabs, and swiping between workspaces are perfectly instantaneous and correctly targeted."},{"title":"Fixed an issue where the","description":"Fixed an issue where the search bar would not automatically receive keyboard focus when opening a new tab or switching back to an empty tab."},{"title":"Resolved an issue that caused","description":"Resolved an issue that caused active workspace panels to unexpectedly refresh or blink when opening the settings menu."}]}],"highlights":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."}]},{"version":"1.0.0","tag":"v1.0.0","title":"Initial Launch of Apposition","publishedAt":"2026-08-02","categories":[{"category":"Features","items":[{"title":"Multi-Pane Workspace Canvas","description":"The digital workspace designed for deep parallel work without tab chaos."}]}],"highlights":[{"title":"Multi-Pane Workspace Canvas","description":"Organize web applications and accounts in one unified window."}]}]');
-function initChangelogIpc() {
-  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
-    const currentVersion = electron.app.getVersion();
-    const lastSeen = getLastSeenVersion();
-    const evaluation = evaluateUpgradeState(lastSeen, currentVersion);
-    if (evaluation.isFreshInstall) {
-      setLastSeenVersion(evaluation.nextVersionToCommit);
-      return {
-        shouldShowWhatsNew: false,
-        currentVersion,
-        lastSeenVersion: null
-      };
-    }
-    if (evaluation.shouldShowWhatsNew) {
-      return {
-        shouldShowWhatsNew: true,
-        currentVersion,
-        lastSeenVersion: lastSeen,
-        latestRelease: currentRelease
-      };
-    }
-    return {
-      shouldShowWhatsNew: false,
-      currentVersion,
-      lastSeenVersion: lastSeen
-    };
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, (_, version2) => {
-    const targetVersion = version2 || electron.app.getVersion();
-    setLastSeenVersion(targetVersion);
-    return { success: true, version: targetVersion };
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_RELEASES, () => {
-    return allReleases;
-  });
-}
-const ALGORITHM = "aes-256-gcm";
-const KEY_LEN = 32;
-const SALT_LEN = 16;
-const IV_LEN = 12;
-const ITERATIONS = 1e5;
-function encryptSessionPayload(payload, passphrase) {
-  if (!passphrase || passphrase.length < 6) {
-    throw new Error("Passphrase must be at least 6 characters long");
-  }
-  const salt = crypto.randomBytes(SALT_LEN);
-  const iv = crypto.randomBytes(IV_LEN);
-  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
-  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
-  const jsonStr = JSON.stringify(payload);
-  const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
-  const tag2 = cipher.getAuthTag();
-  const bundle = {
-    version: 1,
-    salt: salt.toString("base64"),
-    iv: iv.toString("base64"),
-    tag: tag2.toString("base64"),
-    ciphertext: encrypted.toString("base64")
-  };
-  return JSON.stringify(bundle);
-}
-function decryptSessionPayload(bundleJson, passphrase) {
-  let bundle;
-  try {
-    bundle = JSON.parse(bundleJson);
-  } catch {
-    throw new Error("Invalid session bundle format");
-  }
-  if (bundle.version !== 1 || !bundle.salt || !bundle.iv || !bundle.tag || !bundle.ciphertext) {
-    throw new Error("Corrupted or unsupported session bundle");
-  }
-  const salt = Buffer.from(bundle.salt, "base64");
-  const iv = Buffer.from(bundle.iv, "base64");
-  const tag2 = Buffer.from(bundle.tag, "base64");
-  const ciphertext = Buffer.from(bundle.ciphertext, "base64");
-  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(tag2);
-  try {
-    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    return JSON.parse(decrypted.toString("utf8"));
-  } catch {
-    throw new Error("Decryption failed: Incorrect passphrase or corrupted data");
-  }
-}
-function generateCodeVerifier(length = 64) {
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-  const bytes = crypto.randomBytes(length);
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars[bytes[i] % chars.length];
-  }
-  return result;
-}
-function generateCodeChallenge(verifier) {
-  return crypto.createHash("sha256").update(verifier).digest("base64url");
-}
-function generatePkcePair() {
-  const codeVerifier = generateCodeVerifier();
-  const codeChallenge = generateCodeChallenge(codeVerifier);
-  return {
-    codeVerifier,
-    codeChallenge,
-    codeChallengeMethod: "S256"
-  };
-}
-function createSignedState(payload, secret) {
-  const json = JSON.stringify({ ...payload, ts: Date.now() });
-  const data = Buffer.from(json).toString("base64url");
-  const signature = crypto.createHmac("sha256", secret).update(data).digest("base64url");
-  return `${data}.${signature}`;
-}
-function verifySignedState(state, secret) {
-  if (!state || !state.includes(".")) return null;
-  const [data, signature] = state.split(".");
-  const expectedSig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
-  if (signature !== expectedSig) return null;
-  try {
-    const json = Buffer.from(data, "base64url").toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return null;
-  }
-}
-const activeRelays = /* @__PURE__ */ new Map();
-const RELAY_SECRET = "apposition-relay-secret-v1";
-const TIMEOUT_MS = 3e5;
-function startAuthRelay(targetAuthUrl, profileId = "main", paneId) {
-  return new Promise((resolve) => {
-    try {
-      const pkce = generatePkcePair();
-      const server = http.createServer(async (req, res) => {
-        try {
-          const reqUrl = new URL(req.url || "/", `http://127.0.0.1:${server.address()}`);
-          if (reqUrl.pathname === "/callback" || reqUrl.pathname === "/oauth/callback") {
-            const state = reqUrl.searchParams.get("state");
-            const code = reqUrl.searchParams.get("code");
-            const token = reqUrl.searchParams.get("token") || reqUrl.searchParams.get("access_token");
-            if (!state || !verifySignedState(state, RELAY_SECRET)) {
-              res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
-              res.end("<h3>Authentication Failed: Invalid or expired state token.</h3>");
-              return;
-            }
-            const relay = activeRelays.get(state);
-            if (relay) {
-              const partition = relay.profileId === "main" ? "persist:main" : `persist:${relay.profileId}`;
-              const targetSession = electron.session.fromPartition(partition);
-              if (token) {
-                try {
-                  const targetOrigin = new URL(targetAuthUrl).origin;
-                  await targetSession.cookies.set({
-                    url: targetOrigin,
-                    name: "auth_token",
-                    value: token,
-                    secure: true,
-                    httpOnly: true
-                  });
-                } catch {
-                }
-              }
-              if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-                global.mainWindow.webContents.send("app.auth-completed", {
-                  profileId: relay.profileId,
-                  paneId: relay.paneId,
-                  code,
-                  token,
-                  success: true
-                });
-              }
-              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-              res.end(`
-                <!DOCTYPE html>
-                <html>
-                  <head>
-                    <title>Authentication Successful</title>
-                    <style>
-                      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #FAF9F6; color: #121212; }
-                      .card { background: white; padding: 32px 40px; border-radius: 12px; border: 1px solid #E5E5E0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; max-width: 380px; }
-                      h2 { font-size: 18px; margin: 0 0 8px 0; font-weight: 600; }
-                      p { font-size: 13px; color: #78716C; margin: 0; line-height: 1.5; }
-                    </style>
-                  </head>
-                  <body>
-                    <div class="card">
-                      <h2>Authentication Completed</h2>
-                      <p>You can close this tab and return to Apposition. Your workspace is now authenticated.</p>
-                    </div>
-                    <script>setTimeout(() => window.close(), 1500);<\/script>
-                  </body>
-                </html>
-              `);
-              cleanupRelay(state);
-            }
-          } else {
-            res.writeHead(404);
-            res.end();
-          }
-        } catch {
-          res.writeHead(500);
-          res.end();
-        }
-      });
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        const port = typeof address === "object" && address ? address.port : 0;
-        const state = createSignedState({ profileId, paneId, port }, RELAY_SECRET);
-        const relaySession = {
-          port,
-          state,
-          codeVerifier: pkce.codeVerifier,
-          profileId,
-          paneId,
-          server,
-          createdAt: Date.now()
-        };
-        activeRelays.set(state, relaySession);
-        setTimeout(() => cleanupRelay(state), TIMEOUT_MS);
-        const parsedUrl = new URL(targetAuthUrl);
-        parsedUrl.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
-        parsedUrl.searchParams.set("state", state);
-        parsedUrl.searchParams.set("code_challenge", pkce.codeChallenge);
-        parsedUrl.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
-        const finalAuthUrl = parsedUrl.toString();
-        electron.shell.openExternal(finalAuthUrl);
-        resolve({ success: true, port, authUrl: finalAuthUrl });
-      });
-      server.on("error", (err) => {
-        resolve({ success: false, port: 0, authUrl: "", error: err.message });
-      });
-    } catch (err) {
-      resolve({ success: false, port: 0, authUrl: "", error: err.message });
-    }
-  });
-}
-function cleanupRelay(state) {
-  const relay = activeRelays.get(state);
-  if (relay) {
-    activeRelays.delete(state);
-    try {
-      relay.server.close();
-    } catch {
-    }
-  }
-}
-function initAuthIpc() {
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
-    async (_event, origin, profileId) => {
-      try {
-        if (!origin) return { success: false, error: "Missing origin" };
-        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
-        const targetSession = electron.session.fromPartition(partition);
-        await targetSession.clearStorageData({
-          origin,
-          storages: [
-            "cookies",
-            "localstorage",
-            "serviceworkers",
-            "cachestorage"
-          ]
-        });
-        return { success: true };
-      } catch (err) {
-        console.error("Failed to clear site data:", err);
-        return { success: false, error: err.message };
-      }
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.START_RELAY,
-    async (_event, targetUrl, profileId, paneId) => {
-      if (!targetUrl) return { success: false, error: "Missing URL" };
-      return startAuthRelay(targetUrl, profileId || "main", paneId);
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.CONNECT_ACCOUNT,
-    async (_event, options) => {
-      return openConnectAccountModal(options);
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT,
-    async (_event, providerId, profileId = "main") => {
-      return sessionIdentityService.disconnectProvider(profileId, providerId);
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.SCAN_IDENTITIES,
-    async (_event, profileId) => {
-      try {
-        if (profileId) {
-          const identities = await sessionIdentityService.scanProfile(profileId);
-          return { success: true, identities };
-        }
-        await sessionIdentityService.scanAllProfiles();
-        return { success: true };
-      } catch (err) {
-        return { success: false, error: err.message };
-      }
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH,
-    async (_event, options) => {
-      return openConnectAccountModal({
-        providerId: "google",
-        loginUrl: options.url,
-        profileId: options.profileId,
-        paneId: options.paneId,
-        returnUrl: options.returnUrl
-      });
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.EXPORT_VAULT,
-    async (_event, profileId, secretKey) => {
-      try {
-        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
-        const targetSession = electron.session.fromPartition(partition);
-        const cookies = await targetSession.cookies.get({});
-        const encrypted = encryptSessionPayload(
-          { profileId, cookies, exportedAt: Date.now() },
-          secretKey
-        );
-        return { success: true, payload: encrypted };
-      } catch (err) {
-        console.error("Failed to export session vault:", err);
-        return { success: false, error: err.message };
-      }
-    }
-  );
-  electron.ipcMain.handle(
-    IPC_CHANNELS.AUTH.IMPORT_VAULT,
-    async (_event, encryptedPayload, secretKey) => {
-      try {
-        const decrypted = decryptSessionPayload(encryptedPayload, secretKey);
-        if (!decrypted || !decrypted.profileId || !Array.isArray(decrypted.cookies)) {
-          return { success: false, error: "Invalid session payload or key" };
-        }
-        const partition = decrypted.profileId === "main" ? "persist:main" : `persist:${decrypted.profileId}`;
-        const targetSession = electron.session.fromPartition(partition);
-        for (const cookie of decrypted.cookies) {
-          const scheme = cookie.secure ? "https" : "http";
-          const domain = cookie.domain?.startsWith(".") ? cookie.domain.slice(1) : cookie.domain;
-          const url = `${scheme}://${domain}${cookie.path || "/"}`;
-          try {
-            await targetSession.cookies.set({
-              url,
-              name: cookie.name,
-              value: cookie.value,
-              domain: cookie.domain,
-              path: cookie.path,
-              secure: cookie.secure,
-              httpOnly: cookie.httpOnly,
-              expirationDate: cookie.expirationDate,
-              sameSite: cookie.sameSite
-            });
-          } catch {
-          }
-        }
-        return { success: true, profileId: decrypted.profileId };
-      } catch (err) {
-        console.error("Failed to import session vault:", err);
-        return { success: false, error: err.message };
-      }
-    }
-  );
-}
 const APP_OVERLAY_ID = "__appOverlay";
 function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
   if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
@@ -4192,10 +2459,16 @@ function placePane(win, paneId, view, rect) {
   const dpr = devicePixelRatioFor(win);
   const w = r.width / dpr;
   const h = r.height / dpr;
-  const targetTop = s.stack.communicator ? s.views.get(s.stack.communicator.id) : s.views.get(APP_OVERLAY_ID);
+  const overlay = s.views.get(APP_OVERLAY_ID);
   const children = win.isDestroyed() ? [] : win.contentView.children;
-  const at = targetTop ? children.indexOf(targetTop) : children.length;
-  attach(win, view, at !== -1 ? at : children.length);
+  const overlayIdx = overlay ? children.indexOf(overlay) : -1;
+  const commView = s.stack.communicator ? s.views.get(s.stack.communicator.id) : void 0;
+  const commIdx = commView ? children.indexOf(commView) : -1;
+  let at;
+  if (commIdx !== -1) at = commIdx;
+  else if (overlayIdx !== -1) at = overlayIdx;
+  else at = children.length;
+  attach(win, view, at);
   if (typeof view.setBorderRadius === "function") {
     view.setBorderRadius(12);
   }
@@ -4258,6 +2531,11 @@ function reRoundAllPanes(win) {
     const phys = toPhysicalRect(css, dpr);
     s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
   }
+}
+function bindGuestCursor(wc) {
+  wc.on("cursor-changed", (_e, type) => {
+    global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type);
+  });
 }
 function toCdpButton(button, isMove = false, buttons = 0) {
   if (isMove) {
@@ -4847,1750 +3125,6 @@ function initWindowManagerIpc() {
   });
   initTearWindowIpc();
 }
-function bindGuestCursor(wc) {
-  wc.on("cursor-changed", (_e, type) => {
-    global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type);
-  });
-}
-function handleBeforeInputEvent(webContents, event, input) {
-  if (input.type !== "keyDown" && input.type !== "keyUp") return;
-  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
-  if (!ov || ov.isDestroyed()) return;
-  if (global.appOverlayView && webContents.id === global.appOverlayView.webContents.id) {
-    return;
-  }
-  if (global.mainWindow && webContents.id === global.mainWindow.webContents.id) {
-    return;
-  }
-  const isMod = Boolean(input.control || input.meta);
-  const keyLower = input.key ? input.key.toLowerCase() : "";
-  const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
-  const isReload = isMod && keyLower === "r" || input.key === "F5";
-  const isNum = keyLower >= "0" && keyLower <= "9";
-  const isZoom = isMod && (input.key === "=" || input.key === "+" || input.key === "-" || input.key === "0");
-  const isTabJump = isMod && input.key === "Tab";
-  const isAppShortcut = input.alt && isArrow || isMod && isArrow || isMod && (keyLower === "w" || keyLower === "t" || keyLower === "k" || keyLower === "l" || keyLower === "d" || keyLower === "f" || keyLower === "p" || keyLower === "n" || keyLower === "m" || keyLower === "e" || keyLower === "[" || keyLower === "]" || keyLower === "\\" || keyLower === "/") || input.alt && (keyLower === "d" || keyLower === "f" || keyLower === "p" || input.code === "Space") || isMod && isNum || input.alt && isNum || isZoom || isTabJump || input.key === "F11" || input.key === "F12" || isReload;
-  if (isAppShortcut) {
-    event.preventDefault();
-  }
-  if (input.type === "keyDown" && isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
-    if (input.shift) {
-      webContents.reloadIgnoringCache();
-    } else {
-      webContents.reload();
-    }
-    if (!global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
-    }
-    return;
-  }
-  const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-  const payload = {
-    webContentsId: webContents.id,
-    type: input.type === "keyUp" ? "keyup" : "keydown",
-    key: input.key,
-    code: input.code,
-    control: input.control,
-    meta: input.meta,
-    shift: input.shift,
-    alt: input.alt,
-    isAutoRepeat: input.isAutoRepeat,
-    isInputFocused: false,
-    eventId: sharedId
-  };
-  if (input.type === "keyDown" && isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
-    ov.focus();
-  }
-  ov.send("forwarded-key", payload);
-}
-function extractUnreadBadgeFromTitle(title2) {
-  if (!title2 || typeof title2 !== "string") {
-    return { count: 0, hasUnread: false, rawTitle: "" };
-  }
-  const clean = title2.trim();
-  const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
-  if (parenMatch && parenMatch[1]) {
-    const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
-    return {
-      count: isNaN(num) ? 1 : num,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  if (clean.startsWith("*") || clean.startsWith("•") || clean.startsWith("●")) {
-    return {
-      count: 1,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  const wordMatch = clean.match(/([0-9]+)\s+(unread|new|notifications?)/i);
-  if (wordMatch && wordMatch[1]) {
-    const num = parseInt(wordMatch[1], 10);
-    return {
-      count: isNaN(num) ? 1 : num,
-      hasUnread: true,
-      rawTitle: clean
-    };
-  }
-  return { count: 0, hasUnread: false, rawTitle: clean };
-}
-const OAUTH_DOMAINS = [
-  "accounts.google.com",
-  "google.com/gsi",
-  "firebaseapp.com",
-  "github.com/login/oauth",
-  "login.microsoftonline.com",
-  "appleid.apple.com",
-  "discord.com/oauth2",
-  "twitter.com/i/oauth2",
-  "x.com/i/oauth2",
-  "auth0.com",
-  "okta.com",
-  "id.atlassian.com"
-];
-const SSO_KEYWORDS = ["login", "signin", "auth", "sso", "oauth"];
-const SYSTEM_PROTOCOLS = ["mailto:", "tel:", "slack:", "zoommtg:", "magnet:", "viber:", "tg:"];
-function isOAuthOrAuthEndpoint(url) {
-  if (!url) return false;
-  const lower = url.toLowerCase();
-  return OAUTH_DOMAINS.some((domain) => lower.includes(domain)) || SSO_KEYWORDS.some((kw) => lower.includes(kw));
-}
-function isGoogleOAuthEndpoint(url) {
-  if (!url) return false;
-  const lower = url.toLowerCase();
-  return lower.includes("accounts.google.com") || lower.includes("google.com/gsi") || lower.includes("firebaseapp.com");
-}
-function evaluateWindowOpenRequest(url, disposition, features) {
-  const urlLower = (url || "").toLowerCase();
-  const isBlank = urlLower === "about:blank" || urlLower === "about:blank#blocked";
-  const isPopup = Boolean(features) && (features.includes("width=") || features.includes("height="));
-  const isGoogle = isGoogleOAuthEndpoint(urlLower);
-  const isSSO = isOAuthOrAuthEndpoint(urlLower);
-  if (SYSTEM_PROTOCOLS.some((proto) => urlLower.startsWith(proto))) {
-    return {
-      type: "OPEN_SYSTEM_BROWSER",
-      url
-    };
-  }
-  if (disposition === "new-window" || isPopup || isBlank || isGoogle || isSSO) {
-    return {
-      type: "ALLOW_OAUTH_POPUP",
-      width: 600,
-      height: 720,
-      autoHideMenuBar: true,
-      sandbox: true,
-      contextIsolation: false,
-      isGoogle
-    };
-  }
-  return {
-    type: "OPEN_IN_APP",
-    url
-  };
-}
-function configureWebAuthnForSession(sess) {
-  sess.setDevicePermissionHandler(() => false);
-  const selectHidHandler = (event, _details, callback) => {
-    event.preventDefault();
-    callback(void 0);
-  };
-  const selectAccountHandler = (event, _details, callback) => {
-    event.preventDefault();
-    callback(null);
-  };
-  sess.removeListener("select-hid-device", selectHidHandler);
-  sess.on("select-hid-device", selectHidHandler);
-  sess.removeListener("select-webauthn-account", selectAccountHandler);
-  sess.on("select-webauthn-account", selectAccountHandler);
-}
-function isProxyFailureError(error) {
-  if (!error) return false;
-  const proxyErrors = [
-    "ERR_PROXY_CONNECTION_FAILED",
-    "ERR_TUNNEL_CONNECTION_FAILED",
-    "ERR_PROXY_AUTH_REQUESTED",
-    "ERR_SOCKS_CONNECTION_FAILED",
-    "ERR_PROXY_CERTIFICATE_INVALID",
-    "ERR_MANDATORY_PROXY_CONFIGURATION_FAILED"
-  ];
-  return proxyErrors.some((code) => error.includes(code));
-}
-function configureSessionProxy(ses, proxyServer, profileId) {
-  if (!proxyServer || !proxyServer.trim()) {
-    ses.setProxy({}).catch(() => {
-    });
-    return;
-  }
-  const sanitizedProxy = proxyServer.trim();
-  ses.setProxy({
-    proxyRules: sanitizedProxy,
-    proxyBypassRules: "<-loopback>"
-  }).catch((err) => {
-    console.error(`Failed to configure proxy for profile ${profileId}:`, err);
-  });
-}
-const GMAIL_AMBIENT_CSS = `
-  /* 1. Guaranteed Opaque Canvas Pipeline (Eliminates Bleed-Through) */
-  html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
-    background-color: #ffffff !important;
-    background: #ffffff !important;
-  }
-  @media (prefers-color-scheme: dark) {
-    html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
-      background-color: #141415 !important;
-      background: #141415 !important;
-      color: #e5e5e5 !important;
-    }
-  }
-
-  /* 2. Hide bulky Google Add-ons right side panel & Meet/Chat widgets */
-  [aria-label="Side panel"], div[role="complementary"], .bq9,
-  div[aria-label="Meet"], div[aria-label="Hangouts"], div[aria-label="Chat"], .aYF, .aT5 {
-    display: none !important;
-  }
-
-  /* 3. Streamline Top Search & Header Banner */
-  header[role="banner"] {
-    padding-left: 8px !important;
-    padding-right: 8px !important;
-    height: 48px !important;
-    min-height: 48px !important;
-  }
-  header[role="banner"] form {
-    max-width: 480px !important;
-  }
-
-  /* 4. Streamline Left Sidebar Density */
-  .aeN {
-    min-width: 180px !important;
-  }
-  .w-asV {
-    width: auto !important;
-  }
-
-  /* 5. Precision Grayscale Monochromatic Scrollbars */
-  ::-webkit-scrollbar {
-    width: 5px !important;
-    height: 5px !important;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: rgba(120, 113, 108, 0.35) !important;
-    border-radius: 4px !important;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent !important;
-  }
-`;
-const SLACK_AMBIENT_CSS = `
-  /* Guaranteed Opaque Canvas Pipeline for Slack */
-  html, body, .p-client_container, .p-client, .p-view_contents, .p-workspace_layout {
-    background-color: #1a1d21 !important;
-  }
-  /* Hide desktop download prompts */
-  .p-download_banner, .p-get_desktop_app_banner {
-    display: none !important;
-  }
-  /* Sleek scrollbars */
-  ::-webkit-scrollbar {
-    width: 5px !important;
-    height: 5px !important;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: rgba(120, 113, 108, 0.35) !important;
-    border-radius: 4px !important;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent !important;
-  }
-`;
-const GENERIC_MESSENGER_CSS = `
-  /* Guaranteed Opaque Canvas Pipeline for Generic Messengers */
-  html, body {
-    background-color: #ffffff !important;
-  }
-  @media (prefers-color-scheme: dark) {
-    html, body {
-      background-color: #141415 !important;
-    }
-  }
-  /* Sleek monochromatic scrollbars */
-  ::-webkit-scrollbar {
-    width: 5px !important;
-    height: 5px !important;
-  }
-  ::-webkit-scrollbar-thumb {
-    background: rgba(120, 113, 108, 0.35) !important;
-    border-radius: 4px !important;
-  }
-  ::-webkit-scrollbar-track {
-    background: transparent !important;
-  }
-`;
-function injectCommunicatorRecipe(webContents, url) {
-  try {
-    const u = url.toLowerCase();
-    if (u.includes("mail.google.com")) {
-      webContents.insertCSS(GMAIL_AMBIENT_CSS).catch(() => {
-      });
-    } else if (u.includes("slack.com")) {
-      webContents.insertCSS(SLACK_AMBIENT_CSS).catch(() => {
-      });
-    } else {
-      webContents.insertCSS(GENERIC_MESSENGER_CSS).catch(() => {
-      });
-    }
-  } catch {
-  }
-}
-class CommunicatorService {
-  views = /* @__PURE__ */ new Map();
-  activeAppId = "slack";
-  updateAppUnread(appId, info) {
-    global.appOverlayView?.webContents.send("communicator.unread-updated", {
-      appId,
-      unreadCount: info.count
-    });
-  }
-  getOrCreateView(win, appId, customPartition, customUrl) {
-    if (this.views.has(appId)) return this.views.get(appId);
-    if (!customUrl) return void 0;
-    const partition = customPartition || "persist:main";
-    const view = new electron.WebContentsView({
-      webPreferences: {
-        preload: resolvePreload("pane.js"),
-        partition,
-        contextIsolation: true,
-        sandbox: false,
-        spellcheck: false,
-        backgroundThrottling: false
-      }
-    });
-    view.setBackgroundColor("#ffffff");
-    try {
-      view.webContents.setZoomMode("isolated");
-    } catch {
-    }
-    view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
-    bindGuestCursor(view.webContents);
-    view.webContents.on("will-navigate", (_e, navUrl) => {
-      if (isGoogleOAuthEndpoint(navUrl)) {
-        view.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      } else if (view.webContents.getUserAgent() === FIREFOX_AUTH_UA) {
-        view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
-      }
-    });
-    view.webContents.on("dom-ready", () => {
-      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
-      try {
-        const bounds = view.getBounds();
-        const targetZoom = Math.min(1, Math.max(0.72, (bounds.width || 600) / 760));
-        view.webContents.setZoomFactor(targetZoom);
-      } catch {
-      }
-    });
-    view.webContents.on("did-navigate", () => {
-      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
-    });
-    view.webContents.on("page-title-updated", () => {
-      const title2 = view.webContents.getTitle();
-      const info = extractUnreadBadgeFromTitle(title2);
-      this.updateAppUnread(appId, info);
-    });
-    view.webContents.on("before-input-event", (e, input) => {
-      handleBeforeInputEvent(view.webContents, e, input);
-    });
-    view.webContents.setWindowOpenHandler((details) => {
-      if (isGoogleOAuthEndpoint(details.url) || details.url.includes("login") || details.url.includes("auth")) {
-        view.webContents.loadURL(details.url);
-        return { action: "deny" };
-      }
-      return { action: "allow" };
-    });
-    view.webContents.loadURL(customUrl);
-    this.views.set(appId, view);
-    return view;
-  }
-  showDrawerView(win, appId, rect, partition, url) {
-    this.activeAppId = appId;
-    for (const [id, v] of this.views.entries()) {
-      if (id !== appId) {
-        removeCommunicator(win, id);
-        try {
-          v.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-        } catch {
-        }
-      }
-    }
-    const view = this.getOrCreateView(win, appId, partition, url);
-    if (!view) return;
-    if (isValidPhysicalRect(rect)) {
-      const dpr = devicePixelRatioFor(win);
-      const phys = toPhysicalRect(rect, dpr);
-      placeCommunicator(win, appId, view, { ...phys, cssLeft: rect.x, cssTop: rect.y });
-      view.setBounds(rect);
-      try {
-        const targetZoom = Math.min(1, Math.max(0.68, rect.width / 820));
-        const currentZoom = view.webContents.getZoomFactor();
-        if (Math.abs(currentZoom - targetZoom) > 0.02) {
-          view.webContents.setZoomFactor(targetZoom);
-        }
-      } catch {
-      }
-    }
-  }
-  async captureAppSnapshot(appId) {
-    const view = this.views.get(appId);
-    if (!view || view.webContents.isDestroyed()) return null;
-    try {
-      const image = await view.webContents.capturePage();
-      if (image.isEmpty()) return null;
-      return image.toDataURL();
-    } catch {
-      return null;
-    }
-  }
-  destroyView(win, appId) {
-    const view = this.views.get(appId);
-    if (view) {
-      if (win) removeCommunicator(win, appId);
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.close();
-      }
-      this.views.delete(appId);
-    }
-  }
-  hideDrawerView(win) {
-    for (const [id, view] of this.views.entries()) {
-      removeCommunicator(win, id);
-      try {
-        view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-      } catch {
-      }
-    }
-  }
-}
-const communicatorService = new CommunicatorService();
-function initCommunicatorIpc(getWindow) {
-  electron.ipcMain.handle("communicator.getState", async () => {
-    try {
-      return getCommunicatorState();
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to get state:", err);
-      return { stacks: [], providers: [] };
-    }
-  });
-  electron.ipcMain.handle("communicator.createStack", async (_e, id, name, icon) => {
-    try {
-      createCommunicatorStack(id, name, icon);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to create stack:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle("communicator.updateStack", async (_e, id, name, icon) => {
-    try {
-      updateCommunicatorStack(id, name, icon);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to update stack:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle("communicator.deleteStack", async (_e, id) => {
-    try {
-      deleteCommunicatorStack(id);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to delete stack:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle(
-    "communicator.createApp",
-    async (_e, id, stackId, profileId, name, url, icon) => {
-      try {
-        createCommunicatorApp(id, stackId, profileId, name, url, icon);
-        return { success: true };
-      } catch (err) {
-        console.error("[Communicator IPC] Failed to create app:", err);
-        return { success: false, error: String(err) };
-      }
-    }
-  );
-  electron.ipcMain.handle(
-    "communicator.updateApp",
-    async (_e, id, updates) => {
-      try {
-        updateCommunicatorApp(id, updates);
-        return { success: true };
-      } catch (err) {
-        console.error("[Communicator IPC] Failed to update app:", err);
-        return { success: false, error: String(err) };
-      }
-    }
-  );
-  electron.ipcMain.handle("communicator.deleteApp", async (_e, id) => {
-    try {
-      const win = getWindow();
-      communicatorService.destroyView(win, id);
-      deleteCommunicatorApp(id);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to delete app:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle("communicator.saveProvider", async (_e, provider) => {
-    try {
-      saveCommunicatorProvider(provider);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to save provider:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle("communicator.deleteProvider", async (_e, id) => {
-    try {
-      deleteCommunicatorProvider(id);
-      return { success: true };
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to delete provider:", err);
-      return { success: false, error: String(err) };
-    }
-  });
-  electron.ipcMain.handle("communicator.captureSnapshot", async (_e, appId) => {
-    try {
-      return await communicatorService.captureAppSnapshot(appId);
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to capture snapshot:", err);
-      return null;
-    }
-  });
-  electron.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
-    try {
-      const win = getWindow();
-      if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to show drawer view:", err);
-    }
-  });
-  electron.ipcMain.on("communicator.hideDrawer", () => {
-    try {
-      const win = getWindow();
-      if (win) communicatorService.hideDrawerView(win);
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to hide drawer view:", err);
-    }
-  });
-  electron.ipcMain.on("communicator.destroyView", (_e, appId) => {
-    try {
-      const win = getWindow();
-      communicatorService.destroyView(win, appId);
-    } catch (err) {
-      console.error("[Communicator IPC] Failed to destroy view:", err);
-    }
-  });
-}
-const AUTH_SURFACE_URL = "https://accounts.google.com";
-async function purgeGoogleAuthCookies(profileId) {
-  try {
-    const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
-    const ses = electron.session.fromPartition(partition);
-    const stale = await ses.cookies.get({ url: AUTH_SURFACE_URL });
-    await Promise.all(
-      stale.map(
-        (c) => typeof c.domain === "string" ? ses.cookies.remove(
-          `https://${c.domain.replace(/^\./, "")}`,
-          c.name
-        ) : Promise.resolve()
-      )
-    );
-  } catch {
-  }
-}
-function getTargetWindow() {
-  const win = global.mainWindow || global.overlayWindow;
-  return win && !win.isDestroyed() ? win : null;
-}
-function bindViewEvents(paneId, view, profileId) {
-  if (view.webContents.__eventsBound) {
-    return;
-  }
-  view.webContents.__eventsBound = true;
-  view.webContents.on("console-message", (_event, level, message, line, sourceId) => {
-    if (defaultNoiseFilter.isBenignNoise(message)) {
-      return;
-    }
-    if (defaultNoiseFilter.isRateLimited(paneId)) {
-      return;
-    }
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.console-message", {
-        paneId,
-        level,
-        message: defaultNoiseFilter.redactSecrets(message),
-        line,
-        sourceId,
-        timestamp: Date.now()
-      });
-    }
-  });
-  view.webContents.on("focus", () => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.focus", { paneId });
-      win.webContents.send("pane.focused", paneId);
-    }
-  });
-  view.webContents.on("before-input-event", (event, input) => {
-    if (input.type === "keyDown") {
-      const isMod = Boolean(input.control || input.meta);
-      const keyLower = input.key ? input.key.toLowerCase() : "";
-      const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
-      const isReload = isMod && keyLower === "r" || input.key === "F5";
-      const isAppShortcut = input.alt && isArrow || isMod && keyLower === "w" || isMod && keyLower === "t" || isMod && isArrow || input.alt && input.code === "Space" || input.key === "F12" || isReload;
-      if (isAppShortcut) {
-        event.preventDefault();
-      }
-      if (isReload && global.mainWindow && view.webContents.id !== global.mainWindow.webContents.id) {
-        if (input.shift) {
-          view.webContents.reloadIgnoringCache();
-        } else {
-          view.webContents.reload();
-        }
-        if (!global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("pane.reloaded-wc", view.webContents.id);
-        }
-        return;
-      }
-      const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
-      const payload = {
-        key: input.key,
-        code: input.code,
-        control: input.control,
-        meta: input.meta,
-        shift: input.shift,
-        alt: input.alt,
-        isAutoRepeat: input.isAutoRepeat,
-        isInputFocused: false,
-        eventId: sharedId
-      };
-      const win = getTargetWindow();
-      if (win) win.webContents.send("forwarded-key", payload);
-    }
-  });
-  const sendNav = (url) => {
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.navigated", {
-        paneId,
-        url,
-        title: view.webContents.getTitle() || url,
-        canGoBack: view.webContents.canGoBack(),
-        canGoForward: view.webContents.canGoForward()
-      });
-    }
-  };
-  view.webContents.on("did-start-loading", () => {
-    getTargetWindow()?.webContents.send("view.load-start", { paneId });
-  });
-  view.webContents.on("did-stop-loading", () => {
-    getTargetWindow()?.webContents.send("view.loaded", { paneId });
-  });
-  view.webContents.on("dom-ready", () => {
-    getTargetWindow()?.webContents.send("view.loaded", { paneId });
-  });
-  view.webContents.on("did-fail-load", (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
-    if (isMainFrame === false) return;
-    const win = getTargetWindow();
-    if (win) {
-      win.webContents.send("view.loaded", { paneId });
-      win.webContents.send("view.fail-load", { paneId, errorCode, errorDescription, validatedURL });
-    }
-  });
-  view.webContents.on("will-navigate", (event, url) => {
-    if (!isGoogleAuthUrl(url)) return;
-    if (view.webContents.getUserAgent() === FIREFOX_AUTH_UA) return;
-    event.preventDefault();
-    purgeGoogleAuthCookies(profileId).then(() => {
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.setUserAgent(FIREFOX_AUTH_UA);
-        return view.webContents.loadURL(url, { userAgent: FIREFOX_AUTH_UA });
-      }
-    }).catch(() => {
-    });
-  });
-  view.webContents.on("did-navigate", (_e, url) => {
-    if (!isGoogleAuthUrl(url) && view.webContents.getUserAgent() === FIREFOX_AUTH_UA) {
-      view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
-    }
-    sendNav(url);
-  });
-  view.webContents.on("did-navigate-in-page", (_e, url, isMainFrame) => {
-    if (isMainFrame) {
-      sendNav(url);
-    }
-  });
-  view.webContents.on("page-title-updated", () => sendNav(view.webContents.getURL()));
-  view.webContents.on("page-favicon-updated", (_e, favicons) => {
-    if (favicons && favicons.length > 0) {
-      const pageUrl = view.webContents.getURL();
-      let icon = favicons[0];
-      try {
-        if (icon && !icon.startsWith("data:")) {
-          icon = new URL(icon, pageUrl).href;
-        }
-      } catch {
-      }
-      getTargetWindow()?.webContents.send("view.favicon-updated", {
-        paneId,
-        url: pageUrl,
-        favicon: icon
-      });
-    }
-  });
-  view.webContents.on("audio-state-changed", (_event, audible) => {
-    const isAudible = typeof audible === "boolean" ? audible : Boolean(audible?.audible);
-    getTargetWindow()?.webContents.send("view.media-status", {
-      paneId,
-      isPlaying: isAudible
-    });
-  });
-  view.webContents.on("media-started-playing", () => {
-    getTargetWindow()?.webContents.send("view.media-status", {
-      paneId,
-      isPlaying: true
-    });
-  });
-  view.webContents.on("media-paused", () => {
-    const isAudible = typeof view.webContents.isCurrentlyAudible === "function" ? view.webContents.isCurrentlyAudible() : false;
-    getTargetWindow()?.webContents.send("view.media-status", {
-      paneId,
-      isPlaying: isAudible
-    });
-  });
-  view.webContents.ipc.on("pane.media-playing", (_e, isPlaying) => {
-    getTargetWindow()?.webContents.send("view.media-status", {
-      paneId,
-      isPlaying: Boolean(isPlaying)
-    });
-  });
-  view.webContents.on("context-menu", (_e, params) => {
-    getTargetWindow()?.webContents.send("view.context-menu", {
-      paneId,
-      x: params.x,
-      y: params.y,
-      linkURL: params.linkURL,
-      srcURL: params.srcURL
-    });
-  });
-  view.webContents.on("render-process-gone", (_e, details) => {
-    getTargetWindow()?.webContents.send("view.crashed", {
-      paneId,
-      reason: details.reason,
-      exitCode: details.exitCode
-    });
-  });
-}
-function configureViewAndSession(paneId, view, profileId) {
-  let partitionString = void 0;
-  let isEphemeral = false;
-  let proxyServer = null;
-  let userAgent = null;
-  if (profileId) {
-    try {
-      const profile = getProfileById(profileId);
-      if (profile) {
-        isEphemeral = !!profile.is_ephemeral;
-        proxyServer = profile.proxy_server;
-        userAgent = profile.user_agent;
-      }
-    } catch (e) {
-      console.warn("Failed to fetch profile details", e);
-    }
-    partitionString = isEphemeral ? profileId : `persist:${profileId}`;
-  }
-  const ses = partitionString ? electron.session.fromPartition(partitionString) : electron.session.defaultSession;
-  if (isEphemeral) ses.clearCache().catch(() => {
-  });
-  configureSessionProxy(ses, proxyServer, profileId);
-  ses.setUserAgent(userAgent && userAgent.trim() ? userAgent.trim() : electron.app.userAgentFallback);
-  ses.setPermissionRequestHandler((_wc, permission, callback) => {
-    const allowed = [
-      "notifications",
-      "geolocation",
-      "media",
-      "screen",
-      "persistent-storage",
-      "clipboard-read",
-      "clipboard-sanitized-write",
-      "fullscreen",
-      "pointerLock"
-    ];
-    callback(allowed.includes(permission));
-  });
-  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
-    if (permission === "private-network-access" || permission === "local-network-access") {
-      if (!requestingOrigin) return false;
-      try {
-        const url = new URL(requestingOrigin);
-        return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
-      } catch {
-        return false;
-      }
-    }
-    return true;
-  });
-  if (!ses.__networkErrorTrackingBound) {
-    ses.__networkErrorTrackingBound = true;
-    ses.webRequest.onErrorOccurred((details) => {
-      const trackedPaneId = viewRegistry.getPaneIdByWebContentsId(details.webContentsId ?? -1);
-      const win = getTargetWindow();
-      if (trackedPaneId && win) {
-        win.webContents.send("view.network-error", {
-          paneId: trackedPaneId,
-          url: details.url,
-          errorDescription: details.error,
-          isProxyFailure: isProxyFailureError(details.error),
-          errorCode: 0,
-          isMainFrame: details.resourceType === "mainFrame",
-          timestamp: Date.now()
-        });
-      }
-    });
-  }
-  bindViewEvents(paneId, view, profileId);
-}
-function createOrUpdateView(paneId, url, profileId = "main") {
-  const existing = viewRegistry.getView(paneId);
-  if (existing && !existing.webContents.isDestroyed()) {
-    if (url && existing.webContents.getURL() !== url) {
-      existing.webContents.loadURL(url);
-    }
-    return existing;
-  }
-  let partitionString = void 0;
-  let isEphemeral = false;
-  if (profileId) {
-    try {
-      const profile = getProfileById(profileId);
-      if (profile) {
-        isEphemeral = !!profile.is_ephemeral;
-      }
-    } catch (e) {
-      console.warn("Failed to fetch profile details", e);
-    }
-    partitionString = isEphemeral ? profileId : `persist:${profileId}`;
-  }
-  const view = new electron.WebContentsView({
-    webPreferences: {
-      preload: path.join(__dirname, "../preload/pane.js"),
-      partition: partitionString,
-      sandbox: true,
-      contextIsolation: true
-    }
-  });
-  viewRegistry.registerView(paneId, view, profileId);
-  if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-    global.mainWindow.contentView.addChildView(view);
-  }
-  view.setBackgroundColor("#FFFFFF");
-  if (typeof view.setBorderRadius === "function") {
-    view.setBorderRadius(12);
-  }
-  view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-  configureViewAndSession(paneId, view, profileId);
-  if (url) {
-    view.webContents.loadURL(url);
-  }
-  return view;
-}
-function destroyView(paneId) {
-  const view = viewRegistry.unregisterView(paneId);
-  if (!view) return;
-  if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-    global.mainWindow.contentView.removeChildView(view);
-  }
-  try {
-    if (!view.webContents.isDestroyed()) {
-      view.webContents.close();
-    }
-  } catch (e) {
-    console.warn("Failed to cleanly close webContents", e);
-  }
-  const profileId = viewRegistry.getProfile(paneId);
-  if (profileId) {
-    try {
-      const profile = getProfileById(profileId);
-      if (profile && profile.is_ephemeral) {
-        const { session } = require("electron");
-        const ses = session.fromPartition(profileId);
-        ses.clearStorageData();
-      }
-    } catch (e) {
-      console.warn("Failed to clear ephemeral storage", e);
-    }
-  }
-}
-function updateViewProfile(paneId, newProfileId) {
-  const currentProfileId = viewRegistry.getProfile(paneId);
-  if (currentProfileId === newProfileId) return;
-  const existing = viewRegistry.getView(paneId);
-  const currentUrl = existing && !existing.webContents.isDestroyed() ? existing.webContents.getURL() : "";
-  const bounds = existing ? existing.getBounds() : void 0;
-  destroyView(paneId);
-  const newView = createOrUpdateView(paneId, currentUrl, newProfileId);
-  if (bounds) {
-    newView.setBounds(bounds);
-  }
-}
-function destroyAllViews() {
-  for (const paneId of Array.from(viewRegistry.activeViews.keys())) {
-    try {
-      destroyView(paneId);
-    } catch {
-    }
-  }
-}
-function initViewLifecycleIpc() {
-  electron.ipcMain.on("view.create", (_event, paneId, url, profileId) => {
-    createOrUpdateView(paneId, url, profileId);
-  });
-  electron.ipcMain.on("view.destroy", (_event, paneId) => {
-    destroyView(paneId);
-  });
-  electron.ipcMain.on("view.updateProfile", (_event, paneId, newProfileId) => {
-    updateViewProfile(paneId, newProfileId);
-  });
-}
-const captureViewSafely = async (view) => {
-  if (!view || view.webContents.isDestroyed()) return "";
-  try {
-    const bounds = view.getBounds();
-    const img = await view.webContents.capturePage({
-      x: 0,
-      y: 0,
-      width: bounds.width,
-      height: bounds.height
-    });
-    if (!img.isEmpty()) {
-      let finalImg = img;
-      const size = img.getSize();
-      if (size.width > 1200) {
-        finalImg = img.resize({ width: 1200 });
-      }
-      return `data:image/jpeg;base64,${finalImg.toJPEG(75).toString("base64")}`;
-    }
-  } catch (err) {
-    console.warn("[capture] capturePage failed:", err);
-  }
-  return "";
-};
-function initCaptureIpc() {
-  electron.ipcMain.on("view.screenshot", async (event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      try {
-        const image = await view.webContents.capturePage();
-        const { clipboard } = require("electron");
-        clipboard.writeImage(image);
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("app:toast", {
-            message: "Screenshot copied to clipboard",
-            type: "success"
-          });
-        }
-      } catch (err) {
-        console.error("Failed to capture screenshot", err);
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("app:toast", {
-            message: "Failed to copy screenshot",
-            type: "error"
-          });
-        }
-      }
-    }
-  });
-  electron.ipcMain.handle(
-    "view.capture",
-    async (_event, paneId) => {
-      const view = activeViews.get(paneId);
-      if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
-      const dataURL = await captureViewSafely(view);
-      dataURL === "" && console.warn(`[pane ${paneId}] capture returned empty page`);
-      return dataURL;
-    }
-  );
-  electron.ipcMain.handle(
-    "view.captureAllActive",
-    async () => {
-      const captures = {};
-      for (const [paneId, view] of activeViews) {
-        if (view.webContents.isDestroyed()) continue;
-        const bounds = view.getBounds();
-        if (bounds.width > 0 && bounds.height > 0) {
-          const dataURL = await captureViewSafely(view);
-          if (dataURL) captures[paneId] = dataURL;
-        }
-      }
-      return captures;
-    }
-  );
-  electron.ipcMain.handle(
-    "view.hibernateAllActive",
-    async () => {
-      const captures = {};
-      const panesToHibernate = [];
-      for (const [paneId, view] of activeViews) {
-        if (view.webContents.isDestroyed()) continue;
-        if (view.webContents.isCurrentlyAudible()) {
-          continue;
-        }
-        panesToHibernate.push(paneId);
-      }
-      for (const paneId of panesToHibernate) {
-        const view = activeViews.get(paneId);
-        if (view && !view.webContents.isDestroyed()) {
-          const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
-          captures[paneId] = PLACEHOLDER;
-          const descriptor = {
-            url: view.webContents.getURL(),
-            profileId: viewProfile.get(paneId),
-            bounds: view.getBounds(),
-            dataURL: PLACEHOLDER,
-            title: view.webContents.getTitle()
-          };
-          viewProfile.delete(paneId);
-          hibernatedViews.set(paneId, descriptor);
-          if (global.mainWindow) {
-            try {
-              global.mainWindow.contentView.removeChildView(view);
-            } catch {
-            }
-          }
-          view.webContents.close();
-          activeViews.delete(paneId);
-        }
-      }
-      return captures;
-    }
-  );
-  electron.ipcMain.handle(
-    "view.hibernate",
-    async (_event, paneId) => {
-      const view = activeViews.get(paneId);
-      const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
-      if (!view) return PLACEHOLDER;
-      const descriptor = {
-        url: view.webContents.getURL(),
-        profileId: viewProfile.get(paneId),
-        bounds: view.getBounds(),
-        dataURL: PLACEHOLDER,
-        title: view.webContents.getTitle()
-      };
-      viewProfile.delete(paneId);
-      hibernatedViews.set(paneId, descriptor);
-      if (global.mainWindow) {
-        try {
-          global.mainWindow.contentView.removeChildView(view);
-        } catch {
-        }
-      }
-      view.webContents.close();
-      activeViews.delete(paneId);
-      return PLACEHOLDER;
-    }
-  );
-}
-createLogger("VIEW");
-function initViewIpc() {
-  electron.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
-    if (paneId && typeof wcId === "number") {
-      viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
-    }
-  });
-  electron.ipcMain.on("pane.clicked", (event) => {
-    for (const [paneId, view] of activeViews) {
-      if (view.webContents === event.sender) {
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("pane.focused", paneId);
-        }
-        break;
-      }
-    }
-  });
-  electron.ipcMain.on("view.openDevTools", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (!view || view.webContents.isDestroyed()) return;
-    if (view.webContents.isDevToolsOpened()) return;
-    activeViews.forEach((v) => {
-      if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
-        v.webContents.closeDevTools();
-      }
-    });
-    view.webContents.openDevTools({ mode: "undocked" });
-  });
-  electron.ipcMain.on("view.closeDevTools", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.closeDevTools();
-    }
-  });
-  electron.ipcMain.on("view.hideDevTools", () => {
-    activeViews.forEach((v) => {
-      if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
-    });
-  });
-  electron.ipcMain.on("view.zoomIn", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      const level = view.webContents.getZoomLevel();
-      view.webContents.setZoomLevel(level + 0.5);
-    }
-  });
-  electron.ipcMain.on("view.zoomOut", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      const level = view.webContents.getZoomLevel();
-      view.webContents.setZoomLevel(level - 0.5);
-    }
-  });
-  electron.ipcMain.on("view.zoomReset", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setZoomLevel(0);
-    }
-  });
-  electron.ipcMain.on("view.sleep", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setBackgroundThrottling(true);
-      view.webContents.setAudioMuted(true);
-      view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-    }
-  });
-  electron.ipcMain.on("view.wake", (_event, paneId, bounds) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setBackgroundThrottling(false);
-      view.webContents.setAudioMuted(false);
-      if (bounds) view.setBounds(bounds);
-    }
-  });
-  electron.ipcMain.removeAllListeners("auth:trigger-autofill");
-  electron.ipcMain.on("auth:trigger-autofill", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.send("auth:trigger-autofill");
-    }
-  });
-}
-function initViewManager() {
-  initViewLifecycleIpc();
-  initCaptureIpc();
-  initViewIpc();
-}
-function handleWebContentsWindowOpen(webContents) {
-  webContents.setWindowOpenHandler((details) => {
-    const decision = evaluateWindowOpenRequest(
-      details.url,
-      details.disposition,
-      details.features
-    );
-    if (decision.type === "SYSTEM_AUTH_RELAY") {
-      startAuthRelay(details.url).catch(() => {
-        electron.shell.openExternal(details.url);
-      });
-      return { action: "deny" };
-    }
-    if (decision.type === "ALLOW_OAUTH_POPUP") {
-      return {
-        action: "allow",
-        overrideBrowserWindowOptions: {
-          width: decision.width,
-          height: decision.height,
-          center: true,
-          titleBarStyle: "hidden",
-          titleBarOverlay: {
-            color: "#fafaf9",
-            symbolColor: "#121212",
-            height: 36
-          },
-          backgroundColor: "#FFFFFF",
-          show: true,
-          icon: path.join(
-            __dirname,
-            process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
-          ),
-          userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
-          webPreferences: {
-            // EXPERIMENT (uncommitted): document-start passkey suppression,
-            // same main-world preload rationale as googleAuthModal.ts.
-            preload: path.join(__dirname, "../preload/authGuard.js"),
-            sandbox: true,
-            contextIsolation: false
-          }
-        }
-      };
-    }
-    if (decision.type === "NAVIGATE_CURRENT_PANE") {
-      webContents.loadURL(decision.url);
-      return { action: "deny" };
-    }
-    if (decision.type === "OPEN_IN_APP") {
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("open-in-new-pane", decision.url);
-      }
-      return { action: "deny" };
-    }
-    if (decision.type === "OPEN_SYSTEM_BROWSER") {
-      electron.shell.openExternal(decision.url);
-      return { action: "deny" };
-    }
-    return { action: "deny" };
-  });
-}
-const patchedSessions = /* @__PURE__ */ new WeakSet();
-function configureSessionSecurity(session) {
-  if (!session || patchedSessions.has(session) || session.__securityHeadersBound) return;
-  patchedSessions.add(session);
-  session.__securityHeadersBound = true;
-  const chromeVersion = process.versions.chrome || "144.0.7550.80";
-  const clientHints = generateClientHints(chromeVersion, "Windows");
-  session.setUserAgent(DEFAULT_DESKTOP_UA);
-  configureWebAuthnForSession(session);
-  session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    if (permission === "private-network-access" || permission === "local-network-access") {
-      if (!requestingOrigin) return false;
-      try {
-        const url = new URL(requestingOrigin);
-        return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
-      } catch {
-        return false;
-      }
-    }
-    return true;
-  });
-  let flushTimer = null;
-  try {
-    session.cookies.on("changed", (_event, cookie, cause) => {
-      if ((cause === "explicit" || cause === "overwrite") && (["d", "SID"].includes(cookie.name) || ["token", "session", "auth"].some((k) => cookie.name.includes(k)))) {
-        if (flushTimer) clearTimeout(flushTimer);
-        flushTimer = setTimeout(() => {
-          flushTimer = null;
-          session.cookies.flushStore().catch(() => {
-          });
-        }, 2e3);
-      }
-    });
-  } catch {
-  }
-  session.webRequest.onBeforeSendHeaders(
-    { urls: ["https://*/*", "http://*/*"] },
-    (details, callback) => {
-      const url = details.url || "";
-      if (url.startsWith("http://localhost:") || url.startsWith("http://127.0.0.1:") || url.startsWith("ws://")) {
-        callback({ cancel: false });
-        return;
-      }
-      if (details.method === "OPTIONS") {
-        callback({ cancel: false });
-        return;
-      }
-      if (!details.url || !details.url.startsWith("http://") && !details.url.startsWith("https://")) {
-        callback({ cancel: false });
-        return;
-      }
-      try {
-        const sanitized = sanitizeRequestHeaders(
-          details.requestHeaders || {},
-          clientHints,
-          details.url
-        );
-        callback({ requestHeaders: sanitized });
-      } catch {
-        callback({ requestHeaders: details.requestHeaders || {} });
-      }
-    }
-  );
-}
-function initSessionSecurity() {
-  if (electron.session.defaultSession) {
-    configureSessionSecurity(electron.session.defaultSession);
-  }
-  electron.app.on("session-created", (session) => {
-    configureSessionSecurity(session);
-  });
-  electron.app.on("browser-window-created", (_, popupWin) => {
-    const isAppWindow = popupWin === global.mainWindow || popupWin === global.overlayWindow || popupWin.__isMainWindow || popupWin.__isTearWindow;
-    if (isAppWindow) return;
-    popupWin.webContents.on("will-navigate", (_e, navUrl) => {
-      if (isGoogleAuthUrl(navUrl)) {
-        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      }
-    });
-    popupWin.webContents.on("did-navigate", (_e, navUrl) => {
-      if (isGoogleAuthUrl(navUrl)) {
-        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      }
-      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-      const lower = (navUrl || "").toLowerCase();
-      if (lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success")) {
-        setTimeout(() => {
-          if (!popupWin.isDestroyed()) popupWin.close();
-        }, 300);
-      }
-    });
-    popupWin.webContents.on("dom-ready", () => {
-      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-    });
-  });
-  electron.app.on("web-contents-created", (_, webContents) => {
-    configureSessionSecurity(webContents.session);
-    webContents.on("dom-ready", () => {
-      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-    });
-    webContents.on("did-navigate", () => {
-      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
-      });
-    });
-    webContents.on("focus", () => {
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("view.focus-wc", webContents.id);
-      }
-    });
-    webContents.on("context-menu", (_event, params) => {
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("view.context-menu-native", {
-          webContentsId: webContents.id,
-          x: params.x,
-          y: params.y,
-          linkURL: params.linkURL || "",
-          srcURL: params.srcURL || "",
-          pageURL: params.pageURL || (typeof webContents.getURL === "function" ? webContents.getURL() : ""),
-          selectionText: params.selectionText || ""
-        });
-      }
-    });
-    handleWebContentsWindowOpen(webContents);
-    webContents.on("render-process-gone", (_event, details) => {
-      if (details.reason === "oom" || details.reason === "crashed" || details.reason === "killed") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("pane.crashed", {
-            webContentsId: webContents.id,
-            reason: details.reason,
-            exitCode: details.exitCode
-          });
-        }
-      }
-    });
-  });
-  electron.app.on("child-process-gone", (_event, details) => {
-    if (details.type === "GPU" && details.reason === "crashed") {
-      console.warn("GPU Process Crashed. Electron will restart it.");
-    }
-  });
-}
-async function flushAllSessions() {
-  try {
-    const profiles = getProfiles();
-    const partitions = /* @__PURE__ */ new Set([
-      "persist:main",
-      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
-    ]);
-    for (const part of partitions) {
-      try {
-        const ses = electron.session.fromPartition(part);
-        await ses.flushStorageData();
-      } catch (err) {
-        logger.debug(`Flush failed for ${part}`, err);
-      }
-    }
-    await electron.session.defaultSession.flushStorageData();
-  } catch (e) {
-    logger.warn("Failed to flush session storage", e);
-  }
-}
-const monitoredPartitions = /* @__PURE__ */ new Set();
-function monitorPartitionCookies(partition) {
-  if (monitoredPartitions.has(partition)) return;
-  monitoredPartitions.add(partition);
-  try {
-    const ses = electron.session.fromPartition(partition);
-    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
-      if (!removed && cause === "explicit") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("partition.cookie-changed", {
-            partition,
-            domain: cookie.domain,
-            name: cookie.name
-          });
-        }
-      }
-    });
-  } catch (e) {
-    logger.debug(`Failed to attach cookie monitor for ${partition}`, e);
-  }
-}
-function initSessionPersistenceHooks() {
-  try {
-    electron.powerMonitor.on("suspend", async () => {
-      logger.info("System suspending - flushing session data to disk");
-      await flushAllSessions();
-    });
-    electron.powerMonitor.on("resume", () => {
-      logger.info("System resumed from suspend - verifying app overlay and views");
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        syncAppOverlayBounds(global.mainWindow);
-      }
-      const overlay = global.appOverlayView;
-      if (overlay && !overlay.webContents.isDestroyed()) {
-        if (overlay.webContents.isCrashed()) {
-          logger.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
-          overlay.webContents.reload();
-        } else {
-          overlay.webContents.send("app:env", { nativeViews: true });
-        }
-      }
-    });
-    setInterval(() => {
-      flushAllSessions().catch(() => {
-      });
-    }, 6e4);
-    monitorPartitionCookies("persist:main");
-    const profiles = getProfiles();
-    for (const p of profiles) {
-      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
-      monitorPartitionCookies(part);
-    }
-  } catch (e) {
-    logger.warn("PowerMonitor / Cookie monitor hook unavailable", e);
-  }
-}
-function initNetworkOptimizer() {
-  const defaultSession = electron.session.defaultSession;
-  electron.ipcMain.on("net.prefetch", (_, rawUrl) => {
-    if (!rawUrl) return;
-    try {
-      let hostname = rawUrl;
-      if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
-        hostname = new URL(rawUrl).hostname;
-      }
-      if (hostname && typeof defaultSession.resolveHost === "function") {
-        defaultSession.resolveHost(hostname).catch(() => {
-        });
-      }
-    } catch {
-    }
-  });
-}
-const handleDeepLink = (url) => {
-  if (!url || !url.startsWith("apposition://")) return;
-  const attribution = parseAttributionFromUrl(url);
-  if (attribution) {
-    setMemoryAttribution(attribution);
-    saveAttribution(attribution);
-  }
-  const deepPath = url.replace("apposition://", "");
-  if (deepPath.startsWith("workspace/")) {
-    const workspaceId = deepPath.replace("workspace/", "");
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send("app.deep-link.workspace", workspaceId);
-    }
-  } else if (deepPath.startsWith("oauth-callback") || deepPath.startsWith("auth/callback")) {
-    try {
-      const urlObj = new URL(url);
-      const token = urlObj.searchParams.get("token");
-      const code = urlObj.searchParams.get("code");
-      const state = urlObj.searchParams.get("state");
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.deep-link.oauth", {
-          token,
-          code,
-          state,
-          rawUrl: url
-        });
-      }
-    } catch (e) {
-      console.error("Failed to parse oauth callback url", e);
-    }
-  }
-};
-function initDeepLinking() {
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      electron.app.setAsDefaultProtocolClient("apposition", process.execPath, [
-        path__namespace.resolve(process.argv[1])
-      ]);
-    }
-  } else {
-    electron.app.setAsDefaultProtocolClient("apposition");
-  }
-  const gotTheLock2 = electron.app.requestSingleInstanceLock();
-  if (!gotTheLock2) {
-    electron.app.quit();
-  } else {
-    electron.app.on("second-instance", (_event, commandLine) => {
-      if (global.mainWindow) {
-        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-        global.mainWindow.focus();
-      }
-      const url = commandLine.find((arg) => arg.startsWith("apposition://"));
-      handleDeepLink(url);
-    });
-    electron.app.on("open-url", (event, url) => {
-      event.preventDefault();
-      if (global.mainWindow) {
-        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-        global.mainWindow.focus();
-      }
-      handleDeepLink(url);
-    });
-  }
-}
-const updateLogger = createLogger("UPDATE");
-const REPO_URL = "https://github.com/jvondev/apposition-releases";
-let updateManagerInstance = null;
-function getUpdateManager() {
-  if (!electron.app.isPackaged) return null;
-  if (!updateManagerInstance) {
-    try {
-      updateManagerInstance = new velopack.UpdateManager(new velopack.GithubSource(REPO_URL, void 0, false));
-    } catch (err) {
-      updateLogger.warn("Failed to instantiate Velopack UpdateManager", err?.message || err);
-    }
-  }
-  return updateManagerInstance;
-}
-function initAutoUpdater() {
-  const um = getUpdateManager();
-  electron.ipcMain.handle("updater.check", async () => {
-    if (!um) {
-      return { success: true, isDev: true, message: "Updates disabled in unpacked dev mode." };
-    }
-    try {
-      const updateInfo = await um.checkForUpdatesAsync();
-      if (!updateInfo) {
-        return { success: true, hasUpdate: false };
-      }
-      return {
-        success: true,
-        hasUpdate: true,
-        version: updateInfo.TargetFullRelease?.Version || "latest"
-      };
-    } catch (err) {
-      updateLogger.warn("Manual update check failed", err?.message || err);
-      return { success: false, error: err?.message || String(err) };
-    }
-  });
-  if (!electron.app.isPackaged || !um) return;
-  setTimeout(() => {
-    runBackgroundUpdateCheck(um);
-  }, 5e3);
-}
-async function runBackgroundUpdateCheck(um) {
-  try {
-    updateLogger.info("Checking for application updates via Velopack...");
-    const updateInfo = await um.checkForUpdatesAsync();
-    if (!updateInfo) {
-      updateLogger.info("Application is up to date.");
-      return;
-    }
-    const targetVersion = updateInfo.TargetFullRelease?.Version || "latest";
-    const isDelta = updateInfo.DeltasToTarget && updateInfo.DeltasToTarget.length > 0;
-    updateLogger.info(
-      `Update found (${targetVersion}, ${isDelta ? "binary delta" : "full package"}). Downloading...`
-    );
-    await um.downloadUpdateAsync(updateInfo);
-    updateLogger.info(`Update ${targetVersion} downloaded and verified.`);
-    const result = await electron.dialog.showMessageBox({
-      type: "info",
-      title: "Update Ready",
-      message: `Apposition ${targetVersion} has been downloaded.`,
-      detail: "Restart Apposition now to apply the update.",
-      buttons: ["Restart and Update", "Later"],
-      defaultId: 0,
-      cancelId: 1
-    });
-    if (result.response === 0) {
-      updateLogger.info("Applying update and restarting application...");
-      um.waitExitThenApplyUpdate(updateInfo, false, true);
-      electron.app.quit();
-    }
-  } catch (err) {
-    updateLogger.warn("Background auto-update check skipped", err?.message || err);
-  }
-}
-function initDiagnosticsIpc(logFilePath, isDevMode2) {
-  electron.ipcMain.handle("diagnostics.getHealth", () => {
-    return {
-      uptimeSec: Math.floor(process.uptime()),
-      ...runtimeState.getState()
-    };
-  });
-  electron.ipcMain.handle("diagnostics.getErrors", () => {
-    return flightRecorder.getErrors();
-  });
-  electron.ipcMain.handle("diagnostics.getFlightRecorder", () => {
-    return flightRecorder.snapshot();
-  });
-  electron.ipcMain.handle("diagnostics.toggleGuestNoise", () => {
-    const next = !runtimeState.getState().guestLogsMuted;
-    runtimeState.setGuestLogsMuted(next);
-    return next;
-  });
-  electron.ipcMain.handle("diagnostics.openLogFile", () => {
-    electron.shell.openPath(logFilePath);
-  });
-}
-function initDevCommandBridge(isDevMode2) {
-  if (!isDevMode2) return;
-  const cmdPath = path.join(electron.app.getPath("userData"), ".apposition-command.json");
-  const checkCommand = () => {
-    if (!fs.existsSync(cmdPath)) return;
-    try {
-      const data = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
-      fs.unlinkSync(cmdPath);
-      if (data.command === "reload") {
-        if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-          logger.info("Soft reloading app overlay view via dev command");
-          global.appOverlayView.webContents.reload();
-        } else if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          logger.info("Soft reloading main window via dev command");
-          global.mainWindow.webContents.reload();
-        }
-      } else if (data.command === "quit") {
-        logger.info("Gracefully quitting via dev command");
-        electron.app.quit();
-      }
-    } catch {
-    }
-  };
-  try {
-    const dir = electron.app.getPath("userData");
-    fs.watch(dir, (_event, filename) => {
-      if (filename && filename.includes(".apposition-command.json")) {
-        checkCommand();
-      }
-    });
-  } catch {
-    setInterval(checkCommand, 1e3);
-  }
-}
-const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
-let isDev = true;
-function initMainSentry(isDevMode2) {
-  isDev = isDevMode2;
-  if (isDevMode2) {
-    return;
-  }
-  try {
-    Sentry__namespace.init({
-      dsn: SENTRY_DSN,
-      release: `apposition@${electron.app.getVersion()}`,
-      environment: "production",
-      enabled: !isDevMode2,
-      sampleRate: 1,
-      beforeSend(event) {
-        if (isDevMode2) return null;
-        return sanitizeSentryEvent(event);
-      }
-    });
-  } catch (err) {
-    console.error("Failed to initialize Sentry in main process", err);
-  }
-}
-function captureMainException(err, context) {
-  if (isDev) return;
-  try {
-    Sentry__namespace.captureException(err, {
-      extra: context
-    });
-  } catch {
-  }
-}
-let overlayPreloadPath = "";
-const transientSpecs = /* @__PURE__ */ new Map();
-function initOverlayProjector(getWindow, preloadPath = "") {
-  overlayPreloadPath = preloadPath;
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.SHOW, (_e, specs) => {
-    const win = getWindow();
-    if (!win) return;
-    const desired = new Set(specs.map((s) => s.id));
-    const state = composers.get(win.id);
-    if (!state) return;
-    let specsForWin = transientSpecs.get(win.id);
-    if (!specsForWin) {
-      specsForWin = /* @__PURE__ */ new Map();
-      transientSpecs.set(win.id, specsForWin);
-    }
-    for (const spec of specs) {
-      const view = ensureView(win, state, spec);
-      positionView(view, spec);
-      view.setVisible(true);
-      specsForWin.set(spec.id, spec);
-    }
-    for (const id of [...state.stack.transientOrder]) {
-      if (!desired.has(id)) {
-        hideView(win, state, id);
-        specsForWin.delete(id);
-      }
-    }
-  });
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.INTENT, (_e, intent) => {
-    global.appOverlayView?.webContents.send("app:overlay-intent", intent);
-  });
-}
-function ensureView(win, state, spec) {
-  const existing = state.views.get(spec.id);
-  if (existing && !existing.webContents.isDestroyed()) return existing;
-  const view = new electron.WebContentsView({
-    webPreferences: {
-      preload: overlayPreloadPath,
-      contextIsolation: true,
-      sandbox: false,
-      partition: "persist:overlay"
-    }
-  });
-  view.webContents.loadURL("app://overlay/index.html");
-  setTransientOverlay(win, spec.id, view);
-  return view;
-}
-function positionView(view, spec) {
-  const rect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
-  if (isValidPhysicalRect(rect)) view.setBounds(rect);
-}
-function hideView(win, state, id) {
-  hideTransient(win, id);
-  const v = state.views.get(id);
-  if (v) {
-    v.setVisible(false);
-    v.setBounds({ x: -1e4, y: -1e4, width: 1, height: 1 });
-  }
-}
-function repositionTransientOverlays(win) {
-  const specsForWin = transientSpecs.get(win.id);
-  if (!specsForWin) return;
-  const state = composers.get(win.id);
-  if (!state) return;
-  for (const [id, spec] of specsForWin) {
-    const v = state.views.get(id);
-    if (v) {
-      positionView(v, spec);
-      v.setVisible(true);
-    }
-  }
-}
 async function captureWebContentsCdp(wc, options = { fullPage: true, copyToClipboard: true }) {
   if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
   const dbg = wc.debugger;
@@ -7012,49 +3546,1916 @@ function initPaneSuperpowerIpc(panes2, getWindow) {
     }
   });
 }
-class AudioArbiterService {
-  activeSpeakers = /* @__PURE__ */ new Set();
-  autoDuckedPanes = /* @__PURE__ */ new Set();
-  autoDuckingEnabled = true;
-  handleMediaStarted(paneId, wc, allPanes) {
+class AudioMatrixService {
+  sources = /* @__PURE__ */ new Map();
+  allPanes = /* @__PURE__ */ new Map();
+  masterMuted = false;
+  registerPane(paneId, wc) {
+    this.allPanes.set(paneId, { webContents: wc });
+  }
+  unregisterPane(paneId) {
+    this.allPanes.delete(paneId);
+    if (this.sources.has(paneId)) {
+      this.sources.delete(paneId);
+      this.broadcastChanges();
+    }
+  }
+  handleAudioStarted(paneId, wc) {
     if (wc.isDestroyed()) return;
-    this.activeSpeakers.add(paneId);
-    if (!this.autoDuckingEnabled) return;
-    for (const [otherId, otherView] of allPanes.entries()) {
-      if (otherId !== paneId && !otherView.webContents.isDestroyed()) {
+    this.allPanes.set(paneId, { webContents: wc });
+    const info = {
+      paneId,
+      title: wc.getTitle() || "Audio Stream",
+      url: wc.getURL() || "",
+      isAudible: true,
+      isMuted: wc.isAudioMuted(),
+      lastAudibleAt: Date.now()
+    };
+    this.sources.set(paneId, info);
+    this.broadcastChanges();
+  }
+  handleAudioStopped(paneId) {
+    const existing = this.sources.get(paneId);
+    if (existing) {
+      existing.isAudible = false;
+      this.broadcastChanges();
+    }
+  }
+  handleDynamicStatus(paneId, status) {
+    const pane = this.allPanes.get(paneId);
+    const wc = pane?.webContents;
+    if (!wc || wc.isDestroyed()) return;
+    if (status.isPlaying && status.isAudible) {
+      this.handleAudioStarted(paneId, wc);
+    } else if (!status.isPlaying || !status.isAudible) {
+      this.handleAudioStopped(paneId);
+    }
+  }
+  toggleMute(paneId) {
+    const pane = this.allPanes.get(paneId);
+    if (!pane || pane.webContents.isDestroyed()) return false;
+    const nextMuted = !pane.webContents.isAudioMuted();
+    pane.webContents.setAudioMuted(nextMuted);
+    const info = this.sources.get(paneId);
+    if (info) {
+      info.isMuted = nextMuted;
+      this.broadcastChanges();
+    }
+    return nextMuted;
+  }
+  setAudioMuted(paneId, muted) {
+    const pane = this.allPanes.get(paneId);
+    if (!pane || pane.webContents.isDestroyed()) return;
+    pane.webContents.setAudioMuted(muted);
+    const info = this.sources.get(paneId);
+    if (info) {
+      info.isMuted = muted;
+      this.broadcastChanges();
+    }
+  }
+  toggleMasterMute() {
+    this.masterMuted = !this.masterMuted;
+    for (const [paneId, { webContents: wc }] of this.allPanes.entries()) {
+      if (!wc.isDestroyed()) {
+        wc.setAudioMuted(this.masterMuted);
+        const info = this.sources.get(paneId);
+        if (info) info.isMuted = this.masterMuted;
+      }
+    }
+    this.broadcastChanges();
+    return this.masterMuted;
+  }
+  getActiveSources() {
+    return Array.from(this.sources.values()).filter((s) => s.isAudible);
+  }
+  isPaneAudible(paneId) {
+    return this.sources.get(paneId)?.isAudible ?? false;
+  }
+  broadcastChanges() {
+    const active = this.getActiveSources();
+    global.appOverlayView?.webContents?.send(
+      "audio:active-sources-changed",
+      active
+    );
+  }
+  initIpc() {
+    electron.ipcMain.handle("audio:toggle-mute", (_e, paneId) => {
+      return this.toggleMute(paneId);
+    });
+    electron.ipcMain.handle("audio:toggle-master-mute", () => {
+      return this.toggleMasterMute();
+    });
+    electron.ipcMain.handle("audio:get-active-sources", () => {
+      return this.getActiveSources();
+    });
+  }
+}
+const audioMatrix = new AudioMatrixService();
+const configuredSessions = /* @__PURE__ */ new WeakSet();
+function configureWebAuthnForSession(sess) {
+  if (!sess || configuredSessions.has(sess)) return;
+  configuredSessions.add(sess);
+  sess.setDevicePermissionHandler(() => false);
+  const selectHidHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(void 0);
+  };
+  const selectAccountHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(null);
+  };
+  sess.on("select-hid-device", selectHidHandler);
+  sess.on("select-webauthn-account", selectAccountHandler);
+}
+async function extractFromMatchingPane(ses, domainFragment, extractorScript, timeoutMs = 800) {
+  try {
+    const allWc = electron.webContents.getAllWebContents();
+    for (const wc of allWc) {
+      if (wc.isDestroyed()) continue;
+      if (wc.session !== ses) continue;
+      const url = wc.getURL() || "";
+      if (url.includes(domainFragment)) {
+        const evalPromise = wc.executeJavaScript(extractorScript, true);
+        const timeoutPromise = new Promise(
+          (resolve) => setTimeout(() => resolve(null), timeoutMs)
+        );
+        const result = await Promise.race([evalPromise, timeoutPromise]);
+        if (typeof result === "string" && result.trim()) {
+          return result.trim();
+        }
+      }
+    }
+  } catch {
+  }
+  return null;
+}
+const CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36";
+const GOOGLE_AUTH_COOKIE_NAMES = /* @__PURE__ */ new Set([
+  "SAPISID",
+  "SID",
+  "SSID",
+  "HSID",
+  "APISID",
+  "OSID",
+  "__Secure-1PAPISID",
+  "__Secure-3PAPISID",
+  "__Secure-1PSID",
+  "__Secure-3PSID",
+  "ACCOUNT_CHOOSER",
+  "LOGIN_INFO",
+  "SIDCC",
+  "__Secure-1PSIDCC",
+  "__Secure-3PSIDCC",
+  "LSID"
+]);
+const googleResolver = {
+  providerId: "google",
+  domains: ["google.com", "accounts.google.com", "google.co", "google.", "youtube.com", "gmail.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const googleCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("google.") || d.includes("accounts.google") || d.includes("youtube.com") || d.includes("gmail.com");
+    });
+    const hasAuthCookie = googleCookies.some((c) => GOOGLE_AUTH_COOKIE_NAMES.has(c.name));
+    if (!hasAuthCookie) return null;
+    let foundEmail;
+    let foundName;
+    let foundAvatar;
+    let foundAliases = [];
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "google.",
+      `(() => {
+          const a = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], a[href*="SignOutOptions"], a[href*="accounts.google.com/SignOutOptions"]');
+          if (a) {
+            const l = a.getAttribute('aria-label') || a.innerText || a.getAttribute('title') || '';
+            const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+            if (m && !m[1].endsWith('@google.com')) return m[1];
+          }
+          return null;
+        })()`
+    ) || await extractFromMatchingPane(
+      ses,
+      "youtube.com",
+      `(() => {
+          try {
+            if (typeof window !== 'undefined' && window.ytcfg && typeof window.ytcfg.get === 'function') {
+              const u = window.ytcfg.get('USER_DISPLAY_NAME') || window.ytcfg.get('LOGGED_IN_USER');
+              if (u && typeof u === 'string' && u.trim()) return u.trim();
+            }
+            const handleEl = document.querySelector('#channel-handle, ytd-channel-name #text, yt-formatted-string#channel-handle, #email, ytd-active-account-header-renderer #email');
+            if (handleEl && handleEl.textContent && handleEl.textContent.trim()) {
+              return handleEl.textContent.trim();
+            }
+            const btn = document.querySelector('button#avatar-btn, ytd-topbar-menu-button-renderer, yt-img-shadow#avatar');
+            if (btn) {
+              const l = btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.getAttribute('alt') || '';
+              const m = l.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+              if (m) return m[1];
+            }
+          } catch {}
+          return null;
+        })()`
+    );
+    if (paneEmail) foundEmail = paneEmail;
+    if (!foundEmail || foundAliases.length === 0) {
+      try {
+        const resp = await ses.fetch(
+          "https://accounts.google.com/ListAccounts?gpsia=1&source=ChromiumBrowser&json=standard",
+          {
+            credentials: "include",
+            headers: {
+              "User-Agent": CHROME_UA,
+              Referer: "https://accounts.google.com/",
+              "Sec-Fetch-Site": "same-origin",
+              "Sec-Fetch-Mode": "cors",
+              "Sec-Fetch-Dest": "empty"
+            },
+            signal: AbortSignal.timeout(4e3)
+          }
+        );
+        if (resp.ok) {
+          const text = await resp.text();
+          const cleaned = text.startsWith(")]}'") ? text.slice(4) : text;
+          const data = JSON.parse(cleaned);
+          const accounts = data?.[1];
+          if (Array.isArray(accounts) && accounts.length > 0) {
+            const primary = accounts[0];
+            if (!foundName) foundName = primary?.[2] || "";
+            if (!foundEmail) foundEmail = primary?.[3] || "";
+            if (!foundAvatar) foundAvatar = primary?.[4] || void 0;
+            if (accounts.length > 1) {
+              foundAliases = accounts.slice(1).map((acc) => acc?.[3]).filter((e) => typeof e === "string" && e.includes("@"));
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    if (!foundEmail) {
+      try {
+        const myAcc = await ses.fetch("https://myaccount.google.com/", {
+          credentials: "include",
+          headers: {
+            "User-Agent": CHROME_UA,
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Dest": "document"
+          },
+          signal: AbortSignal.timeout(4e3)
+        });
+        if (myAcc.ok) {
+          const html = await myAcc.text();
+          const m = html.match(/aria-label="Google Account:[^"]*?([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (m && !m[1].endsWith("@google.com")) {
+            foundEmail = m[1];
+          } else {
+            const m2 = html.match(/"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})"/);
+            if (m2 && !m2[1].endsWith("@google.com") && !m2[1].endsWith("@example.com")) {
+              foundEmail = m2[1];
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    if (!foundEmail) {
+      for (const c of googleCookies) {
         try {
-          if (!otherView.webContents.isAudioMuted()) {
-            otherView.webContents.setAudioMuted(true);
-            this.autoDuckedPanes.add(otherId);
+          const decoded = decodeURIComponent(c.value);
+          const match = decoded.match(/\b([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})\b/);
+          if (match && !match[1].endsWith("@google.com") && !match[1].endsWith("@example.com")) {
+            foundEmail = match[1];
+            break;
           }
         } catch {
         }
       }
     }
+    return {
+      id: "google",
+      providerId: "google",
+      email: foundEmail,
+      displayName: foundName || foundEmail || "Google Account",
+      avatarUrl: foundAvatar,
+      aliases: foundAliases.length > 0 ? foundAliases : void 0,
+      lastDetectedAt: Date.now()
+    };
   }
-  handleMediaStopped(paneId, allPanes) {
-    this.activeSpeakers.delete(paneId);
-    if (this.activeSpeakers.size === 0) {
-      for (const duckedId of this.autoDuckedPanes) {
-        const view = allPanes.get(duckedId);
-        if (view && !view.webContents.isDestroyed()) {
-          try {
-            view.webContents.setAudioMuted(false);
-          } catch {
+};
+const githubResolver = {
+  providerId: "github",
+  domains: ["github.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const ghCookies = cookies.filter((c) => (c.domain || "").includes("github.com"));
+    const isLoggedIn = ghCookies.some((c) => c.name === "logged_in" && c.value === "yes");
+    const hasSession = ghCookies.some(
+      (c) => c.name === "user_session" || c.name === "__Host-user_session_same_site" || c.name === "dotcom_user"
+    );
+    if (!isLoggedIn && !hasSession) return null;
+    const userCookie = ghCookies.find((c) => c.name === "dotcom_user");
+    let username = userCookie?.value ? decodeURIComponent(userCookie.value) : "";
+    if (!username) {
+      const paneUser = await extractFromMatchingPane(
+        ses,
+        "github.com",
+        `(() => {
+          const m = document.querySelector('meta[name="user-login"]');
+          return m ? m.content : null;
+        })()`
+      );
+      if (paneUser) username = paneUser;
+    }
+    if (!username) {
+      const savedCookie = ghCookies.find((c) => c.name === "saved_user_sessions");
+      if (savedCookie?.value) {
+        const match = decodeURIComponent(savedCookie.value).match(/:([a-zA-Z0-9_-]+)/);
+        if (match) username = match[1];
+      }
+    }
+    return {
+      id: "github",
+      providerId: "github",
+      handle: username ? `@${username}` : void 0,
+      email: username ? `@${username}` : void 0,
+      displayName: username || "GitHub User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const microsoftResolver = {
+  providerId: "microsoft",
+  domains: ["microsoft.com", "login.microsoftonline.com", "live.com", "office.com", "microsoft365.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const msCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("microsoft.com") || d.includes("login.microsoftonline.com") || d.includes("live.com") || d.includes("office.com") || d.includes("microsoft365.com");
+    });
+    const hasAuth = msCookies.some(
+      (c) => c.name === "ESTSAUTHPERSISTENT" || c.name === "ESTSAUTH" || c.name === "RPSSecAuth" || c.name === "WLSSC" || c.name === "SignInStateCookie" || c.name === "DefaultAnchorMailbox"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const mailboxCookie = msCookies.find((c) => c.name === "DefaultAnchorMailbox");
+    if (mailboxCookie?.value) {
+      try {
+        const decoded = decodeURIComponent(mailboxCookie.value).replace(/^UPN:/i, "");
+        if (decoded.includes("@")) email = decoded;
+      } catch {
+      }
+    }
+    if (!email) {
+      const paneEmail = await extractFromMatchingPane(
+        ses,
+        "microsoft",
+        `(() => {
+          const el = document.querySelector('#mectrl_currentAccount_secondary, [data-test-id="user-email"]');
+          if (el) {
+            const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+            if (m) return m[1];
           }
+          return null;
+        })()`
+      );
+      if (paneEmail) email = paneEmail;
+    }
+    if (!email) {
+      for (const c of msCookies) {
+        try {
+          const decoded = decodeURIComponent(c.value);
+          const match = decoded.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+          if (match) {
+            email = match[1];
+            break;
+          }
+        } catch {
         }
       }
-      this.autoDuckedPanes.clear();
     }
+    return {
+      id: "microsoft",
+      providerId: "microsoft",
+      email: email || void 0,
+      displayName: email || "Microsoft 365",
+      lastDetectedAt: Date.now()
+    };
   }
-  handlePaneDestroyed(paneId) {
-    this.activeSpeakers.delete(paneId);
-    this.autoDuckedPanes.delete(paneId);
+};
+const appleResolver = {
+  providerId: "apple",
+  domains: ["apple.com", "appleid.apple.com", "icloud.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const apCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("apple.com") || d.includes("icloud.com");
+    });
+    const hasAuth = apCookies.some(
+      (c) => c.name === "myacinfo" || c.name === "acn01" || c.name === "aid-auth" || c.name === "scnt"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "apple.com",
+      `(() => {
+        const el = document.querySelector('[class*="apple-id"], [class*="account-name"]');
+        if (el) {
+          const m = (el.innerText || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "apple",
+      providerId: "apple",
+      handle: email || void 0,
+      email: email || void 0,
+      displayName: email || "Apple Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const slackResolver = {
+  providerId: "slack",
+  domains: ["slack.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const slCookies = cookies.filter((c) => (c.domain || "").includes("slack.com"));
+    const hasAuth = slCookies.some((c) => c.name === "d" && c.value.startsWith("xoxd-"));
+    if (!hasAuth) return null;
+    let label = "";
+    const paneLabel = await extractFromMatchingPane(
+      ses,
+      "slack.com",
+      `(() => {
+        try {
+          if (window.boot_data && window.boot_data.user_name) return '@' + window.boot_data.user_name;
+        } catch {}
+        const el = document.querySelector('[data-qa="channel_sidebar_name_you"], [data-qa="workspace_name"]');
+        return el ? el.innerText.trim() : null;
+      })()`
+    );
+    if (paneLabel) label = paneLabel;
+    const isHandle = label.startsWith("@");
+    return {
+      id: "slack",
+      providerId: "slack",
+      handle: isHandle ? label : void 0,
+      email: void 0,
+      displayName: label || "Slack Workspace",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const xResolver = {
+  providerId: "x",
+  domains: ["x.com", "twitter.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const xCookies = cookies.filter((c) => {
+      const d = c.domain || "";
+      return d.includes("x.com") || d.includes("twitter.com");
+    });
+    const hasAuth = xCookies.some((c) => c.name === "auth_token");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "x.com",
+      `(() => {
+        const btn = document.querySelector('[data-testid="SideNav_AccountSwitcher_Button"]');
+        if (btn) {
+          const m = (btn.innerText || '').match(/@([a-zA-Z0-9_]+)/);
+          if (m) return '@' + m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    if (!handle) {
+      const ct0 = xCookies.find((c) => c.name === "ct0")?.value || "";
+      if (ct0) {
+        try {
+          const resp = await ses.fetch("https://api.x.com/1.1/account/settings.json", {
+            credentials: "include",
+            headers: {
+              authorization: "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+              "x-csrf-token": ct0
+            },
+            signal: AbortSignal.timeout(4e3)
+          });
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data?.screen_name) {
+              handle = `@${data.screen_name}`;
+            }
+          }
+        } catch {
+        }
+      }
+    }
+    if (!handle) {
+      const twid = xCookies.find((c) => c.name === "twid");
+      handle = twid?.value ? `@user_${decodeURIComponent(twid.value).replace(/\D/g, "").slice(-4)}` : "@x_user";
+    }
+    return {
+      id: "x",
+      providerId: "x",
+      handle,
+      email: handle,
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const discordResolver = {
+  providerId: "discord",
+  domains: ["discord.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const dCookies = cookies.filter((c) => (c.domain || "").includes("discord.com"));
+    const hasAuth = dCookies.some(
+      (c) => c.name === "token" || c.name === "__Secure-user_status" || c.name === "OptanonConsent"
+    );
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneName = await extractFromMatchingPane(
+      ses,
+      "discord.com",
+      `(() => {
+        const panel = document.querySelector('[class*="accountProfileCard"], [class*="nameTag"], [class*="avatarWrapper"]');
+        if (panel) {
+          const t = (panel.innerText || '').split('\\n')[0].trim();
+          if (t) return '@' + t.replace(/^@/, '');
+        }
+        return null;
+      })()`
+    );
+    if (paneName) handle = paneName;
+    return {
+      id: "discord",
+      providerId: "discord",
+      handle: handle || void 0,
+      email: handle || void 0,
+      displayName: handle || "Discord User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const gitlabResolver = {
+  providerId: "gitlab",
+  domains: ["gitlab.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const glCookies = cookies.filter((c) => (c.domain || "").includes("gitlab.com"));
+    const hasAuth = glCookies.some(
+      (c) => c.name === "_gitlab_session" || c.name === "remember_user_token"
+    );
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneUser = await extractFromMatchingPane(
+      ses,
+      "gitlab.com",
+      `(() => {
+        try {
+          if (window.gon && window.gon.current_username) return '@' + window.gon.current_username;
+        } catch {}
+        const m = document.querySelector('meta[name="user-login"]');
+        return m && m.content ? '@' + m.content : null;
+      })()`
+    );
+    if (paneUser) handle = paneUser;
+    return {
+      id: "gitlab",
+      providerId: "gitlab",
+      handle: handle || void 0,
+      email: handle || void 0,
+      displayName: handle || "GitLab User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const figmaResolver = {
+  providerId: "figma",
+  domains: ["figma.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const fCookies = cookies.filter((c) => (c.domain || "").includes("figma.com"));
+    const hasAuth = fCookies.some((c) => c.name === "figma.session" || c.name === "figma.auth_token");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "figma.com",
+      `(() => {
+        try {
+          if (window.INITIAL_OPTIONS && window.INITIAL_OPTIONS.user_data) {
+            return window.INITIAL_OPTIONS.user_data.email || window.INITIAL_OPTIONS.user_data.handle;
+          }
+        } catch {}
+        const el = document.querySelector('[data-testid="user-menu-button"], [aria-label*="@"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    if (!handle) {
+      try {
+        const resp = await ses.fetch("https://www.figma.com/api/user/state", {
+          credentials: "include",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+            Accept: "application/json"
+          },
+          signal: AbortSignal.timeout(4e3)
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data?.meta?.email) {
+            handle = data.meta.email;
+          } else if (data?.meta?.handle) {
+            handle = `@${data.meta.handle}`;
+          }
+        }
+      } catch {
+      }
+    }
+    return {
+      id: "figma",
+      providerId: "figma",
+      handle: handle || void 0,
+      email: handle || void 0,
+      displayName: handle || "Figma Workspace",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const notionResolver = {
+  providerId: "notion",
+  domains: ["notion.so", "notion.site"],
+  resolveIdentity: async (ses, cookies) => {
+    const nCookies = cookies.filter((c) => (c.domain || "").includes("notion.so"));
+    const hasAuth = nCookies.some((c) => c.name === "token_v2" || c.name === "notion_user_id");
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "notion.so",
+      `(() => {
+        try {
+          const u = window.__INITIAL_STATE__?.user;
+          if (u && u.email) return u.email;
+        } catch {}
+        const el = document.querySelector('[role="button"][class*="user"], [data-email]');
+        return el ? el.getAttribute('data-email') || el.innerText : null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "notion",
+      providerId: "notion",
+      email: email || void 0,
+      handle: email || void 0,
+      displayName: email || "Notion Workspace",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const linearResolver = {
+  providerId: "linear",
+  domains: ["linear.app"],
+  resolveIdentity: async (ses, cookies) => {
+    const lCookies = cookies.filter((c) => (c.domain || "").includes("linear.app"));
+    const hasAuth = lCookies.some((c) => c.name === "linear:session" || c.name === "koa.sid");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "linear.app",
+      `(() => {
+        const el = document.querySelector('[data-testid="user-profile-button"], [aria-label*="@"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    return {
+      id: "linear",
+      providerId: "linear",
+      handle: handle || void 0,
+      email: handle || void 0,
+      displayName: handle || "Linear Workspace",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const chatgptResolver = {
+  providerId: "chatgpt",
+  domains: ["chatgpt.com", "openai.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const oCookies = cookies.filter(
+      (c) => (c.domain || "").includes("chatgpt.com") || (c.domain || "").includes("openai.com")
+    );
+    const hasAuth = oCookies.some(
+      (c) => c.name.includes("session-token") || c.name === "oai-did" || c.name === "__Secure-next-auth.session-token"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "chatgpt.com",
+      `(() => {
+        const btn = document.querySelector('[data-testid="accounts-profile-button"]');
+        if (btn) {
+          const m = (btn.innerText || btn.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    if (!email) {
+      try {
+        const resp = await ses.fetch("https://chatgpt.com/api/auth/session", {
+          credentials: "include",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+            Accept: "application/json"
+          },
+          signal: AbortSignal.timeout(4e3)
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data?.user?.email) {
+            email = data.user.email;
+          }
+        }
+      } catch {
+      }
+    }
+    return {
+      id: "chatgpt",
+      providerId: "chatgpt",
+      email: email || void 0,
+      handle: email || "OpenAI User",
+      displayName: email || "ChatGPT Account",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const canvaResolver = {
+  providerId: "canva",
+  domains: ["canva.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const cCookies = cookies.filter((c) => (c.domain || "").includes("canva.com"));
+    const hasAuth = cCookies.some((c) => c.name === "canva_session" || c.name === "c_user");
+    if (!hasAuth) return null;
+    let name = "";
+    const paneName = await extractFromMatchingPane(
+      ses,
+      "canva.com",
+      `(() => {
+        const el = document.querySelector('[data-testid="user-profile-menu"], [aria-label*="Account"]');
+        return el ? el.getAttribute('aria-label') || el.innerText : null;
+      })()`
+    );
+    if (paneName) name = paneName;
+    return {
+      id: "canva",
+      providerId: "canva",
+      handle: name || void 0,
+      email: name || void 0,
+      displayName: name || "Canva Workspace",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const vercelResolver = {
+  providerId: "vercel",
+  domains: ["vercel.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const vCookies = cookies.filter((c) => (c.domain || "").includes("vercel.com"));
+    const hasAuth = vCookies.some((c) => c.name === "_vercel_jwt" || c.name === "current_team");
+    if (!hasAuth) return null;
+    let handle = "";
+    const paneHandle = await extractFromMatchingPane(
+      ses,
+      "vercel.com",
+      `(() => {
+        try {
+          const m = document.querySelector('meta[name="user-login"], [data-testid="header-avatar"]');
+          if (m) return m.getAttribute('content') || m.getAttribute('aria-label');
+        } catch {}
+        const el = document.querySelector('[data-testid="user-avatar"]');
+        return el ? el.getAttribute('aria-label') : null;
+      })()`
+    );
+    if (paneHandle) handle = paneHandle;
+    return {
+      id: "vercel",
+      providerId: "vercel",
+      handle: handle ? `@${handle.replace(/^@/, "")}` : void 0,
+      email: void 0,
+      displayName: handle || "Vercel User",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const stripeResolver = {
+  providerId: "stripe",
+  domains: ["stripe.com", "dashboard.stripe.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const sCookies = cookies.filter((c) => (c.domain || "").includes("stripe.com"));
+    const hasAuth = sCookies.some((c) => c.name === "merchant" || c.name === "cid" || c.name === "user");
+    if (!hasAuth) return null;
+    let label = "";
+    const paneLabel = await extractFromMatchingPane(
+      ses,
+      "dashboard.stripe.com",
+      `(() => {
+        const el = document.querySelector('[data-test="user-menu-button"], [aria-label*="@"]');
+        if (el) {
+          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+          return el.innerText.trim();
+        }
+        return null;
+      })()`
+    );
+    if (paneLabel) label = paneLabel;
+    const isEmail = label.includes("@");
+    return {
+      id: "stripe",
+      providerId: "stripe",
+      handle: !isEmail && label ? label : void 0,
+      email: isEmail ? label : void 0,
+      displayName: label || "Stripe Merchant",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const atlassianResolver = {
+  providerId: "atlassian",
+  domains: ["atlassian.com", "atlassian.net", "jira.com"],
+  resolveIdentity: async (ses, cookies) => {
+    const aCookies = cookies.filter(
+      (c) => (c.domain || "").includes("atlassian.com") || (c.domain || "").includes("atlassian.net") || (c.domain || "").includes("jira.com")
+    );
+    const hasAuth = aCookies.some(
+      (c) => c.name === "atlassian.account.xsrf" || c.name === "ajs_user_id" || c.name === "cloud.session.token"
+    );
+    if (!hasAuth) return null;
+    let email = "";
+    const paneEmail = await extractFromMatchingPane(
+      ses,
+      "atlassian",
+      `(() => {
+        const el = document.querySelector('[data-testid="profile-avatar-trigger"], [data-testid="header-profile-menu-button"]');
+        if (el) {
+          const m = (el.innerText || el.getAttribute('aria-label') || '').match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+          if (m) return m[1];
+          return el.getAttribute('aria-label');
+        }
+        return null;
+      })()`
+    );
+    if (paneEmail) email = paneEmail;
+    return {
+      id: "atlassian",
+      providerId: "atlassian",
+      handle: email || void 0,
+      email: email || void 0,
+      displayName: email || "Atlassian / Jira",
+      lastDetectedAt: Date.now()
+    };
+  }
+};
+const ALL_RESOLVERS = [
+  googleResolver,
+  githubResolver,
+  microsoftResolver,
+  appleResolver,
+  slackResolver,
+  xResolver,
+  figmaResolver,
+  notionResolver,
+  linearResolver,
+  chatgptResolver,
+  canvaResolver,
+  vercelResolver,
+  stripeResolver,
+  atlassianResolver,
+  discordResolver,
+  gitlabResolver
+];
+const GENERIC_SUFFIXES = [
+  " account",
+  " workspace",
+  " user",
+  " connected",
+  " id",
+  " merchant"
+];
+const KNOWN_GENERIC_LABELS = /* @__PURE__ */ new Set([
+  "google account",
+  "google user",
+  "@github_user",
+  "github user",
+  "microsoft 365",
+  "microsoft user",
+  "apple id",
+  "apple account",
+  "slack workspace",
+  "slack connected",
+  "chatgpt account",
+  "openai user",
+  "figma workspace",
+  "figma account",
+  "notion workspace",
+  "notion account",
+  "linear workspace",
+  "linear account",
+  "canva workspace",
+  "canva account",
+  "discord user",
+  "discord account",
+  "@gitlab_user",
+  "gitlab account",
+  "stripe merchant",
+  "stripe account",
+  "atlassian / jira",
+  "atlassian account",
+  "vercel user",
+  "vercel account"
+]);
+function isGenericPlaceholder(val) {
+  if (!val || typeof val !== "string") return true;
+  const trimmed = val.trim().toLowerCase();
+  if (trimmed.length === 0) return true;
+  if (KNOWN_GENERIC_LABELS.has(trimmed)) return true;
+  return GENERIC_SUFFIXES.some((s) => trimmed.endsWith(s));
+}
+function mergeSingleIdentity(existing, incoming) {
+  if (!existing) return incoming;
+  const incomingEmailIsSpecific = !isGenericPlaceholder(incoming.email);
+  const existingEmailIsSpecific = !isGenericPlaceholder(existing.email);
+  const email = incomingEmailIsSpecific ? incoming.email : existingEmailIsSpecific ? existing.email : incoming.email || existing.email;
+  const incomingHandleIsSpecific = !isGenericPlaceholder(incoming.handle);
+  const existingHandleIsSpecific = !isGenericPlaceholder(existing.handle);
+  const handle = incomingHandleIsSpecific ? incoming.handle : existingHandleIsSpecific ? existing.handle : incoming.handle || existing.handle;
+  const incomingNameIsSpecific = !isGenericPlaceholder(incoming.displayName);
+  const existingNameIsSpecific = !isGenericPlaceholder(existing.displayName);
+  const displayName = incomingNameIsSpecific ? incoming.displayName : existingNameIsSpecific ? existing.displayName : incoming.displayName || existing.displayName;
+  const aliasesSet = /* @__PURE__ */ new Set([
+    ...existing.aliases || [],
+    ...incoming.aliases || []
+  ]);
+  const aliases = aliasesSet.size > 0 ? Array.from(aliasesSet) : void 0;
+  return {
+    id: incoming.id || existing.id,
+    providerId: incoming.providerId || existing.providerId,
+    email,
+    handle,
+    displayName,
+    avatarUrl: incoming.avatarUrl || existing.avatarUrl,
+    aliases,
+    lastDetectedAt: Math.max(
+      incoming.lastDetectedAt || 0,
+      existing.lastDetectedAt || 0,
+      Date.now()
+    )
+  };
+}
+function mergeIdentitiesMap(existingMap = {}, incomingMap = {}) {
+  const merged = { ...existingMap };
+  for (const [providerId, incoming] of Object.entries(incomingMap)) {
+    if (!incoming) continue;
+    const existing = existingMap[providerId];
+    merged[providerId] = mergeSingleIdentity(existing, incoming);
+  }
+  return merged;
+}
+const EMAIL_REGEX = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
+const attachedSessions = /* @__PURE__ */ new Set();
+function attachSessionNetworkInterceptor(ses, profileId, onIdentityFound) {
+  const partitionKey = ses._partitionKey || profileId;
+  if (attachedSessions.has(partitionKey)) return;
+  attachedSessions.add(partitionKey);
+  const filter = {
+    urls: [
+      "*://accounts.google.com/*",
+      "*://myaccount.google.com/*",
+      "*://login.microsoftonline.com/*",
+      "*://login.live.com/*",
+      "*://chatgpt.com/api/auth/*",
+      "*://www.figma.com/api/user/*"
+    ]
+  };
+  try {
+    ses.webRequest.onBeforeRequest(filter, (details, callback) => {
+      try {
+        const urlStr = details.url;
+        const parsed = new URL(urlStr);
+        const googleLoginHint = parsed.searchParams.get("login_hint") || parsed.searchParams.get("Email") || parsed.searchParams.get("identifier");
+        if (googleLoginHint && EMAIL_REGEX.test(googleLoginHint) && !googleLoginHint.endsWith("@google.com")) {
+          onIdentityFound(profileId, {
+            providerId: "google",
+            email: googleLoginHint,
+            displayName: googleLoginHint,
+            lastDetectedAt: Date.now()
+          });
+        }
+        if (details.method === "POST" && details.uploadData && details.uploadData.length > 0) {
+          for (const chunk of details.uploadData) {
+            if (chunk.bytes) {
+              const bodyText = chunk.bytes.toString("utf8");
+              if (bodyText.includes("@")) {
+                const match = bodyText.match(EMAIL_REGEX);
+                if (match && !match[1].endsWith("@google.com") && !match[1].endsWith("@example.com")) {
+                  onIdentityFound(profileId, {
+                    providerId: "google",
+                    email: match[1],
+                    displayName: match[1],
+                    lastDetectedAt: Date.now()
+                  });
+                  break;
+                }
+              }
+            }
+          }
+        }
+        if (parsed.hostname.includes("microsoft") || parsed.hostname.includes("live.com")) {
+          const msLoginHint = parsed.searchParams.get("login_hint") || parsed.searchParams.get("username") || parsed.searchParams.get("upn");
+          if (msLoginHint && EMAIL_REGEX.test(msLoginHint)) {
+            onIdentityFound(profileId, {
+              providerId: "microsoft",
+              email: msLoginHint,
+              displayName: msLoginHint,
+              lastDetectedAt: Date.now()
+            });
+          }
+        }
+      } catch {
+      }
+      callback({});
+    });
+  } catch (err) {
+    console.warn(`[NetworkInterceptor] Failed to attach for ${profileId}:`, err);
   }
 }
-const audioArbiter = new AudioArbiterService();
-const panes = /* @__PURE__ */ new Map();
-function forwardGuestEvents(win, paneId, view, partition) {
+function getPartitionForProfile(profileId) {
+  if (!profileId || profileId === "main") return "persist:main";
+  try {
+    const p = getProfileById(profileId);
+    if (p?.is_ephemeral) return profileId;
+  } catch {
+  }
+  return `persist:${profileId}`;
+}
+function getSessionForProfile(profileId) {
+  const partition = getPartitionForProfile(profileId);
+  return electron.session.fromPartition(partition);
+}
+function getProfileIdForSession(ses) {
+  const profiles = getProfiles() || [];
+  for (const p of profiles) {
+    if (getSessionForProfile(p.id) === ses) return p.id;
+  }
+  return "main";
+}
+async function clearProviderSessionStorage(ses, domains) {
+  for (const d of domains) {
+    try {
+      await ses.clearStorageData({
+        origin: `https://${d}`,
+        storages: ["cookies", "localstorage", "serviceworkers", "cachestorage"]
+      });
+    } catch {
+    }
+    try {
+      const cookies = await ses.cookies.get({ domain: d });
+      for (const c of cookies) {
+        const scheme = c.secure ? "https" : "http";
+        const domain = c.domain?.startsWith(".") ? c.domain.slice(1) : c.domain;
+        await ses.cookies.remove(`${scheme}://${domain}${c.path || "/"}`, c.name);
+      }
+    } catch {
+    }
+  }
+}
+function repairCorruptedProfileIdentities() {
+  const profiles = getProfiles() || [];
+  for (const p of profiles) {
+    if (p.identities_json && p.identities_json.includes('"Google Account"')) {
+      try {
+        const parsed = JSON.parse(p.identities_json);
+        let touched = false;
+        for (const k of Object.keys(parsed)) {
+          if (parsed[k]?.email === "Google Account") {
+            delete parsed[k].email;
+            touched = true;
+          }
+        }
+        if (touched) updateProfileIdentities(p.id, JSON.stringify(parsed));
+      } catch {
+      }
+    }
+  }
+}
+function broadcastProfilesUpdated() {
+  const updated = getProfiles();
+  if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+    global.appOverlayView.webContents.send(IPC_CHANNELS.EVENTS.PROFILES_UPDATED, updated);
+  }
+  if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+    global.mainWindow.webContents.send(IPC_CHANNELS.EVENTS.PROFILES_UPDATED, updated);
+  }
+}
+function parseIdentitiesJson(json) {
+  if (!json) return {};
+  try {
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
+}
+class SessionIdentityService {
+  observedSessions = /* @__PURE__ */ new Set();
+  debounceTimers = /* @__PURE__ */ new Map();
+  lastScanTime = /* @__PURE__ */ new Map();
+  cachedResults = /* @__PURE__ */ new Map();
+  getPartitionForProfile = getPartitionForProfile;
+  getSessionForProfile = getSessionForProfile;
+  getProfileIdForSession = getProfileIdForSession;
+  broadcastProfilesUpdated = broadcastProfilesUpdated;
+  attachCookieObserver(profileId) {
+    const partition = this.getPartitionForProfile(profileId);
+    if (this.observedSessions.has(partition)) return;
+    this.observedSessions.add(partition);
+    try {
+      const ses = this.getSessionForProfile(profileId);
+      attachSessionNetworkInterceptor(ses, profileId, (pId, id) => {
+        this.registerDiscoveredIdentity(pId, id);
+      });
+      ses.cookies.on("changed", (_event, cookie) => {
+        const domain = (cookie?.domain || "").toLowerCase();
+        const matchesAny = ALL_RESOLVERS.some(
+          (r) => r.domains.some((d) => domain.includes(d))
+        );
+        if (!matchesAny) return;
+        this.lastScanTime.delete(profileId);
+        const timerKey = `${profileId}:${domain}`;
+        if (this.debounceTimers.has(timerKey)) {
+          clearTimeout(this.debounceTimers.get(timerKey));
+        }
+        const timer = setTimeout(() => {
+          this.debounceTimers.delete(timerKey);
+          this.scanProfile(profileId, true).catch(() => {
+          });
+        }, 1e3);
+        this.debounceTimers.set(timerKey, timer);
+      });
+    } catch (e) {
+      console.warn(`[IdentityService] Failed to attach observer for ${profileId}:`, e);
+    }
+  }
+  registerDiscoveredIdentity(profileId, partial) {
+    if (!profileId || !partial.providerId) return;
+    const current = getProfileById(profileId);
+    const existingMap = parseIdentitiesJson(current?.identities_json);
+    const providerId = partial.providerId;
+    const incoming = {
+      id: providerId,
+      providerId,
+      email: partial.email,
+      handle: partial.handle,
+      displayName: partial.displayName,
+      avatarUrl: partial.avatarUrl,
+      lastDetectedAt: Date.now()
+    };
+    existingMap[providerId] = mergeSingleIdentity(existingMap[providerId], incoming);
+    const serialized = JSON.stringify(existingMap);
+    if (!current || current.identities_json !== serialized) {
+      updateProfileIdentities(profileId, serialized);
+      this.cachedResults.set(profileId, existingMap);
+      this.broadcastProfilesUpdated();
+    }
+  }
+  async scanProfile(profileId, force = false) {
+    const now = Date.now();
+    const last = this.lastScanTime.get(profileId) || 0;
+    if (!force && now - last < 5e3 && this.cachedResults.has(profileId)) {
+      return this.cachedResults.get(profileId);
+    }
+    const ses = this.getSessionForProfile(profileId);
+    const cookies = await ses.cookies.get({});
+    const scannedIdentities = {};
+    await Promise.all(
+      ALL_RESOLVERS.map(async (resolver) => {
+        try {
+          const identity = await resolver.resolveIdentity(ses, cookies);
+          if (identity) scannedIdentities[resolver.providerId] = identity;
+        } catch (err) {
+          console.warn(`[IdentityService] Resolver error for ${resolver.providerId}:`, err);
+        }
+      })
+    );
+    const current = getProfileById(profileId);
+    const existingMap = parseIdentitiesJson(current?.identities_json);
+    const merged = mergeIdentitiesMap(existingMap, scannedIdentities);
+    const serialized = JSON.stringify(merged);
+    this.lastScanTime.set(profileId, now);
+    this.cachedResults.set(profileId, merged);
+    if (current?.is_ephemeral) {
+      this.broadcastProfilesUpdated();
+    } else if (!current || current.identities_json !== serialized) {
+      updateProfileIdentities(profileId, serialized);
+      this.broadcastProfilesUpdated();
+    }
+    return merged;
+  }
+  async scanAllProfiles() {
+    try {
+      const profiles = getProfiles() || [];
+      for (const p of profiles) {
+        this.attachCookieObserver(p.id);
+        await this.scanProfile(p.id);
+      }
+    } catch (err) {
+      console.error("[IdentityService] Failed to scan all profiles:", err);
+    }
+  }
+  async disconnectProvider(profileId, providerId) {
+    try {
+      this.lastScanTime.delete(profileId);
+      this.cachedResults.delete(profileId);
+      const ses = this.getSessionForProfile(profileId);
+      const resolver = ALL_RESOLVERS.find((r) => r.providerId === providerId);
+      if (resolver) await clearProviderSessionStorage(ses, resolver.domains);
+      const p = getProfileById(profileId);
+      const identities = parseIdentitiesJson(p?.identities_json);
+      delete identities[providerId];
+      updateProfileIdentities(profileId, JSON.stringify(identities));
+      this.broadcastProfilesUpdated();
+      return { success: true };
+    } catch (err) {
+      console.error(`[IdentityService] Failed to disconnect ${providerId}:`, err);
+      return { success: false, error: err.message };
+    }
+  }
+  init() {
+    try {
+      electron.ipcMain.on("pane.identity-harvested", (event, identity) => {
+        if (!identity || !identity.providerId) return;
+        const profileId = this.getProfileIdForSession(event.sender.session);
+        this.registerDiscoveredIdentity(profileId, identity);
+      });
+      repairCorruptedProfileIdentities();
+      const profiles = getProfiles() || [];
+      for (const p of profiles) {
+        this.attachCookieObserver(p.id);
+      }
+    } catch (e) {
+      console.warn("[IdentityService] Failed to initialize hooks:", e);
+    }
+  }
+}
+const sessionIdentityService = new SessionIdentityService();
+const AUTH_SURFACE_URL = "https://accounts.google.com";
+async function purgeGoogleAuthCookies(profileId) {
+  try {
+    const partition = profileId === "main" ? "persist:main" : `persist:${profileId}`;
+    const ses = electron.session.fromPartition(partition);
+    const stale = await ses.cookies.get({ url: AUTH_SURFACE_URL });
+    await Promise.all(
+      stale.map(
+        (c) => typeof c.domain === "string" ? ses.cookies.remove(
+          `https://${c.domain.replace(/^\./, "")}`,
+          c.name
+        ) : Promise.resolve()
+      )
+    );
+  } catch {
+  }
+}
+function extractUnreadBadgeFromTitle(title2) {
+  if (!title2 || typeof title2 !== "string") {
+    return { count: 0, hasUnread: false, rawTitle: "" };
+  }
+  const clean = title2.trim();
+  const parenMatch = clean.match(/[\(\[]([0-9]+|\+?[0-9]+\+?)[\)\]]/);
+  if (parenMatch && parenMatch[1]) {
+    const num = parseInt(parenMatch[1].replace(/[^0-9]/g, ""), 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  if (clean.startsWith("*") || clean.startsWith("•") || clean.startsWith("●")) {
+    return {
+      count: 1,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  const wordMatch = clean.match(/([0-9]+)\s+(unread|new|notifications?)/i);
+  if (wordMatch && wordMatch[1]) {
+    const num = parseInt(wordMatch[1], 10);
+    return {
+      count: isNaN(num) ? 1 : num,
+      hasUnread: true,
+      rawTitle: clean
+    };
+  }
+  return { count: 0, hasUnread: false, rawTitle: clean };
+}
+function handleBeforeInputEvent(webContents, event, input) {
+  if (input.type !== "keyDown" && input.type !== "keyUp") return;
+  const ov = global.appOverlayView?.webContents || global.mainWindow?.webContents;
+  if (!ov || ov.isDestroyed()) return;
+  if (global.appOverlayView && webContents.id === global.appOverlayView.webContents.id) {
+    return;
+  }
+  if (global.mainWindow && webContents.id === global.mainWindow.webContents.id) {
+    return;
+  }
+  const isMod = Boolean(input.control || input.meta);
+  const keyLower = input.key ? input.key.toLowerCase() : "";
+  const isArrow = input.key === "ArrowLeft" || input.key === "ArrowRight" || input.key === "ArrowUp" || input.key === "ArrowDown";
+  const isReload = isMod && keyLower === "r" || input.key === "F5";
+  const isNum = keyLower >= "0" && keyLower <= "9";
+  const isZoom = isMod && (input.key === "=" || input.key === "+" || input.key === "-" || input.key === "0");
+  const isTabJump = isMod && input.key === "Tab";
+  const isAppShortcut = input.alt && isArrow || isMod && isArrow || isMod && (keyLower === "w" || keyLower === "t" || keyLower === "k" || keyLower === "l" || keyLower === "d" || keyLower === "f" || keyLower === "p" || keyLower === "n" || keyLower === "m" || keyLower === "e" || keyLower === "[" || keyLower === "]" || keyLower === "\\" || keyLower === "/") || input.alt && (keyLower === "d" || keyLower === "f" || keyLower === "p" || input.code === "Space") || isMod && isNum || input.alt && isNum || isZoom || isTabJump || input.key === "F11" || input.key === "F12" || isReload;
+  if (isAppShortcut) {
+    event.preventDefault();
+  }
+  if (input.type === "keyDown" && isReload && global.mainWindow && webContents.id !== global.mainWindow.webContents.id) {
+    if (input.shift) {
+      webContents.reloadIgnoringCache();
+    } else {
+      webContents.reload();
+    }
+    if (!global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send("pane.reloaded-wc", webContents.id);
+    }
+    return;
+  }
+  const sharedId = Date.now().toString() + Math.random().toString(36).substring(2, 7);
+  const payload = {
+    webContentsId: webContents.id,
+    type: input.type === "keyUp" ? "keyup" : "keydown",
+    key: input.key,
+    code: input.code,
+    control: input.control,
+    meta: input.meta,
+    shift: input.shift,
+    alt: input.alt,
+    isAutoRepeat: input.isAutoRepeat,
+    isInputFocused: false,
+    eventId: sharedId
+  };
+  if (input.type === "keyDown" && isMod && (keyLower === "f" || keyLower === "k" || keyLower === "l")) {
+    ov.focus();
+  }
+  ov.send("forwarded-key", payload);
+}
+const DEFAULT_CHROME_VERSION = "144.0.7550.80";
+const DEFAULT_DESKTOP_UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
+const FIREFOX_AUTH_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
+function cleanUserAgent(ua) {
+  if (!ua) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const raw = Array.isArray(ua) ? ua[0] : ua;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
+}
+function isGoogleAuthUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host === "accounts.youtube.com" || host.endsWith(".accounts.youtube.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.includes("accounts.google.com") || lower.includes("accounts.youtube.com") || lower.includes("google.com/gsi/");
+  }
+}
+function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
+  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
+  const major = cleanVersion.split(".")[0] || "144";
+  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
+  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
+  if (!headers || typeof headers !== "object") return {};
+  const result = { ...headers };
+  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
+    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+    result[uaKey2] = FIREFOX_AUTH_UA;
+    for (const key of Object.keys(result)) {
+      if (key.toLowerCase().startsWith("sec-ch-ua")) {
+        delete result[key];
+      }
+    }
+    return result;
+  }
+  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+  result[uaKey] = cleanUserAgent(result[uaKey]);
+  const clientHintKeys = /* @__PURE__ */ new Set([
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-ch-ua-full-version-list"
+  ]);
+  for (const key of Object.keys(result)) {
+    const lower = key.toLowerCase();
+    if (clientHintKeys.has(lower) && lower !== key) {
+      delete result[key];
+    }
+  }
+  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
+  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
+  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
+  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
+  return result;
+}
+const OAUTH_DOMAINS = [
+  "accounts.google.com",
+  "google.com/gsi",
+  "firebaseapp.com",
+  "github.com/login/oauth",
+  "login.microsoftonline.com",
+  "appleid.apple.com",
+  "discord.com/oauth2",
+  "twitter.com/i/oauth2",
+  "x.com/i/oauth2",
+  "auth0.com",
+  "okta.com",
+  "id.atlassian.com"
+];
+const SSO_KEYWORDS = ["login", "signin", "auth", "sso", "oauth"];
+const SYSTEM_PROTOCOLS = ["mailto:", "tel:", "slack:", "zoommtg:", "magnet:", "viber:", "tg:"];
+function isOAuthOrAuthEndpoint(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return OAUTH_DOMAINS.some((domain) => lower.includes(domain)) || SSO_KEYWORDS.some((kw) => lower.includes(kw));
+}
+function isGoogleOAuthEndpoint(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return lower.includes("accounts.google.com") || lower.includes("google.com/gsi") || lower.includes("firebaseapp.com");
+}
+function evaluateWindowOpenRequest(url, disposition, features) {
+  const urlLower = (url || "").toLowerCase();
+  const isBlank = urlLower === "about:blank" || urlLower === "about:blank#blocked";
+  const isPopup = Boolean(features) && (features.includes("width=") || features.includes("height="));
+  const isGoogle = isGoogleOAuthEndpoint(urlLower);
+  const isSSO = isOAuthOrAuthEndpoint(urlLower);
+  if (SYSTEM_PROTOCOLS.some((proto) => urlLower.startsWith(proto))) {
+    return {
+      type: "OPEN_SYSTEM_BROWSER",
+      url
+    };
+  }
+  if (disposition === "new-window" || isPopup || isBlank || isGoogle || isSSO) {
+    return {
+      type: "ALLOW_OAUTH_POPUP",
+      width: 600,
+      height: 720,
+      autoHideMenuBar: true,
+      sandbox: true,
+      contextIsolation: false,
+      isGoogle
+    };
+  }
+  return {
+    type: "OPEN_IN_APP",
+    url
+  };
+}
+function generateCodeVerifier(length = 64) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+  const bytes = crypto.randomBytes(length);
+  let result = "";
+  for (let i = 0; i < length; i++) {
+    result += chars[bytes[i] % chars.length];
+  }
+  return result;
+}
+function generateCodeChallenge(verifier) {
+  return crypto.createHash("sha256").update(verifier).digest("base64url");
+}
+function generatePkcePair() {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+  return {
+    codeVerifier,
+    codeChallenge,
+    codeChallengeMethod: "S256"
+  };
+}
+function createSignedState(payload, secret) {
+  const json = JSON.stringify({ ...payload, ts: Date.now() });
+  const data = Buffer.from(json).toString("base64url");
+  const signature = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+  return `${data}.${signature}`;
+}
+function verifySignedState(state, secret) {
+  if (!state || !state.includes(".")) return null;
+  const [data, signature] = state.split(".");
+  const expectedSig = crypto.createHmac("sha256", secret).update(data).digest("base64url");
+  if (signature !== expectedSig) return null;
+  try {
+    const json = Buffer.from(data, "base64url").toString("utf8");
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+const ALGORITHM = "aes-256-gcm";
+const KEY_LEN = 32;
+const SALT_LEN = 16;
+const IV_LEN = 12;
+const ITERATIONS = 1e5;
+function encryptSessionPayload(payload, passphrase) {
+  if (!passphrase || passphrase.length < 6) {
+    throw new Error("Passphrase must be at least 6 characters long");
+  }
+  const salt = crypto.randomBytes(SALT_LEN);
+  const iv = crypto.randomBytes(IV_LEN);
+  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+  const jsonStr = JSON.stringify(payload);
+  const encrypted = Buffer.concat([cipher.update(jsonStr, "utf8"), cipher.final()]);
+  const tag2 = cipher.getAuthTag();
+  const bundle = {
+    version: 1,
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: tag2.toString("base64"),
+    ciphertext: encrypted.toString("base64")
+  };
+  return JSON.stringify(bundle);
+}
+function decryptSessionPayload(bundleJson, passphrase) {
+  let bundle;
+  try {
+    bundle = JSON.parse(bundleJson);
+  } catch {
+    throw new Error("Invalid session bundle format");
+  }
+  if (bundle.version !== 1 || !bundle.salt || !bundle.iv || !bundle.tag || !bundle.ciphertext) {
+    throw new Error("Corrupted or unsupported session bundle");
+  }
+  const salt = Buffer.from(bundle.salt, "base64");
+  const iv = Buffer.from(bundle.iv, "base64");
+  const tag2 = Buffer.from(bundle.tag, "base64");
+  const ciphertext = Buffer.from(bundle.ciphertext, "base64");
+  const key = crypto.pbkdf2Sync(passphrase, salt, ITERATIONS, KEY_LEN, "sha256");
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+  decipher.setAuthTag(tag2);
+  try {
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return JSON.parse(decrypted.toString("utf8"));
+  } catch {
+    throw new Error("Decryption failed: Incorrect passphrase or corrupted data");
+  }
+}
+const activeRelays = /* @__PURE__ */ new Map();
+const RELAY_SECRET = "apposition-relay-secret-v1";
+const TIMEOUT_MS = 3e5;
+function startAuthRelay(targetAuthUrl, profileId = "main", paneId) {
+  return new Promise((resolve) => {
+    try {
+      const pkce = generatePkcePair();
+      const server2 = http.createServer(async (req, res) => {
+        try {
+          const reqUrl = new URL(req.url || "/", `http://127.0.0.1:${server2.address()}`);
+          if (reqUrl.pathname === "/callback" || reqUrl.pathname === "/oauth/callback") {
+            const state = reqUrl.searchParams.get("state");
+            const code = reqUrl.searchParams.get("code");
+            const token = reqUrl.searchParams.get("token") || reqUrl.searchParams.get("access_token");
+            if (!state || !verifySignedState(state, RELAY_SECRET)) {
+              res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
+              res.end("<h3>Authentication Failed: Invalid or expired state token.</h3>");
+              return;
+            }
+            const relay = activeRelays.get(state);
+            if (relay) {
+              const partition = relay.profileId === "main" ? "persist:main" : `persist:${relay.profileId}`;
+              const targetSession = electron.session.fromPartition(partition);
+              if (token) {
+                try {
+                  const targetOrigin = new URL(targetAuthUrl).origin;
+                  await targetSession.cookies.set({
+                    url: targetOrigin,
+                    name: "auth_token",
+                    value: token,
+                    secure: true,
+                    httpOnly: true
+                  });
+                } catch {
+                }
+              }
+              if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+                global.mainWindow.webContents.send("app.auth-completed", {
+                  profileId: relay.profileId,
+                  paneId: relay.paneId,
+                  code,
+                  token,
+                  success: true
+                });
+              }
+              res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+              res.end(`
+                <!DOCTYPE html>
+                <html>
+                  <head>
+                    <title>Authentication Successful</title>
+                    <style>
+                      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; background: #FAF9F6; color: #121212; }
+                      .card { background: white; padding: 32px 40px; border-radius: 12px; border: 1px solid #E5E5E0; box-shadow: 0 4px 12px rgba(0,0,0,0.05); text-align: center; max-width: 380px; }
+                      h2 { font-size: 18px; margin: 0 0 8px 0; font-weight: 600; }
+                      p { font-size: 13px; color: #78716C; margin: 0; line-height: 1.5; }
+                    </style>
+                  </head>
+                  <body>
+                    <div class="card">
+                      <h2>Authentication Completed</h2>
+                      <p>You can close this tab and return to Apposition. Your workspace is now authenticated.</p>
+                    </div>
+                    <script>setTimeout(() => window.close(), 1500);<\/script>
+                  </body>
+                </html>
+              `);
+              cleanupRelay(state);
+            }
+          } else {
+            res.writeHead(404);
+            res.end();
+          }
+        } catch {
+          res.writeHead(500);
+          res.end();
+        }
+      });
+      server2.listen(0, "127.0.0.1", () => {
+        const address = server2.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const state = createSignedState({ profileId, paneId, port }, RELAY_SECRET);
+        const relaySession = {
+          port,
+          state,
+          codeVerifier: pkce.codeVerifier,
+          profileId,
+          paneId,
+          server: server2,
+          createdAt: Date.now()
+        };
+        activeRelays.set(state, relaySession);
+        setTimeout(() => cleanupRelay(state), TIMEOUT_MS);
+        const parsedUrl = new URL(targetAuthUrl);
+        parsedUrl.searchParams.set("redirect_uri", `http://127.0.0.1:${port}/callback`);
+        parsedUrl.searchParams.set("state", state);
+        parsedUrl.searchParams.set("code_challenge", pkce.codeChallenge);
+        parsedUrl.searchParams.set("code_challenge_method", pkce.codeChallengeMethod);
+        const finalAuthUrl = parsedUrl.toString();
+        electron.shell.openExternal(finalAuthUrl);
+        resolve({ success: true, port, authUrl: finalAuthUrl });
+      });
+      server2.on("error", (err) => {
+        resolve({ success: false, port: 0, authUrl: "", error: err.message });
+      });
+    } catch (err) {
+      resolve({ success: false, port: 0, authUrl: "", error: err.message });
+    }
+  });
+}
+function cleanupRelay(state) {
+  const relay = activeRelays.get(state);
+  if (relay) {
+    activeRelays.delete(state);
+    try {
+      relay.server.close();
+    } catch {
+    }
+  }
+}
+let activeAuthWindow = null;
+function isProviderAuthComplete(providerId, url) {
+  const lower = (url || "").toLowerCase();
+  if (lower.startsWith("apposition://") || lower.includes("#oauth-success")) return true;
+  switch (providerId) {
+    case "google":
+      return !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2") && !lower.includes("accounts.google.com/v3/signin");
+    case "github":
+      return lower.includes("github.com") && !lower.includes("/login") && !lower.includes("/session");
+    case "microsoft":
+      return !lower.includes("login.microsoftonline.com") && !lower.includes("login.live.com") && (lower.includes("microsoft.com") || lower.includes("office.com"));
+    case "x":
+      return (lower.includes("twitter.com") || lower.includes("x.com")) && !lower.includes("/login") && !lower.includes("/i/flow/login");
+    case "discord":
+      return lower.includes("discord.com") && !lower.includes("/login");
+    case "gitlab":
+      return lower.includes("gitlab.com") && !lower.includes("/users/sign_in");
+    case "slack":
+      return lower.includes("slack.com") && !lower.includes("/signin");
+    case "apple":
+      return lower.includes("apple.com") && !lower.includes("appleid.apple.com/auth");
+    default:
+      return false;
+  }
+}
+function openConnectAccountModal(options) {
+  try {
+    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+      activeAuthWindow.focus();
+      return { success: true };
+    }
+    const { providerId, loginUrl, profileId = "main", returnUrl } = options;
+    const partition = sessionIdentityService.getPartitionForProfile(profileId);
+    const isGoogle = providerId === "google";
+    const authWin = new electron.BrowserWindow({
+      width: 540,
+      height: 700,
+      center: true,
+      title: `${providerId.toUpperCase()} Sign-In`,
+      titleBarStyle: "hidden",
+      titleBarOverlay: {
+        color: "#fafaf9",
+        symbolColor: "#121212",
+        height: 36
+      },
+      backgroundColor: "#FFFFFF",
+      show: false,
+      icon: path.join(
+        __dirname,
+        process.platform === "linux" ? "../../../assets/icon.png" : "../../../assets/icon.ico"
+      ),
+      webPreferences: {
+        partition,
+        preload: isGoogle ? path.join(__dirname, "../../preload/authGuard.js") : void 0,
+        sandbox: true,
+        contextIsolation: !isGoogle
+      }
+    });
+    activeAuthWindow = authWin;
+    const authWebContentsId = authWin.webContents.id;
+    registerOAuthPopup(authWebContentsId);
+    if (isGoogle) {
+      try {
+        authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      } catch {
+      }
+    }
+    authWin.once("ready-to-show", () => {
+      if (!authWin.isDestroyed()) authWin.show();
+    });
+    const notifyAndClose = async () => {
+      try {
+        if (!authWin.isDestroyed()) {
+          const domEmail = await authWin.webContents.executeJavaScript(
+            `(() => {
+                const el = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], [data-email], #profileIdentifier, div[data-profile-identifier]');
+                if (el) {
+                  const text = el.getAttribute('data-email') || el.getAttribute('aria-label') || el.innerText || el.getAttribute('title') || '';
+                  const m = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+                  if (m && !m[1].endsWith('@google.com')) return m[1];
+                }
+                const input = document.querySelector('input[type="email"]');
+                if (input && input.value && input.value.includes('@')) return input.value.trim();
+                return null;
+              })()`,
+            true
+          ).catch(() => null);
+          if (domEmail) {
+            sessionIdentityService.registerDiscoveredIdentity(profileId, {
+              providerId,
+              email: domEmail,
+              displayName: domEmail,
+              lastDetectedAt: Date.now()
+            });
+          }
+        }
+      } catch {
+      }
+      const identities = await sessionIdentityService.scanProfile(profileId, true);
+      const identity = identities[providerId];
+      if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+        global.appOverlayView.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      setTimeout(() => {
+        if (!authWin.isDestroyed()) authWin.close();
+      }, 600);
+    };
+    const handleNavigation = (_e, navUrl) => {
+      if (isProviderAuthComplete(providerId, navUrl)) {
+        notifyAndClose();
+      }
+    };
+    authWin.webContents.on("did-navigate", handleNavigation);
+    authWin.webContents.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
+      if (isMainFrame) {
+        handleNavigation(_e, navUrl);
+      }
+    });
+    authWin.once("closed", () => {
+      unregisterOAuthPopup(authWebContentsId);
+      if (activeAuthWindow === authWin) {
+        activeAuthWindow = null;
+      }
+      sessionIdentityService.scanProfile(profileId).catch(() => {
+      });
+    });
+    authWin.loadURL(loginUrl, isGoogle ? { userAgent: FIREFOX_AUTH_UA } : void 0);
+    return { success: true };
+  } catch (err) {
+    console.error(`Failed to open auth modal for ${options.providerId}:`, err);
+    return { success: false, error: err.message };
+  }
+}
+function handleWebContentsWindowOpen(webContents) {
+  webContents.setWindowOpenHandler((details) => {
+    const decision = evaluateWindowOpenRequest(
+      details.url,
+      details.disposition,
+      details.features
+    );
+    if (decision.type === "SYSTEM_AUTH_RELAY") {
+      startAuthRelay(details.url).catch(() => {
+        electron.shell.openExternal(details.url);
+      });
+      return { action: "deny" };
+    }
+    if (decision.type === "ALLOW_OAUTH_POPUP") {
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: {
+          width: decision.width,
+          height: decision.height,
+          center: true,
+          titleBarStyle: "hidden",
+          titleBarOverlay: {
+            color: "#fafaf9",
+            symbolColor: "#121212",
+            height: 36
+          },
+          backgroundColor: "#FFFFFF",
+          show: true,
+          icon: path.join(
+            __dirname,
+            process.platform === "linux" ? "../../assets/icon.png" : "../../assets/icon.ico"
+          ),
+          userAgent: isGoogleAuthUrl(details.url) ? FIREFOX_AUTH_UA : void 0,
+          webPreferences: {
+            // EXPERIMENT (uncommitted): document-start passkey suppression,
+            // same main-world preload rationale as googleAuthModal.ts.
+            preload: path.join(__dirname, "../preload/authGuard.js"),
+            sandbox: true,
+            contextIsolation: false
+          }
+        }
+      };
+    }
+    if (decision.type === "NAVIGATE_CURRENT_PANE") {
+      webContents.loadURL(decision.url);
+      return { action: "deny" };
+    }
+    if (decision.type === "OPEN_IN_APP") {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("open-in-new-pane", decision.url);
+      }
+      return { action: "deny" };
+    }
+    if (decision.type === "OPEN_SYSTEM_BROWSER") {
+      electron.shell.openExternal(decision.url);
+      return { action: "deny" };
+    }
+    return { action: "deny" };
+  });
+}
+function forwardGuestEvents(_win, paneId, view, partition) {
   const ov = () => global.appOverlayView?.webContents;
   const wc = view.webContents;
   const nav = (_e, navUrl) => {
@@ -7107,13 +5508,22 @@ function forwardGuestEvents(win, paneId, view, partition) {
     "render-process-gone",
     (_e, d) => ov()?.send(IPC_CHANNELS.EVENTS.VIEW_CRASHED, { paneId, reason: d?.reason ?? "crashed", exitCode: d?.exitCode ?? 0 })
   );
+  wc.on("audio-state-changed", (_e, audible) => {
+    const isAudible = typeof audible === "boolean" ? audible : Boolean(audible?.audible);
+    if (isAudible) {
+      audioMatrix.handleAudioStarted(paneId, wc);
+    } else {
+      audioMatrix.handleAudioStopped(paneId);
+    }
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: isAudible, isAudible });
+  });
   wc.on("media-started-playing", () => {
-    audioArbiter.handleMediaStarted(paneId, wc, panes);
-    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: true });
+    audioMatrix.handleAudioStarted(paneId, wc);
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: true, isAudible: true });
   });
   wc.on("media-paused", () => {
-    audioArbiter.handleMediaStopped(paneId, panes);
-    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: false });
+    audioMatrix.handleAudioStopped(paneId);
+    ov()?.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId, isPlaying: false, isAudible: false });
   });
   wc.on("did-first-visually-non-empty-paint", () => ov()?.send(IPC_CHANNELS.EVENTS.VIEW_LOADED, { paneId }));
   wc.on(
@@ -7141,8 +5551,362 @@ function forwardGuestEvents(win, paneId, view, partition) {
   wc.on("before-input-event", (event, input) => handleBeforeInputEvent(wc, event, input));
   handleWebContentsWindowOpen(wc);
 }
+class ScreenCaptureService {
+  pendingRequests = /* @__PURE__ */ new Map();
+  hookedSessions = /* @__PURE__ */ new Set();
+  hookSession(sess) {
+    if (this.hookedSessions.has(sess)) return;
+    this.hookedSessions.add(sess);
+    sess.setDisplayMediaRequestHandler(async (_request, callback) => {
+      try {
+        const sources = await electron.desktopCapturer.getSources({
+          types: ["screen", "window"],
+          thumbnailSize: { width: 360, height: 200 },
+          fetchWindowIcons: true
+        });
+        const requestId = `scr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const serialized = sources.map((s) => ({
+          id: s.id,
+          name: s.name,
+          thumbnail: s.thumbnail.toDataURL(),
+          isScreen: s.id.startsWith("screen:")
+        }));
+        const timer = setTimeout(() => {
+          this.cancelRequest(requestId);
+        }, 6e4);
+        this.pendingRequests.set(requestId, { requestId, callback, timer });
+        global.appOverlayView?.webContents.send("screen-share:request", {
+          requestId,
+          sources: serialized
+        });
+      } catch (err) {
+        console.error("[ScreenCaptureService] Failed to get sources:", err);
+        callback({});
+      }
+    });
+  }
+  async getAvailableSources() {
+    const sources = await electron.desktopCapturer.getSources({
+      types: ["screen", "window"],
+      thumbnailSize: { width: 360, height: 200 },
+      fetchWindowIcons: true
+    });
+    return sources.map((s) => ({
+      id: s.id,
+      name: s.name,
+      thumbnail: s.thumbnail.toDataURL(),
+      isScreen: s.id.startsWith("screen:")
+    }));
+  }
+  async selectSource(requestId, sourceId) {
+    const pending = this.pendingRequests.get(requestId);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(requestId);
+    if (!sourceId) {
+      pending.callback({});
+      return true;
+    }
+    try {
+      const sources = await electron.desktopCapturer.getSources({
+        types: ["screen", "window"]
+      });
+      const match = sources.find((s) => s.id === sourceId);
+      if (match) {
+        pending.callback({ video: match, audio: "loopback" });
+        return true;
+      }
+    } catch {
+    }
+    pending.callback({});
+    return false;
+  }
+  cancelRequest(requestId) {
+    const pending = this.pendingRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      this.pendingRequests.delete(requestId);
+      try {
+        pending.callback({});
+      } catch {
+      }
+    }
+  }
+  init() {
+    this.hookSession(electron.session.defaultSession);
+  }
+}
+const screenCaptureService = new ScreenCaptureService();
+const captureViewSafely = async (view) => {
+  if (!view || view.webContents.isDestroyed()) return "";
+  try {
+    const bounds = view.getBounds();
+    const img = await view.webContents.capturePage({
+      x: 0,
+      y: 0,
+      width: bounds.width,
+      height: bounds.height
+    });
+    if (!img.isEmpty()) {
+      let finalImg = img;
+      const size = img.getSize();
+      if (size.width > 1200) {
+        finalImg = img.resize({ width: 1200 });
+      }
+      return `data:image/jpeg;base64,${finalImg.toJPEG(75).toString("base64")}`;
+    }
+  } catch (err) {
+    console.warn("[capture] capturePage failed:", err);
+  }
+  return "";
+};
+function initCaptureIpc() {
+  electron.ipcMain.on("view.screenshot", async (event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      try {
+        const image = await view.webContents.capturePage();
+        const { clipboard } = require("electron");
+        clipboard.writeImage(image);
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
+            message: "Screenshot copied to clipboard",
+            type: "success"
+          });
+        }
+      } catch (err) {
+        console.error("Failed to capture screenshot", err);
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
+            message: "Failed to copy screenshot",
+            type: "error"
+          });
+        }
+      }
+    }
+  });
+  electron.ipcMain.handle(
+    "view.capture",
+    async (_event, paneId) => {
+      const view = activeViews.get(paneId);
+      if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
+      const dataURL = await captureViewSafely(view);
+      dataURL === "" && console.warn(`[pane ${paneId}] capture returned empty page`);
+      return dataURL;
+    }
+  );
+  electron.ipcMain.handle(
+    "view.captureAllActive",
+    async () => {
+      const captures = {};
+      for (const [paneId, view] of activeViews) {
+        if (view.webContents.isDestroyed()) continue;
+        const bounds = view.getBounds();
+        if (bounds.width > 0 && bounds.height > 0) {
+          const dataURL = await captureViewSafely(view);
+          if (dataURL) captures[paneId] = dataURL;
+        }
+      }
+      return captures;
+    }
+  );
+  electron.ipcMain.handle(
+    "view.hibernateAllActive",
+    async () => {
+      const captures = {};
+      const panesToHibernate = [];
+      for (const [paneId, view] of activeViews) {
+        if (view.webContents.isDestroyed()) continue;
+        if (view.webContents.isCurrentlyAudible()) {
+          continue;
+        }
+        panesToHibernate.push(paneId);
+      }
+      for (const paneId of panesToHibernate) {
+        const view = activeViews.get(paneId);
+        if (view && !view.webContents.isDestroyed()) {
+          const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
+          captures[paneId] = PLACEHOLDER;
+          const descriptor = {
+            url: view.webContents.getURL(),
+            profileId: viewProfile.get(paneId),
+            bounds: view.getBounds(),
+            dataURL: PLACEHOLDER,
+            title: view.webContents.getTitle()
+          };
+          viewProfile.delete(paneId);
+          hibernatedViews.set(paneId, descriptor);
+          if (global.mainWindow) {
+            try {
+              global.mainWindow.contentView.removeChildView(view);
+            } catch {
+            }
+          }
+          view.webContents.close();
+          activeViews.delete(paneId);
+        }
+      }
+      return captures;
+    }
+  );
+  electron.ipcMain.handle(
+    "view.hibernate",
+    async (_event, paneId) => {
+      const view = activeViews.get(paneId);
+      const PLACEHOLDER = "data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22100%25%22%20height%3D%22100%25%22%3E%3Crect%20width%3D%22100%25%22%20height%3D%22100%25%22%20fill%3D%22%23F7F7F5%22%2F%3E%3C%2Fsvg%3E";
+      if (!view) return PLACEHOLDER;
+      const descriptor = {
+        url: view.webContents.getURL(),
+        profileId: viewProfile.get(paneId),
+        bounds: view.getBounds(),
+        dataURL: PLACEHOLDER,
+        title: view.webContents.getTitle()
+      };
+      viewProfile.delete(paneId);
+      hibernatedViews.set(paneId, descriptor);
+      if (global.mainWindow) {
+        try {
+          global.mainWindow.contentView.removeChildView(view);
+        } catch {
+        }
+      }
+      view.webContents.close();
+      activeViews.delete(paneId);
+      return PLACEHOLDER;
+    }
+  );
+}
+const IDLE_HIBERNATE_MS = 15 * 60 * 1e3;
+const COMMUNICATION_DOMAINS = [
+  "meet.google.com",
+  "zoom.us",
+  "teams.microsoft.com",
+  "discord.com",
+  "webex.com",
+  "slack.com",
+  "gather.town",
+  "huddle"
+];
+const PERSISTENT_MEDIA_DOMAINS = [
+  "youtube.com",
+  "youtu.be",
+  "music.youtube.com",
+  "spotify.com",
+  "soundcloud.com",
+  "twitch.tv",
+  "netflix.com",
+  "disneyplus.com",
+  "primevideo.com",
+  "hulu.com",
+  "music.apple.com",
+  "podcasts.apple.com",
+  "vimeo.com",
+  "bilibili.com",
+  "dailymotion.com",
+  "pandora.com",
+  "deezer.com",
+  "tidal.com"
+];
+class HibernationEngine {
+  lastActivity = /* @__PURE__ */ new Map();
+  intervalTimer = null;
+  activePaneId = null;
+  registerActivity(paneId) {
+    this.lastActivity.set(paneId, Date.now());
+  }
+  setActivePane(paneId) {
+    this.activePaneId = paneId;
+    if (paneId) this.registerActivity(paneId);
+  }
+  isPaneImmortal(paneId, view) {
+    if (paneId === this.activePaneId) return true;
+    if (view.webContents.isDestroyed()) return true;
+    const isAudible = view.webContents.isCurrentlyAudible?.() || audioMatrix.isPaneAudible?.(paneId);
+    if (isAudible) return true;
+    const url = (view.webContents.getURL() || "").toLowerCase();
+    if (COMMUNICATION_DOMAINS.some((domain) => url.includes(domain))) return true;
+    if (PERSISTENT_MEDIA_DOMAINS.some((domain) => url.includes(domain))) return true;
+    return false;
+  }
+  async hibernatePane(paneId) {
+    const view = viewRegistry.getView(paneId);
+    if (!view || view.webContents.isDestroyed()) return false;
+    if (this.isPaneImmortal(paneId, view)) return false;
+    try {
+      const bounds = view.getBounds();
+      const snapshot = await captureViewSafely(view);
+      const title2 = view.webContents.getTitle() || "";
+      const url = view.webContents.getURL() || "";
+      const profileId = viewRegistry.getProfile(paneId);
+      const descriptor = {
+        url,
+        profileId,
+        bounds,
+        dataURL: snapshot,
+        title: title2
+      };
+      viewRegistry.setHibernated(paneId, descriptor);
+      view.setVisible(false);
+      view.setBounds({ x: -1e4, y: -1e4, width: 100, height: 100 });
+      global.appOverlayView?.webContents.send("app:pane-hibernated", {
+        paneId,
+        title: title2,
+        thumbnail: snapshot
+      });
+      return true;
+    } catch (err) {
+      console.error(`[HibernationEngine] Failed to hibernate ${paneId}:`, err);
+      return false;
+    }
+  }
+  wakePane(paneId) {
+    const descriptor = viewRegistry.getHibernated(paneId);
+    const view = viewRegistry.getView(paneId);
+    if (!view || view.webContents.isDestroyed()) return false;
+    viewRegistry.deleteHibernated(paneId);
+    this.registerActivity(paneId);
+    if (descriptor?.bounds && descriptor.bounds.width > 0 && descriptor.bounds.height > 0) {
+      view.setBounds(descriptor.bounds);
+    }
+    view.setVisible(true);
+    view.webContents.invalidate();
+    global.appOverlayView?.webContents.send("app:pane-restored", { paneId });
+    return true;
+  }
+  init() {
+    if (this.intervalTimer) return;
+    this.intervalTimer = setInterval(() => {
+      const now = Date.now();
+      for (const [paneId, view] of viewRegistry.getAllActiveViews()) {
+        if (viewRegistry.getHibernated(paneId)) continue;
+        const last = this.lastActivity.get(paneId) ?? now;
+        if (now - last >= IDLE_HIBERNATE_MS) {
+          this.hibernatePane(paneId);
+        }
+      }
+    }, 6e4);
+  }
+  stop() {
+    if (this.intervalTimer) {
+      clearInterval(this.intervalTimer);
+      this.intervalTimer = null;
+    }
+  }
+}
+const hibernationEngine = new HibernationEngine();
+const panes = /* @__PURE__ */ new Map();
 function createPane(win, req) {
-  if (panes.has(req.paneId)) destroyPane(win, req.paneId);
+  const existing = panes.get(req.paneId);
+  if (existing && !existing.webContents.isDestroyed()) {
+    existing.setVisible(true);
+    if (isValidPhysicalRect(req.rect)) {
+      setPaneBounds(win, req.paneId, req.rect);
+    }
+    existing.webContents.invalidate();
+    FocusArbiter.handlePendingGuestFocus(win, req.paneId);
+    return;
+  }
+  if (existing) destroyPane(win, req.paneId);
   const view = new electron.WebContentsView({
     webPreferences: {
       preload: resolvePreload("pane.js"),
@@ -7168,6 +5932,7 @@ function createPane(win, req) {
     (_, perm, cb) => cb(["clipboard-read", "clipboard-sanitized-write", "media", "display-capture", "fullscreen"].includes(perm))
   );
   configureWebAuthnForSession(view.webContents.session);
+  screenCaptureService.hookSession(view.webContents.session);
   try {
     if (!view.webContents.debugger.isAttached()) {
       view.webContents.debugger.attach("1.3");
@@ -7185,10 +5950,12 @@ function createPane(win, req) {
   bindGuestCursor(view.webContents);
   forwardGuestEvents(win, req.paneId, view, req.partition);
   panes.set(req.paneId, view);
+  viewRegistry.registerView(req.paneId, view, req.partition);
+  audioMatrix.registerPane(req.paneId, view.webContents);
   global.appOverlayView?.webContents.send(IPC_CHANNELS.VIEW.REGISTER_WEB_CONTENTS, req.paneId, view.webContents.id);
   const dpr = devicePixelRatioFor(win);
   const hasUrl = Boolean(req.url && req.url.trim().length > 0 && req.url !== "about:blank");
-  const targetRect = hasUrl ? req.rect : { x: -1e4, y: -1e4, width: 0, height: 0 };
+  const targetRect = hasUrl ? req.rect : { x: -1e4, y: -1e4, width: 100, height: 100 };
   const phys = toPhysicalRect(targetRect, dpr);
   placePane(win, req.paneId, view, { ...phys, cssLeft: targetRect.x, cssTop: targetRect.y });
   FocusArbiter.handlePendingGuestFocus(win, req.paneId);
@@ -7197,11 +5964,19 @@ function createPane(win, req) {
 }
 function setPaneBounds(win, paneId, rect) {
   const view = panes.get(paneId);
-  if (!view || !isValidPhysicalRect(rect)) return;
+  if (!view) return;
+  const isHidden = rect.x <= -5e3 || rect.width <= 1 || rect.height <= 1;
+  if (isHidden) {
+    view.setVisible(false);
+    view.setBounds({ x: -1e4, y: -1e4, width: 100, height: 100 });
+    return;
+  }
   if (typeof view.setBorderRadius === "function") {
     view.setBorderRadius(12);
   }
   view.setBounds(rect);
+  view.setVisible(true);
+  view.webContents.invalidate();
   const dpr = devicePixelRatioFor(win);
   const phys = toPhysicalRect(rect, dpr);
   placePane(win, paneId, view, { ...phys, cssLeft: rect.x, cssTop: rect.y });
@@ -7209,7 +5984,8 @@ function setPaneBounds(win, paneId, rect) {
 function destroyPane(win, paneId) {
   const view = panes.get(paneId);
   if (!view) return;
-  audioArbiter.handlePaneDestroyed(paneId);
+  audioMatrix.unregisterPane(paneId);
+  viewRegistry.unregisterView(paneId);
   removePane(win, paneId);
   panes.delete(paneId);
   FocusArbiter.handlePaneDestroyed(win, paneId);
@@ -7238,6 +6014,7 @@ function updatePaneProfile(win, paneId, profileId) {
   sessionIdentityService.attachCookieObserver(profileId);
   sessionIdentityService.scanProfile(profileId).catch(() => {
   });
+  global.appOverlayView?.webContents.send("pane.profile-updated", { paneId, profileId });
 }
 function findPaneIdBySender(senderId) {
   for (const [id, view] of panes.entries()) {
@@ -7297,13 +6074,1527 @@ function initPaneLifecycle(getWindow) {
   });
   electron.ipcMain.on("pane.focus-change", (e, f) => {
     const id = findPaneIdBySender(e.sender.id);
-    if (id) global.appOverlayView?.webContents.send("pane.focus-change", { paneId: id, isFocused: f });
+    if (id) {
+      hibernationEngine.setActivePane(f ? id : null);
+      global.appOverlayView?.webContents.send("pane.focus-change", { paneId: id, isFocused: f });
+    }
   });
   electron.ipcMain.on("pane.clicked", (e) => {
     const id = findPaneIdBySender(e.sender.id);
-    if (id) global.appOverlayView?.webContents.send("pane.clicked", id);
+    if (id) {
+      hibernationEngine.registerActivity(id);
+      global.appOverlayView?.webContents.send("pane.clicked", id);
+    }
   });
+  electron.ipcMain.on("pane.semantic-title", (e, d) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id && d?.title?.trim()) {
+      global.appOverlayView?.webContents.send("app:semantic-title", { paneId: id, title: d.title.trim(), confidence: d.confidence ?? 1 });
+    }
+  });
+  electron.ipcMain.on("pane.dynamic-media-status", (e, p) => {
+    const id = findPaneIdBySender(e.sender.id);
+    if (id) {
+      audioMatrix.handleDynamicStatus(id, p);
+      global.appOverlayView?.webContents.send("app:dynamic-media-status", { paneId: id, ...p });
+      global.appOverlayView?.webContents.send(IPC_CHANNELS.EVENTS.VIEW_MEDIA_STATUS, { paneId: id, isPlaying: Boolean(p.isPlaying), isAudible: Boolean(p.isAudible) });
+    }
+  });
+  audioMatrix.initIpc();
   initPaneSuperpowerIpc(panes, getWindow);
+}
+function configureSessionForProfile(profileId) {
+  try {
+    const profile = getProfileById(profileId);
+    if (!profile) return;
+    const partition = profile.is_ephemeral ? profileId : `persist:${profileId}`;
+    const ses = electron.session.fromPartition(partition);
+    sessionIdentityService.attachCookieObserver(profileId);
+    if (profile.proxy_server) {
+      ses.setProxy({ proxyRules: profile.proxy_server }).catch((e) => {
+        console.error(`Failed to set proxy for session ${profileId}:`, e);
+      });
+    } else {
+      ses.setProxy({}).catch(() => {
+      });
+    }
+    if (profile.user_agent && profile.user_agent.trim()) {
+      ses.setUserAgent(profile.user_agent.trim());
+    }
+    ses.setPermissionRequestHandler((_webContents, permission, callback) => {
+      const allowed = ["notifications", "geolocation", "media", "screen"];
+      callback(allowed.includes(permission));
+    });
+  } catch (e) {
+    console.error("Failed to configure session for profile", profileId, e);
+  }
+}
+function configureAllSessions() {
+  try {
+    const profiles = getProfiles();
+    for (const profile of profiles) {
+      configureSessionForProfile(profile.id);
+    }
+  } catch (e) {
+    console.error("Failed to configure sessions on startup", e);
+  }
+}
+function initDbIpc() {
+  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_PROFILES, () => {
+    configureAllSessions();
+    return getProfiles();
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.DB.CREATE_PROFILE,
+    async (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
+      const isPremium = await checkPremiumStatus();
+      if (!isPremium) {
+        const profiles = getProfiles();
+        if (profiles.length >= 2) {
+          throw new Error("Free tier limits exceeded: Max 2 session profiles.");
+        }
+      }
+      createProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
+      configureSessionForProfile(id);
+      return { id, name, color, is_ephemeral, proxy_server, user_agent };
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.DB.UPDATE_PROFILE,
+    (_, id, name, color, is_ephemeral, proxy_server, user_agent) => {
+      updateProfile(id, name, color, is_ephemeral, proxy_server, user_agent);
+      configureSessionForProfile(id);
+      return { id, name, color, is_ephemeral, proxy_server, user_agent };
+    }
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_PROFILE, async (_, id) => {
+    for (const [paneId, profileId] of viewProfile.entries()) {
+      if (profileId === id && global.mainWindow && !global.mainWindow.isDestroyed()) {
+        updatePaneProfile(global.mainWindow, paneId, "main");
+      }
+    }
+    let isEphemeral = false;
+    try {
+      const p = getProfileById(id);
+      if (p) isEphemeral = !!p.is_ephemeral;
+    } catch {
+    }
+    deleteProfile(id);
+    try {
+      const ses = electron.session.fromPartition(isEphemeral ? id : `persist:${id}`);
+      await ses.clearStorageData();
+    } catch (e) {
+      console.error("[Profile Engine] Failed to wipe session data:", e);
+    }
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_INITIAL_STATE, () => getInitialAppState());
+  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_WORKSPACES, () => getWorkspaces());
+  electron.ipcMain.handle(IPC_CHANNELS.DB.CREATE_WORKSPACE, async (_, id, name, icon) => {
+    const isPremium = await checkPremiumStatus();
+    if (!isPremium) {
+      const workspaces = getWorkspaces();
+      if (workspaces.length >= 2) {
+        throw new Error("Free tier limits exceeded: Max 2 workspaces.");
+      }
+    }
+    createWorkspace(id, name, icon);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_WORKSPACE, (_, id, name, icon) => {
+    updateWorkspace(id, name, icon);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_WORKSPACE, (_, id) => {
+    deleteWorkspace(id);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.SET_WORKSPACE_DEFAULT_PROFILE, (_, id, profileId) => {
+    setWorkspaceDefaultProfile(id, profileId);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.SET_TAB_DEFAULT_PROFILE, (_, id, profileId) => {
+    setTabDefaultProfile(id, profileId);
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_WORKSPACE,
+    (_, workspaceId, profileId) => {
+      updatePaneProfilesForWorkspace(workspaceId, profileId);
+    }
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_PANE_PROFILES_FOR_TAB, (_, tabId, profileId) => {
+    updatePaneProfilesForTab(tabId, profileId);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_TABS, (_, workspaceId) => getTabs(workspaceId));
+  electron.ipcMain.handle(IPC_CHANNELS.DB.CREATE_TAB, async (_, id, workspaceId, name) => {
+    const isPremium = await checkPremiumStatus();
+    if (!isPremium) {
+      const tabs = getTabs(workspaceId);
+      if (tabs.length >= 3) {
+        throw new Error("Free tier limits exceeded: Max 3 tabs per workspace.");
+      }
+    }
+    createTab(id, workspaceId, name);
+    return { id, workspaceId, name };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.UPDATE_TAB, (_, id, name, customName) => {
+    updateTab(id, name, customName);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.DELETE_TAB, (_, id) => {
+    deleteTab(id);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.MOVE_NODE_TO_TAB, (_, nodeId, targetTabId) => {
+    moveNodeToTab(nodeId, targetTabId);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.DB.GET_NODES, (_, tabId) => getNodesForTab(tabId));
+  electron.ipcMain.on(IPC_CHANNELS.DB.SAVE_NODE, (_, node) => saveNode(node));
+  electron.ipcMain.on(IPC_CHANNELS.DB.DELETE_NODE, (_, id) => deleteNode(id));
+  electron.ipcMain.on(
+    IPC_CHANNELS.DB.SAVE_TAB_LAYOUT,
+    (_, tabId, layoutState) => saveTabLayout(tabId, layoutState)
+  );
+}
+function initLicensingIpc() {
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.ACTIVATE,
+    (_, key) => activateLicenseKey(key)
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.VALIDATE,
+    (_, key) => validateLicenseKey(key)
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.DEACTIVATE,
+    () => deactivateLicenseKey()
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.LICENSING.GET_KEY, () => getSavedLicenseKey());
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.GET_STATE,
+    () => getSavedLicenseState()
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.CHECK_PREMIUM,
+    () => checkPremiumStatus()
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.LICENSING.IS_DEV, () => isDevMode$1());
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL,
+    () => getCheckoutUrl()
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION,
+    (_, ref, affiliateId) => {
+      setMemoryAttribution({ ref, affiliateId });
+      saveAttribution({ ref, affiliateId });
+      return true;
+    }
+  );
+}
+const SENSITIVE_QUERY_REGEX = /(token|auth|key|secret|password|session|code|client_secret)=([^&\s]+)/gi;
+const BEARER_REGEX = /Bearer\s+([A-Za-z0-9\-._~+/]+=*)/gi;
+const USER_PATH_REGEX = /(?:[a-zA-Z]:)?(?:[\\/])Users(?:[\\/])[^\\/\s"':]+/gi;
+const UNIX_USER_PATH_REGEX = /(?:\/home|\/Users)\/[^\\/\s"':]+/gi;
+const REPO_ROOT_REGEX = /[a-zA-Z]:[\\/][^\\/]+[\\/]apposition/gi;
+function sanitizeStringForOpsec(input) {
+  if (!input || typeof input !== "string") return "";
+  return input.replace(SENSITIVE_QUERY_REGEX, "$1=[REDACTED]").replace(BEARER_REGEX, "Bearer [REDACTED]").replace(USER_PATH_REGEX, "[USER_DIR]").replace(UNIX_USER_PATH_REGEX, "[USER_DIR]").replace(REPO_ROOT_REGEX, "[APP_ROOT]");
+}
+function sanitizeSentryEvent(event) {
+  if (!event) return event;
+  if (event.exception?.values) {
+    for (const val of event.exception.values) {
+      if (val.value) val.value = sanitizeStringForOpsec(val.value);
+      if (val.stacktrace?.frames) {
+        for (const frame of val.stacktrace.frames) {
+          if (frame.filename) frame.filename = sanitizeStringForOpsec(frame.filename);
+        }
+      }
+    }
+  }
+  if (event.breadcrumbs) {
+    for (const b of event.breadcrumbs) {
+      if (b.message) b.message = sanitizeStringForOpsec(b.message);
+      if (b.data && typeof b.data === "object") {
+        try {
+          const stringified = sanitizeStringForOpsec(JSON.stringify(b.data));
+          b.data = JSON.parse(stringified);
+        } catch {
+        }
+      }
+    }
+  }
+  return event;
+}
+function compareSemver(a, b) {
+  const cleanA = a.replace(/^v/, "").trim();
+  const cleanB = b.replace(/^v/, "").trim();
+  const partsA = cleanA.split(".").map((p) => parseInt(p, 10) || 0);
+  const partsB = cleanB.split(".").map((p) => parseInt(p, 10) || 0);
+  const maxLen = Math.max(partsA.length, partsB.length, 3);
+  for (let i = 0; i < maxLen; i++) {
+    const valA = partsA[i] || 0;
+    const valB = partsB[i] || 0;
+    if (valA !== valB) return valA - valB;
+  }
+  return 0;
+}
+function evaluateUpgradeState(lastSeenVersion, currentVersion) {
+  const cleanCurrent = currentVersion.replace(/^v/, "").trim();
+  if (!lastSeenVersion) {
+    return {
+      shouldShowWhatsNew: false,
+      nextVersionToCommit: cleanCurrent,
+      isFreshInstall: true
+    };
+  }
+  const cleanLastSeen = lastSeenVersion.replace(/^v/, "").trim();
+  const diff = compareSemver(cleanLastSeen, cleanCurrent);
+  if (diff < 0) {
+    return {
+      shouldShowWhatsNew: true,
+      nextVersionToCommit: cleanCurrent,
+      isFreshInstall: false
+    };
+  }
+  return {
+    shouldShowWhatsNew: false,
+    nextVersionToCommit: cleanLastSeen,
+    isFreshInstall: false
+  };
+}
+const version = "1.3.1";
+const tag = "v1.3.1";
+const title = "Apposition v1.3.1";
+const publishedAt = "2026-09-12";
+const categories = [{ "category": "Features", "items": [{ "title": "Persistent Media Playback Continuity", "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off." }, { "title": "Interactive Audio Equalizer & Smart Indicator", "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished." }, { "title": "Communicator App Reload", "description": "Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback." }] }, { "category": "Improvements", "items": [{ "title": "Fluid Drag-and-Drop Spatial Previews", "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release." }, { "title": "Tactile Edge Navigation Shelves", "description": "Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces." }, { "title": "Real-Time Profile Details", "description": "The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries." }] }, { "category": "Bug Fixes", "items": [{ "title": "Automatic Account Identification", "description": "Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username." }, { "title": "Workspace Airspace & Transitions", "description": "Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive." }, { "title": "Continuous Background Web Sessions", "description": "Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions." }, { "title": "Communicator Popovers & Settings", "description": "Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close." }, { "title": "Stable Drag Focus & Screen-Edge Navigation", "description": "Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges." }, { "title": "Intelligent Semantic Tab Naming", "description": "Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs." }, { "title": "Intelligent Omnibar & Search Navigation", "description": "Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives." }] }];
+const highlights = [{ "title": "Persistent Media Playback Continuity", "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off." }, { "title": "Interactive Audio Equalizer & Smart Indicator", "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished." }, { "title": "Fluid Drag-and-Drop Spatial Previews", "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release." }];
+const currentRelease = {
+  version,
+  tag,
+  title,
+  publishedAt,
+  categories,
+  highlights
+};
+const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.1","tag":"v1.3.1","title":"Apposition v1.3.1","publishedAt":"2026-09-12","categories":[{"category":"Features","items":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Communicator App Reload","description":"Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."}]},{"category":"Improvements","items":[{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."},{"title":"Tactile Edge Navigation Shelves","description":"Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."},{"title":"Real-Time Profile Details","description":"The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."}]},{"category":"Bug Fixes","items":[{"title":"Automatic Account Identification","description":"Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."},{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."},{"title":"Continuous Background Web Sessions","description":"Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."},{"title":"Communicator Popovers & Settings","description":"Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."},{"title":"Stable Drag Focus & Screen-Edge Navigation","description":"Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."},{"title":"Intelligent Semantic Tab Naming","description":"Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."},{"title":"Intelligent Omnibar & Search Navigation","description":"Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."}]}],"highlights":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."}]},{"version":"1.3.0","tag":"v1.3.0","title":"Introducing the App Directory, Dedicated Release Feed & Fluid Multi-Pane Navigation","publishedAt":"2026-09-11","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.3.0/app-directory.webp","categories":[{"category":"Features","items":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Tactile App Shortcuts & Split Dock","description":"Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels."},{"title":"Flexible Annual Plan","description":"Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License."}]},{"category":"Improvements","items":[{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."},{"title":"In-App Release Notes Viewer","description":"Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."},{"title":"Visual Release Previews","description":"Key milestone release notes now display high-resolution visual previews directly within the in-app release viewer and website feed."},{"title":"Enhanced Motion & Performance","description":"Optimized motion, panel transitions, and scrolling performance across all workspace navigation views."},{"title":"Clean App Catalog","description":"Removed redundant duplicate listings and disambiguated service entries across shared domains."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen."},{"title":"Search Input & Sleep Recovery","description":"Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear."},{"title":"Command Bar Behavior","description":"Prevented accidental transitions to notes when pressing Escape in the workspace search bar."}]}],"highlights":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."}]},{"version":"1.2.7","tag":"v1.2.7","title":"Smart Window Persistence, Dynamic Omnibar Expansion, and Instant Cold Starts","publishedAt":"2026-09-09","categories":[{"category":"Features","items":[{"title":"Smart Window Persistence & Multi-Monitor Recovery","description":"The desktop app now seamlessly remembers your window size, position, and maximized state across restarts, and automatically rescues windows onto your main screen if an external monitor is disconnected."},{"title":"Dynamic Omnibar Expansion","description":"The address search bar now smoothly expands into available window space when editing and seamlessly morphs back into place upon dismissal, while tab labels compress smoothly under pressure without visual overlap."},{"title":"Semantic Title Distillation","description":"Tabs now automatically distill deep page titles into concise sub-task labels like Proposals, Pull requests, or Inbox instead of repeating brand names, and single tabs collapse into clean icon capsules to keep your workspace header uncluttered."}]},{"category":"Improvements","items":[{"title":"Instant Cold Starts","description":"App startup and workspace launch times are now significantly faster, eliminating initial launch freezes and accelerating background tab hydration."},{"title":"Zero-Flicker Launch","description":"The application now opens instantaneously with a fully rendered workspace, eliminating initial blank window delays and keeping active tabs immediately responsive."}]},{"category":"Bug Fixes","items":[{"title":"Duplicate Split Prevention","description":"Splitting panes via keyboard shortcuts now reliably creates a single new pane, eliminating accidental duplicate splits."},{"title":"Split View Focus Synchronization","description":"Active pane navigation and panel closing now synchronize flawlessly across split views, ensuring shortcuts like Ctrl+W consistently close the selected pane."}]}],"highlights":[{"title":"Smart Window Persistence","description":"Apposition automatically remembers your window positions and multi-monitor layouts across restarts."},{"title":"Dynamic Omnibar Expansion","description":"The address and search bar smoothly adapts to fit long queries and collapses into a compact capsule."},{"title":"Instant Cold Starts","description":"Workspaces and active panes now launch instantaneously with zero initial blank window lag."}]},{"version":"1.2.6","tag":"v1.2.6","title":"Seamless Workspace Dropdowns & Visual Branding Polish","publishedAt":"2026-09-09","categories":[{"category":"Improvements","items":[{"title":"Consolidated Brand Mark","description":"Updated all application installer assets and web icons to consistently display the refreshed brand mark across tabs and installer dialogs."}]},{"category":"Bug Fixes","items":[{"title":"Dropdown Menu Stability","description":"Resolved an issue where dropdown menus, selection filters, and model pickers in web workspaces would immediately collapse when clicked."},{"title":"Address Bar Hijack Guard","description":"Resolved an issue where websites containing embedded frames or interactive widgets could unexpectedly hijack the active tab address bar."}]}],"highlights":[{"title":"Dropdown Menu Stability","description":"Dropdown pickers and menus in web applications now stay open reliably during interaction."},{"title":"Address Bar Hijack Guard","description":"Embedded iframes are prevented from modifying tab address state unexpectedly."}]},{"version":"1.2.5","tag":"v1.2.5","title":"Self-Serve Device Licensing, Polished Brand Identity & 35% Partner Program","publishedAt":"2026-09-08","categories":[{"category":"Features","items":[{"title":"Self-Serve Device Licensing","description":"Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 35% Partner Program."}]},{"category":"Improvements","items":[{"title":"Refreshed Visual Identity","description":"Updated the official application icon, website branding, and browser tab favicons with our new split-monolith visual identity."}]}],"highlights":[{"title":"Self-Serve Device Licensing","description":"Manage active device seats and license transfers directly from your Account settings screen."},{"title":"35% Partner Program","description":"Earn recurring rewards for referring teams and collaborators to Apposition."}]},{"version":"1.2.4","tag":"v1.2.4","title":"Silent Background Updates & Precision Workspace Controls","publishedAt":"2026-09-05","categories":[{"category":"Features","items":[{"title":"Dedicated Drawer Resize Controls","description":"Dedicated drawer resize controls in the header and settings menu to customize your workspace layout with precision."},{"title":"Silent Background Updates","description":"Seamless background application updates that download quietly and apply instantly upon restart without interrupting your work."}]},{"category":"Improvements","items":[{"title":"Smarter Omnibar Search Classification","description":"Reliably differentiates search queries from web addresses, ensuring terms like code snippets or decimal numbers open web searches correctly."},{"title":"Anchored Popover Dialogs","description":"Add App and Stack configuration menus now open cleanly as anchored popovers without dimming the workspace."}]},{"category":"Bug Fixes","items":[{"title":"Search Query Desync Fix","description":"Fixed an issue where search queries typed into the address bar were intermittently dropped or desynchronized when navigating."},{"title":"Google Search Redirection Guard","description":"Resolved unexpected authentication prompts and redirection loops when browsing Google search results."}]}],"highlights":[{"title":"Silent Background Updates","description":"Updates download in the background without popups or work interruptions."},{"title":"Workspace Drawer Controls","description":"Fine-tune sidebar and drawer dimensions with tactile resize handles."}]},{"version":"1.2.3","tag":"v1.2.3","title":"Workspace Isolation & Tab Management Polish","publishedAt":"2026-09-02","categories":[{"category":"Features","items":[{"title":"Strict Workspace Sandboxing","description":"Dedicated profile cookies and storage partitions across isolated tabs."}]},{"category":"Improvements","items":[{"title":"Fluid Tab Switching","description":"Zero-latency keyboard shortcuts to cycle through workspaces and tabs."}]}],"highlights":[{"title":"Strict Workspace Sandboxing","description":"Completely isolated session cookies and partitions per tab."}]},{"version":"1.2.2","tag":"v1.2.2","title":"Connected Account Detection & Precision Workspace Isolation","publishedAt":"2026-08-31","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.2/profile-isolation.webp","categories":[{"category":"Features","items":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."}]},{"category":"Improvements & Fixes","items":[{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."},{"title":"Enhanced connected account identification and","description":"Enhanced connected account identification and avatar presentation in pane headers, omniboxes, and workspace menus."}]}],"highlights":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."},{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."}]},{"version":"1.2.1","tag":"v1.2.1","title":"Floating Communicator Hub, Fluid Spatial Drag, and Workspace Interaction Polish","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."}]},{"category":"Improvements","items":[{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."},{"title":"Improved modal dialogs and overlay","description":"Improved modal dialogs and overlay menus to close smoothly on outside clicks or the Escape key."}]},{"category":"Bug Fixes","items":[{"title":"The floating Communicator now stays","description":"The floating Communicator now stays reliably on top of all workspace panes, eliminates visual bleed-through from background pages, and smoothly dismisses whenever you click outside."},{"title":"Fixed an issue where interacting","description":"Fixed an issue where interacting with web applications and links inside split panels could cause unexpected page reloads or unrendered views."}]}],"highlights":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."},{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."}]},{"version":"1.2.0","tag":"v1.2.0","title":"Next-Gen Spatial Engine & Universal Communicator","publishedAt":"2026-08-27","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.0/communicator-hub.webp","categories":[{"category":"Features","items":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for Slack, Gmail, Telegram, and Discord."},{"title":"Dynamic Split Panes","description":"Tactile drag-and-drop spatial multi-pane tiling with zero webview reloads."}]}],"highlights":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for all your daily apps."},{"title":"Dynamic Split Panes","description":"Tactile spatial tiling with zero pane reloads."}]},{"version":"1.1.8","tag":"v1.1.8","title":"Stability Fixes, Install Improvements & Google Sign-in Reliability","publishedAt":"2026-08-23","categories":[{"category":"Bug Fixes","items":[{"title":"Fixed a rare crash that","description":"Fixed a rare crash that could close the entire app unexpectedly while browsing."},{"title":"Resolved an issue where certain","description":"Resolved an issue where certain network requests and cross-origin authentications could cause the application to crash unexpectedly."}]},{"category":"Sign-in & Accounts","items":[{"title":"Signing in with Google now","description":"Signing in with Google now works reliably inside panels as well as the dedicated login window - including retries after a failed attempt."},{"title":"Google sign-in no longer interrupts","description":"Google sign-in no longer interrupts you with Windows passkey popups; it goes straight to password entry."}]},{"category":"Improvements","items":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]}],"highlights":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]},{"version":"1.1.7","tag":"v1.1.7","title":"Resilient Startup & Seamless Session Recovery","publishedAt":"2026-08-22","categories":[{"category":"Improvements & Bug Fixes","items":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]}],"highlights":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]},{"version":"1.1.6","tag":"v1.1.6","title":"Seamless Media Continuity, Instant Tab Restoration & Streamlined Installers","publishedAt":"2026-08-20","categories":[{"category":"Features","items":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Streamlined Setup & Package Managers","description":"Introduced a distraction-free installation assistant with one-click terminal setup for macOS, Windows, and Linux, plus instant cryptographic verification."}]},{"category":"Improvements & Fixes","items":[{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."},{"title":"Immediate Split Pane Reflow","description":"Closing split panes now instantly reflows remaining views with zero delay and completely halts background audio upon close."},{"title":"Reliable Keyboard Navigation","description":"Workspace shortcuts now reliably trigger even when active web apps attempt to capture keyboard focus."}]}],"highlights":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."}]},{"version":"1.1.5","tag":"v1.1.5","title":"Spatial Navigation, Omnibox Browser Bar & Audio Multitasking","publishedAt":"2026-08-18","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.1.5/apposition-v1.1.5-spatial-navigation.png","categories":[{"category":"Features","items":[{"title":"Top-Center Omnibox Browser Bar","description":"Browser navigation bar with omnibox search suggestions, back/forward history, and quick layout actions."},{"title":"3-Way Spatial Layout Mode","description":"Toggle for docked, floating overlap, and full collapse views with persistent user preferences."},{"title":"Panel Dynamic Island & Focus Mode","description":"Distraction-free single-pane work triggered with Alt+F shortcut."}]},{"category":"Improvements","items":[{"title":"Responsive Soundwave Indicator","description":"Tabs display live soundwaves when audio is playing, with instant one-click muting."},{"title":"Synchronized Spatial Grid","description":"Refined window border margins, split gaps, and drop snap ghosts onto a synchronized grid."}]},{"category":"Bug Fixes","items":[{"title":"Window Control Hit-Testing","description":"Optimized window control responsiveness and hit-testing across all edge layout modes."}]}],"highlights":[{"title":"Top-Center Omnibox Browser Bar","description":"Instant search suggestions and quick layout actions right from the header."},{"title":"3-Way Spatial Layout Mode","description":"Docked, floating overlap, and full collapse workspace arrangements."},{"title":"Audio Indicator & 1-Click Mute","description":"Live soundwaves on active tabs with instant one-click muting."}]},{"version":"1.1.4","tag":"v1.1.4","title":"Multi-Profile Single Sign-On & Persistent Session Sync","publishedAt":"2026-08-18","categories":[{"category":"Features","items":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."}]},{"category":"Improvements","items":[{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."},{"title":"Profile switching preserves the exact","description":"Profile switching preserves the exact active webpage without accidental sign-outs."},{"title":"Profile switcher rows now feature","description":"Profile switcher rows now feature full-width selection highlights and floating hover micro-actions."}]},{"category":"Fixes","items":[{"title":"Switching profiles on a split","description":"Switching profiles on a split pane now instantly switches session partitions and cookies without latency."},{"title":"Active account logins and cookies","description":"Active account logins and cookies are now reliably preserved across app restarts and system sleep."},{"title":"Workspace quick-switching via Command Palette","description":"Workspace quick-switching via Command Palette now previews icons with keyboard navigation."}]}],"highlights":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."},{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."}]},{"version":"1.1.3","tag":"v1.1.3","title":"Seamless System Browser Sign-In, Workspace Context Menus & Enhanced Navigation","publishedAt":"2026-08-16","categories":[{"category":"Features","items":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"History Jump Menu & Navigation Shortcuts","description":"Long-press or right-click the back/forward navigation buttons to open a visual jump menu with site icons, or navigate back and forward instantly using Ctrl+[ and Ctrl+]."},{"title":"Power-User Search Keywords","description":"Address inputs now resolve Google Search directly with instant search engine shortcut keywords for YouTube, GitHub, and Google Drive."}]},{"category":"Improvements","items":[{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."},{"title":"Streamlined Single-Click Setup","description":"Windows installation is now completely silent and lock-free, with instant setup and automatic workspace layout restoration on launch."},{"title":"Fluid Floating Island Transitions","description":"Refined hovering and edge cursor tracking for floating window controls, preventing accidental window collapses and preserving direct click access to underlying web elements."}]},{"category":"Bug Fixes","items":[{"title":"Resilient Split Pane Sessions","description":"Closing a split pane no longer triggers unnecessary page reloads or active session interruptions in adjacent open panes."},{"title":"Reliable Embedded Shortcut Handling","description":"Fixed an issue where keyboard navigation shortcuts could become unresponsive while focused inside web panels, restoring instant focus upon clicking into any pane."},{"title":"Display Scaling Alignment","description":"Resolved an issue where interactive workspace preview tiles appeared scaled down or misaligned on smaller displays."},{"title":"Login Compatibility","description":"Eliminated unexpected firewall prompts and resolved authentication dialog blocks across third-party web services."}]}],"highlights":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."}]},{"version":"1.1.2","tag":"v1.1.2","title":"Zero-Reload Split Persistence & 120 FPS Resizing","publishedAt":"2026-08-13","categories":[{"category":"Improvements","items":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"category":"Bug Fixes","items":[{"title":"Fixed an issue where first-time","description":"Fixed an issue where first-time installations could render an empty screen by guaranteeing robust default workspace and tab initialization."}]}],"highlights":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"version":"1.1.1","tag":"v1.1.1","title":"Layout History, Spatial Keyboard Swapping & Crash Recovery","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added visual audio activity indicators","description":"Added visual audio activity indicators on active tabs to easily identify audio sources across complex multi-pane workspaces."},{"title":"Added intelligent address bar navigation","description":"Added intelligent address bar navigation for local development ports, alongside a one-click terminal install option."}]},{"category":"Improvements","items":[{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."},{"title":"Completely redesigned the pane toolbar","description":"Completely redesigned the pane toolbar with a jitter-free tactile aesthetic and refined double-bezel styling."},{"title":"Upgraded tab hover tooltips to","description":"Upgraded tab hover tooltips to instantly display rich session context with a polished tactile feel."},{"title":"Enhanced workspace docking and pane","description":"Enhanced workspace docking and pane splitting reliability with smoother drag transitions and robust offline session persistence."}]},{"category":"Bug Fixes","items":[{"title":"Fixed a startup crash on","description":"Fixed a startup crash on Windows and macOS caused by an engine compilation mismatch, and ensured the official Apposition icon displays correctly across all desktop platforms."},{"title":"Resolved an issue where dragging","description":"Resolved an issue where dragging panels in workspaces with multiple panes could cause duplicate panels, layout freezes, or dropped keyboard shortcuts."},{"title":"Resolved an issue where closing","description":"Resolved an issue where closing the final tab or pane in a workspace could cause the interface to freeze or display an empty background."},{"title":"Resolved navigation bugs that caused","description":"Resolved navigation bugs that caused the search input to occasionally lose typed text or drop focus when switching workspaces."},{"title":"Resolved an issue where rapidly","description":"Resolved an issue where rapidly switching workspaces could cause tabs to display the wrong environment."}]}],"highlights":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."}]},{"version":"1.1.0","tag":"v1.1.0","title":"Seamless Updates, Standalone Inspector & Draggable Tabs","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Opening the Inspector (F12) now","description":"Opening the Inspector (F12) now launches a clean, standalone floating window instead of squeezing into a sidebar."},{"title":"You can now view our","description":"You can now view our latest release notes in a dedicated popover and submit feedback directly from the new sidebar Support Cluster without leaving your workspace."},{"title":"Opening external links from the","description":"Opening external links from the changelog now seamlessly creates a new workspace tab instead of launching an external browser."}]},{"category":"Improvements","items":[{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."},{"title":"Dragging a pane into an","description":"Dragging a pane into an empty tab now cleanly replaces it with a clear visual drop preview, and moving panes between tabs no longer leaves behind orphaned blank tabs."},{"title":"Dragging the last panel out","description":"Dragging the last panel out of a tab or workspace now automatically cleans up the empty space instead of leaving an abandoned tab."}]},{"category":"Bug Fixes","items":[{"title":"Re-engineered the window manager to","description":"Re-engineered the window manager to completely eliminate cursor jitter and flickering when hovering over panes, while ensuring floating buttons and menus remain perfectly responsive."},{"title":"Resolved multi-window shortcut conflicts, ensuring","description":"Resolved multi-window shortcut conflicts, ensuring actions like splitting panels, closing tabs, and swiping between workspaces are perfectly instantaneous and correctly targeted."},{"title":"Fixed an issue where the","description":"Fixed an issue where the search bar would not automatically receive keyboard focus when opening a new tab or switching back to an empty tab."},{"title":"Resolved an issue that caused","description":"Resolved an issue that caused active workspace panels to unexpectedly refresh or blink when opening the settings menu."}]}],"highlights":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."}]},{"version":"1.0.0","tag":"v1.0.0","title":"Initial Launch of Apposition","publishedAt":"2026-08-02","categories":[{"category":"Features","items":[{"title":"Multi-Pane Workspace Canvas","description":"The digital workspace designed for deep parallel work without tab chaos."}]}],"highlights":[{"title":"Multi-Pane Workspace Canvas","description":"Organize web applications and accounts in one unified window."}]}]');
+function initChangelogIpc() {
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
+    const currentVersion = electron.app.getVersion();
+    const lastSeen = getLastSeenVersion();
+    const evaluation = evaluateUpgradeState(lastSeen, currentVersion);
+    if (evaluation.isFreshInstall) {
+      setLastSeenVersion(evaluation.nextVersionToCommit);
+      return {
+        shouldShowWhatsNew: false,
+        currentVersion,
+        lastSeenVersion: null
+      };
+    }
+    if (evaluation.shouldShowWhatsNew) {
+      return {
+        shouldShowWhatsNew: true,
+        currentVersion,
+        lastSeenVersion: lastSeen,
+        latestRelease: currentRelease
+      };
+    }
+    return {
+      shouldShowWhatsNew: false,
+      currentVersion,
+      lastSeenVersion: lastSeen
+    };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, (_, version2) => {
+    const targetVersion = version2 || electron.app.getVersion();
+    setLastSeenVersion(targetVersion);
+    return { success: true, version: targetVersion };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_RELEASES, () => {
+    return allReleases;
+  });
+}
+function initAuthIpc() {
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.CLEAR_SITE_DATA,
+    async (_event, origin, profileId) => {
+      try {
+        if (!origin) return { success: false, error: "Missing origin" };
+        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
+        const targetSession = electron.session.fromPartition(partition);
+        await targetSession.clearStorageData({
+          origin,
+          storages: [
+            "cookies",
+            "localstorage",
+            "serviceworkers",
+            "cachestorage"
+          ]
+        });
+        return { success: true };
+      } catch (err) {
+        console.error("Failed to clear site data:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.START_RELAY,
+    async (_event, targetUrl, profileId, paneId) => {
+      if (!targetUrl) return { success: false, error: "Missing URL" };
+      return startAuthRelay(targetUrl, profileId || "main", paneId);
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.CONNECT_ACCOUNT,
+    async (_event, options) => {
+      return openConnectAccountModal(options);
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.DISCONNECT_ACCOUNT,
+    async (_event, providerId, profileId = "main") => {
+      return sessionIdentityService.disconnectProvider(profileId, providerId);
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.SCAN_IDENTITIES,
+    async (_event, profileId) => {
+      try {
+        if (profileId) {
+          const identities = await sessionIdentityService.scanProfile(profileId);
+          return { success: true, identities };
+        }
+        await sessionIdentityService.scanAllProfiles();
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.OPEN_GOOGLE_AUTH,
+    async (_event, options) => {
+      return openConnectAccountModal({
+        providerId: "google",
+        loginUrl: options.url,
+        profileId: options.profileId,
+        paneId: options.paneId,
+        returnUrl: options.returnUrl
+      });
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.EXPORT_VAULT,
+    async (_event, profileId, secretKey) => {
+      try {
+        const partition = profileId ? profileId === "main" ? "persist:main" : `persist:${profileId}` : "persist:main";
+        const targetSession = electron.session.fromPartition(partition);
+        const cookies = await targetSession.cookies.get({});
+        const encrypted = encryptSessionPayload(
+          { profileId, cookies, exportedAt: Date.now() },
+          secretKey
+        );
+        return { success: true, payload: encrypted };
+      } catch (err) {
+        console.error("Failed to export session vault:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    IPC_CHANNELS.AUTH.IMPORT_VAULT,
+    async (_event, encryptedPayload, secretKey) => {
+      try {
+        const decrypted = decryptSessionPayload(encryptedPayload, secretKey);
+        if (!decrypted || !decrypted.profileId || !Array.isArray(decrypted.cookies)) {
+          return { success: false, error: "Invalid session payload or key" };
+        }
+        const partition = decrypted.profileId === "main" ? "persist:main" : `persist:${decrypted.profileId}`;
+        const targetSession = electron.session.fromPartition(partition);
+        for (const cookie of decrypted.cookies) {
+          const scheme = cookie.secure ? "https" : "http";
+          const domain = cookie.domain?.startsWith(".") ? cookie.domain.slice(1) : cookie.domain;
+          const url = `${scheme}://${domain}${cookie.path || "/"}`;
+          try {
+            await targetSession.cookies.set({
+              url,
+              name: cookie.name,
+              value: cookie.value,
+              domain: cookie.domain,
+              path: cookie.path,
+              secure: cookie.secure,
+              httpOnly: cookie.httpOnly,
+              expirationDate: cookie.expirationDate,
+              sameSite: cookie.sameSite
+            });
+          } catch {
+          }
+        }
+        return { success: true, profileId: decrypted.profileId };
+      } catch (err) {
+        console.error("Failed to import session vault:", err);
+        return { success: false, error: err.message };
+      }
+    }
+  );
+}
+const GMAIL_AMBIENT_CSS = `
+  /* 1. Guaranteed Opaque Canvas Pipeline (Eliminates Bleed-Through) */
+  html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
+    background-color: #ffffff !important;
+    background: #ffffff !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    html, body, #canvas_frame, .nH, .bkK, .aeN, .AO, .T-I-KE, div[role="main"], .dw, .no, .aKh, .ajl, .aAy, .gb_Ed, .gA {
+      background-color: #141415 !important;
+      background: #141415 !important;
+      color: #e5e5e5 !important;
+    }
+  }
+
+  /* 2. Hide bulky Google Add-ons right side panel & Meet/Chat widgets */
+  [aria-label="Side panel"], div[role="complementary"], .bq9,
+  div[aria-label="Meet"], div[aria-label="Hangouts"], div[aria-label="Chat"], .aYF, .aT5 {
+    display: none !important;
+  }
+
+  /* 3. Streamline Top Search & Header Banner */
+  header[role="banner"] {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    height: 48px !important;
+    min-height: 48px !important;
+  }
+  header[role="banner"] form {
+    max-width: 480px !important;
+  }
+
+  /* 4. Streamline Left Sidebar Density */
+  .aeN {
+    min-width: 180px !important;
+  }
+  .w-asV {
+    width: auto !important;
+  }
+
+  /* 5. Precision Grayscale Monochromatic Scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+const SLACK_AMBIENT_CSS = `
+  /* Guaranteed Opaque Canvas Pipeline for Slack */
+  html, body, .p-client_container, .p-client, .p-view_contents, .p-workspace_layout {
+    background-color: #1a1d21 !important;
+  }
+  /* Hide desktop download prompts */
+  .p-download_banner, .p-get_desktop_app_banner {
+    display: none !important;
+  }
+  /* Sleek scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+const GENERIC_MESSENGER_CSS = `
+  /* Guaranteed Opaque Canvas Pipeline for Generic Messengers */
+  html, body {
+    background-color: #ffffff !important;
+  }
+  @media (prefers-color-scheme: dark) {
+    html, body {
+      background-color: #141415 !important;
+    }
+  }
+  /* Sleek monochromatic scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px !important;
+    height: 5px !important;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(120, 113, 108, 0.35) !important;
+    border-radius: 4px !important;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent !important;
+  }
+`;
+function injectCommunicatorRecipe(webContents, url) {
+  try {
+    const u = url.toLowerCase();
+    if (u.includes("mail.google.com")) {
+      webContents.insertCSS(GMAIL_AMBIENT_CSS).catch(() => {
+      });
+    } else if (u.includes("slack.com")) {
+      webContents.insertCSS(SLACK_AMBIENT_CSS).catch(() => {
+      });
+    } else {
+      webContents.insertCSS(GENERIC_MESSENGER_CSS).catch(() => {
+      });
+    }
+  } catch {
+  }
+}
+class CommunicatorService {
+  views = /* @__PURE__ */ new Map();
+  activeAppId = "slack";
+  updateAppUnread(appId, info) {
+    global.appOverlayView?.webContents.send("communicator.unread-updated", {
+      appId,
+      unreadCount: info.count
+    });
+  }
+  getOrCreateView(win, appId, customPartition, customUrl) {
+    if (this.views.has(appId)) return this.views.get(appId);
+    if (!customUrl) return void 0;
+    const partition = customPartition || "persist:main";
+    const view = new electron.WebContentsView({
+      webPreferences: {
+        preload: resolvePreload("pane.js"),
+        partition,
+        contextIsolation: true,
+        sandbox: false,
+        spellcheck: false,
+        backgroundThrottling: false
+      }
+    });
+    view.setBackgroundColor("#ffffff");
+    try {
+      view.webContents.setZoomMode("isolated");
+    } catch {
+    }
+    view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
+    bindGuestCursor(view.webContents);
+    view.webContents.on("will-navigate", (_e, navUrl) => {
+      if (isGoogleOAuthEndpoint(navUrl)) {
+        view.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      } else if (view.webContents.getUserAgent() === FIREFOX_AUTH_UA) {
+        view.webContents.setUserAgent(DEFAULT_DESKTOP_UA);
+      }
+    });
+    view.webContents.on("dom-ready", () => {
+      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
+      try {
+        const bounds = view.getBounds();
+        const targetZoom = Math.min(1, Math.max(0.72, (bounds.width || 600) / 760));
+        view.webContents.setZoomFactor(targetZoom);
+      } catch {
+      }
+    });
+    view.webContents.on("did-navigate", () => {
+      view.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      injectCommunicatorRecipe(view.webContents, view.webContents.getURL());
+    });
+    view.webContents.on("page-title-updated", () => {
+      const title2 = view.webContents.getTitle();
+      const info = extractUnreadBadgeFromTitle(title2);
+      this.updateAppUnread(appId, info);
+    });
+    view.webContents.on("before-input-event", (e, input) => {
+      handleBeforeInputEvent(view.webContents, e, input);
+    });
+    view.webContents.setWindowOpenHandler((details) => {
+      if (isGoogleOAuthEndpoint(details.url) || details.url.includes("login") || details.url.includes("auth")) {
+        view.webContents.loadURL(details.url);
+        return { action: "deny" };
+      }
+      return { action: "allow" };
+    });
+    view.webContents.loadURL(customUrl);
+    this.views.set(appId, view);
+    return view;
+  }
+  showDrawerView(win, appId, rect, partition, url) {
+    this.activeAppId = appId;
+    for (const [id, v] of this.views.entries()) {
+      if (id !== appId) {
+        removeCommunicator(win, id);
+        try {
+          v.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
+        } catch {
+        }
+      }
+    }
+    const view = this.getOrCreateView(win, appId, partition, url);
+    if (!view) return;
+    if (isValidPhysicalRect(rect)) {
+      const dpr = devicePixelRatioFor(win);
+      const phys = toPhysicalRect(rect, dpr);
+      placeCommunicator(win, appId, view, { ...phys, cssLeft: rect.x, cssTop: rect.y });
+      view.setBounds(rect);
+      try {
+        const targetZoom = Math.min(1, Math.max(0.68, rect.width / 820));
+        const currentZoom = view.webContents.getZoomFactor();
+        if (Math.abs(currentZoom - targetZoom) > 0.02) {
+          view.webContents.setZoomFactor(targetZoom);
+        }
+      } catch {
+      }
+    }
+  }
+  async captureAppSnapshot(appId) {
+    const view = this.views.get(appId);
+    if (!view || view.webContents.isDestroyed()) return null;
+    try {
+      const image = await view.webContents.capturePage();
+      if (image.isEmpty()) return null;
+      return image.toDataURL();
+    } catch {
+      return null;
+    }
+  }
+  destroyView(win, appId) {
+    const view = this.views.get(appId);
+    if (view) {
+      if (win) removeCommunicator(win, appId);
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+      this.views.delete(appId);
+    }
+  }
+  reloadApp(appId) {
+    const targetId = appId || this.activeAppId;
+    const view = this.views.get(targetId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.reload();
+    }
+  }
+  hideDrawerView(win) {
+    for (const [id, view] of this.views.entries()) {
+      removeCommunicator(win, id);
+      try {
+        view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
+      } catch {
+      }
+    }
+  }
+}
+const communicatorService = new CommunicatorService();
+function initCommunicatorIpc(getWindow) {
+  electron.ipcMain.handle("communicator.getState", async () => {
+    try {
+      return getCommunicatorState();
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to get state:", err);
+      return { stacks: [], providers: [] };
+    }
+  });
+  electron.ipcMain.handle("communicator.createStack", async (_e, id, name, icon) => {
+    try {
+      createCommunicatorStack(id, name, icon);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to create stack:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle("communicator.updateStack", async (_e, id, name, icon) => {
+    try {
+      updateCommunicatorStack(id, name, icon);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to update stack:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle("communicator.deleteStack", async (_e, id) => {
+    try {
+      deleteCommunicatorStack(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete stack:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle(
+    "communicator.createApp",
+    async (_e, id, stackId, profileId, name, url, icon) => {
+      try {
+        createCommunicatorApp(id, stackId, profileId, name, url, icon);
+        return { success: true };
+      } catch (err) {
+        console.error("[Communicator IPC] Failed to create app:", err);
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  electron.ipcMain.handle(
+    "communicator.updateApp",
+    async (_e, id, updates) => {
+      try {
+        updateCommunicatorApp(id, updates);
+        return { success: true };
+      } catch (err) {
+        console.error("[Communicator IPC] Failed to update app:", err);
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  electron.ipcMain.handle("communicator.deleteApp", async (_e, id) => {
+    try {
+      const win = getWindow();
+      communicatorService.destroyView(win, id);
+      deleteCommunicatorApp(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete app:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle("communicator.saveProvider", async (_e, provider) => {
+    try {
+      saveCommunicatorProvider(provider);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to save provider:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle("communicator.deleteProvider", async (_e, id) => {
+    try {
+      deleteCommunicatorProvider(id);
+      return { success: true };
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to delete provider:", err);
+      return { success: false, error: String(err) };
+    }
+  });
+  electron.ipcMain.handle("communicator.captureSnapshot", async (_e, appId) => {
+    try {
+      return await communicatorService.captureAppSnapshot(appId);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to capture snapshot:", err);
+      return null;
+    }
+  });
+  electron.ipcMain.on("communicator.showDrawer", (_e, appId, rect, partition, url) => {
+    try {
+      const win = getWindow();
+      if (win) communicatorService.showDrawerView(win, appId, rect, partition, url);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to show drawer view:", err);
+    }
+  });
+  electron.ipcMain.on("communicator.hideDrawer", () => {
+    try {
+      const win = getWindow();
+      if (win) communicatorService.hideDrawerView(win);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to hide drawer view:", err);
+    }
+  });
+  electron.ipcMain.on("communicator.destroyView", (_e, appId) => {
+    try {
+      const win = getWindow();
+      communicatorService.destroyView(win, appId);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to destroy view:", err);
+    }
+  });
+  electron.ipcMain.on("communicator.reloadApp", (_e, appId) => {
+    try {
+      communicatorService.reloadApp(appId);
+    } catch (err) {
+      console.error("[Communicator IPC] Failed to reload app:", err);
+    }
+  });
+}
+function destroyAllViews() {
+  for (const [paneId, view] of Array.from(viewRegistry.activeViews.entries())) {
+    try {
+      viewRegistry.unregisterView(paneId);
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+    } catch {
+    }
+  }
+}
+createLogger("VIEW");
+function initViewIpc() {
+  electron.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
+    if (paneId && typeof wcId === "number") {
+      viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
+    }
+  });
+  electron.ipcMain.on("pane.clicked", (event) => {
+    for (const [paneId, view] of activeViews) {
+      if (view.webContents === event.sender) {
+        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
+          global.overlayWindow.webContents.send("pane.focused", paneId);
+        }
+        break;
+      }
+    }
+  });
+  electron.ipcMain.on("view.openDevTools", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (!view || view.webContents.isDestroyed()) return;
+    if (view.webContents.isDevToolsOpened()) return;
+    activeViews.forEach((v) => {
+      if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
+        v.webContents.closeDevTools();
+      }
+    });
+    view.webContents.openDevTools({ mode: "undocked" });
+  });
+  electron.ipcMain.on("view.closeDevTools", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.closeDevTools();
+    }
+  });
+  electron.ipcMain.on("view.hideDevTools", () => {
+    activeViews.forEach((v) => {
+      if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
+    });
+  });
+  electron.ipcMain.on("view.zoomIn", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      const level = view.webContents.getZoomLevel();
+      view.webContents.setZoomLevel(level + 0.5);
+    }
+  });
+  electron.ipcMain.on("view.zoomOut", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      const level = view.webContents.getZoomLevel();
+      view.webContents.setZoomLevel(level - 0.5);
+    }
+  });
+  electron.ipcMain.on("view.zoomReset", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setZoomLevel(0);
+    }
+  });
+  electron.ipcMain.on("view.sleep", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setBackgroundThrottling(true);
+      view.webContents.setAudioMuted(true);
+      view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
+    }
+  });
+  electron.ipcMain.on("view.wake", (_event, paneId, bounds) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setBackgroundThrottling(false);
+      view.webContents.setAudioMuted(false);
+      if (bounds) view.setBounds(bounds);
+    }
+  });
+  electron.ipcMain.removeAllListeners("auth:trigger-autofill");
+  electron.ipcMain.on("auth:trigger-autofill", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.send("auth:trigger-autofill");
+    }
+  });
+}
+function initViewManager() {
+  initCaptureIpc();
+  initViewIpc();
+}
+const patchedSessions = /* @__PURE__ */ new WeakSet();
+function configureSessionSecurity(session) {
+  if (!session || patchedSessions.has(session) || session.__securityHeadersBound) return;
+  patchedSessions.add(session);
+  session.__securityHeadersBound = true;
+  const chromeVersion = process.versions.chrome || "144.0.7550.80";
+  const clientHints = generateClientHints(chromeVersion, "Windows");
+  session.setUserAgent(DEFAULT_DESKTOP_UA);
+  configureWebAuthnForSession(session);
+  session.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    if (permission === "private-network-access" || permission === "local-network-access") {
+      if (!requestingOrigin) return false;
+      try {
+        const url = new URL(requestingOrigin);
+        return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1" || url.hostname === "[::1]";
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  });
+  let flushTimer = null;
+  try {
+    session.cookies.on("changed", (_event, cookie, cause) => {
+      if ((cause === "explicit" || cause === "overwrite") && (["d", "SID"].includes(cookie.name) || ["token", "session", "auth"].some((k) => cookie.name.includes(k)))) {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          session.cookies.flushStore().catch(() => {
+          });
+        }, 2e3);
+      }
+    });
+  } catch {
+  }
+  session.webRequest.onBeforeSendHeaders(
+    { urls: ["https://*/*", "http://*/*"] },
+    (details, callback) => {
+      const url = details.url || "";
+      if (url.startsWith("http://localhost:") || url.startsWith("http://127.0.0.1:") || url.startsWith("ws://")) {
+        callback({ cancel: false });
+        return;
+      }
+      if (details.method === "OPTIONS") {
+        callback({ cancel: false });
+        return;
+      }
+      if (!details.url || !details.url.startsWith("http://") && !details.url.startsWith("https://")) {
+        callback({ cancel: false });
+        return;
+      }
+      try {
+        const sanitized = sanitizeRequestHeaders(
+          details.requestHeaders || {},
+          clientHints,
+          details.url
+        );
+        callback({ requestHeaders: sanitized });
+      } catch {
+        callback({ requestHeaders: details.requestHeaders || {} });
+      }
+    }
+  );
+}
+function initSessionSecurity() {
+  if (electron.session.defaultSession) {
+    configureSessionSecurity(electron.session.defaultSession);
+  }
+  electron.app.on("session-created", (session) => {
+    configureSessionSecurity(session);
+  });
+  electron.app.on("browser-window-created", (_, popupWin) => {
+    const isAppWindow = popupWin === global.mainWindow || popupWin === global.overlayWindow || popupWin.__isMainWindow || popupWin.__isTearWindow;
+    if (isAppWindow) return;
+    popupWin.webContents.on("will-navigate", (_e, navUrl) => {
+      if (isGoogleAuthUrl(navUrl)) {
+        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      }
+    });
+    popupWin.webContents.on("did-navigate", (_e, navUrl) => {
+      if (isGoogleAuthUrl(navUrl)) {
+        popupWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      }
+      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+      const lower = (navUrl || "").toLowerCase();
+      if (lower.startsWith("apposition://") || lower.includes("localhost:5174/#oauth-success")) {
+        setTimeout(() => {
+          if (!popupWin.isDestroyed()) popupWin.close();
+        }, 300);
+      }
+    });
+    popupWin.webContents.on("dom-ready", () => {
+      popupWin.webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
+  });
+  electron.app.on("web-contents-created", (_, webContents) => {
+    configureSessionSecurity(webContents.session);
+    webContents.on("dom-ready", () => {
+      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
+    webContents.on("did-navigate", () => {
+      webContents.executeJavaScript(ANTI_DETECTION_SCRIPT).catch(() => {
+      });
+    });
+    webContents.on("focus", () => {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("view.focus-wc", webContents.id);
+      }
+    });
+    webContents.on("context-menu", (_event, params) => {
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("view.context-menu-native", {
+          webContentsId: webContents.id,
+          x: params.x,
+          y: params.y,
+          linkURL: params.linkURL || "",
+          srcURL: params.srcURL || "",
+          pageURL: params.pageURL || (typeof webContents.getURL === "function" ? webContents.getURL() : ""),
+          selectionText: params.selectionText || ""
+        });
+      }
+    });
+    handleWebContentsWindowOpen(webContents);
+    webContents.on("render-process-gone", (_event, details) => {
+      if (details.reason === "oom" || details.reason === "crashed" || details.reason === "killed") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("pane.crashed", {
+            webContentsId: webContents.id,
+            reason: details.reason,
+            exitCode: details.exitCode
+          });
+        }
+      }
+    });
+  });
+  electron.app.on("child-process-gone", (_event, details) => {
+    if (details.type === "GPU" && details.reason === "crashed") {
+      console.warn("GPU Process Crashed. Electron will restart it.");
+    }
+  });
+}
+const DEFAULT_CACHE_QUOTA_BYTES = 250 * 1024 * 1024;
+class StorageQuotaService {
+  isPruning = false;
+  async prunePartition(partition, thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
+    try {
+      const ses = electron.session.fromPartition(partition);
+      const cacheSize = await ses.getCacheSize();
+      if (cacheSize > thresholdBytes) {
+        logger.info(
+          `[StorageQuota] Partition ${partition} cache (${Math.round(cacheSize / 1024 / 1024)}MB) exceeds quota (${Math.round(thresholdBytes / 1024 / 1024)}MB). Pruning transient caches...`
+        );
+        await ses.clearStorageData({
+          storages: ["shadercache", "serviceworkers", "cachestorage"],
+          quotas: ["temporary"]
+        });
+        await ses.clearCache();
+        logger.info(`[StorageQuota] Partition ${partition} cache successfully pruned.`);
+        return true;
+      }
+    } catch (err) {
+      logger.debug(`[StorageQuota] Failed to prune partition ${partition}:`, err);
+    }
+    return false;
+  }
+  async pruneAllPartitions(thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
+    if (this.isPruning) return;
+    this.isPruning = true;
+    try {
+      const profiles = getProfiles() || [];
+      const partitions = /* @__PURE__ */ new Set([
+        "persist:main",
+        ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+      ]);
+      for (const part of partitions) {
+        await this.prunePartition(part, thresholdBytes);
+      }
+    } finally {
+      this.isPruning = false;
+    }
+  }
+  initBackgroundPruner() {
+    setInterval(() => {
+      this.pruneAllPartitions().catch(() => {
+      });
+    }, 15 * 60 * 1e3);
+  }
+}
+const storageQuota = new StorageQuotaService();
+async function flushAllSessions() {
+  try {
+    const profiles = getProfiles();
+    const partitions = /* @__PURE__ */ new Set([
+      "persist:main",
+      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+    ]);
+    for (const part of partitions) {
+      try {
+        const ses = electron.session.fromPartition(part);
+        await ses.flushStorageData();
+      } catch (err) {
+        logger.debug(`Flush failed for ${part}`, err);
+      }
+    }
+    await electron.session.defaultSession.flushStorageData();
+  } catch (e) {
+    logger.warn("Failed to flush session storage", e);
+  }
+}
+const monitoredPartitions = /* @__PURE__ */ new Set();
+function monitorPartitionCookies(partition) {
+  if (monitoredPartitions.has(partition)) return;
+  monitoredPartitions.add(partition);
+  try {
+    const ses = electron.session.fromPartition(partition);
+    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
+      if (!removed && cause === "explicit") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("partition.cookie-changed", {
+            partition,
+            domain: cookie.domain,
+            name: cookie.name
+          });
+        }
+      }
+    });
+  } catch (e) {
+    logger.debug(`Failed to attach cookie monitor for ${partition}`, e);
+  }
+}
+function initSessionPersistenceHooks() {
+  try {
+    electron.powerMonitor.on("suspend", async () => {
+      logger.info("System suspending - flushing session data to disk");
+      await flushAllSessions();
+      await storageQuota.pruneAllPartitions();
+    });
+    storageQuota.initBackgroundPruner();
+    electron.powerMonitor.on("resume", () => {
+      logger.info("System resumed from suspend - verifying app overlay and views");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        syncAppOverlayBounds(global.mainWindow);
+      }
+      const overlay = global.appOverlayView;
+      if (overlay && !overlay.webContents.isDestroyed()) {
+        if (overlay.webContents.isCrashed()) {
+          logger.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
+          overlay.webContents.reload();
+        } else {
+          overlay.webContents.send("app:env", { nativeViews: true });
+        }
+      }
+    });
+    setInterval(() => {
+      flushAllSessions().catch(() => {
+      });
+    }, 6e4);
+    monitorPartitionCookies("persist:main");
+    const profiles = getProfiles();
+    for (const p of profiles) {
+      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
+      monitorPartitionCookies(part);
+    }
+  } catch (e) {
+    logger.warn("PowerMonitor / Cookie monitor hook unavailable", e);
+  }
+}
+function initNetworkOptimizer() {
+  const defaultSession = electron.session.defaultSession;
+  electron.ipcMain.on("net.prefetch", (_, rawUrl) => {
+    if (!rawUrl) return;
+    try {
+      let hostname = rawUrl;
+      if (rawUrl.startsWith("http://") || rawUrl.startsWith("https://")) {
+        hostname = new URL(rawUrl).hostname;
+      }
+      if (hostname && typeof defaultSession.resolveHost === "function") {
+        defaultSession.resolveHost(hostname).catch(() => {
+        });
+      }
+    } catch {
+    }
+  });
+}
+const handleDeepLink = (url) => {
+  if (!url || !url.startsWith("apposition://")) return;
+  const attribution = parseAttributionFromUrl(url);
+  if (attribution) {
+    setMemoryAttribution(attribution);
+    saveAttribution(attribution);
+  }
+  const deepPath = url.replace("apposition://", "");
+  if (deepPath.startsWith("workspace/")) {
+    const workspaceId = deepPath.replace("workspace/", "");
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send("app.deep-link.workspace", workspaceId);
+    }
+  } else if (deepPath.startsWith("oauth-callback") || deepPath.startsWith("auth/callback")) {
+    try {
+      const urlObj = new URL(url);
+      const token = urlObj.searchParams.get("token");
+      const code = urlObj.searchParams.get("code");
+      const state = urlObj.searchParams.get("state");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.deep-link.oauth", {
+          token,
+          code,
+          state,
+          rawUrl: url
+        });
+      }
+    } catch (e) {
+      console.error("Failed to parse oauth callback url", e);
+    }
+  }
+};
+function initDeepLinking() {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      electron.app.setAsDefaultProtocolClient("apposition", process.execPath, [
+        path__namespace.resolve(process.argv[1])
+      ]);
+    }
+  } else {
+    electron.app.setAsDefaultProtocolClient("apposition");
+  }
+  const gotTheLock2 = electron.app.requestSingleInstanceLock();
+  if (!gotTheLock2) {
+    electron.app.quit();
+  } else {
+    electron.app.on("second-instance", (_event, commandLine) => {
+      if (global.mainWindow) {
+        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+        global.mainWindow.focus();
+      }
+      const url = commandLine.find((arg) => arg.startsWith("apposition://"));
+      handleDeepLink(url);
+    });
+    electron.app.on("open-url", (event, url) => {
+      event.preventDefault();
+      if (global.mainWindow) {
+        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+        global.mainWindow.focus();
+      }
+      handleDeepLink(url);
+    });
+  }
+}
+const updateLogger = createLogger("UPDATE");
+const REPO_URL = "https://github.com/jvondev/apposition-releases";
+let updateManagerInstance = null;
+function getUpdateManager() {
+  if (!electron.app.isPackaged) return null;
+  if (!updateManagerInstance) {
+    try {
+      updateManagerInstance = new velopack.UpdateManager(new velopack.GithubSource(REPO_URL, void 0, false));
+    } catch (err) {
+      updateLogger.warn("Failed to instantiate Velopack UpdateManager", err?.message || err);
+    }
+  }
+  return updateManagerInstance;
+}
+function initAutoUpdater() {
+  const um = getUpdateManager();
+  electron.ipcMain.handle("updater.check", async () => {
+    if (!um) {
+      return { success: true, isDev: true, message: "Updates disabled in unpacked dev mode." };
+    }
+    try {
+      const updateInfo = await um.checkForUpdatesAsync();
+      if (!updateInfo) {
+        return { success: true, hasUpdate: false };
+      }
+      return {
+        success: true,
+        hasUpdate: true,
+        version: updateInfo.TargetFullRelease?.Version || "latest"
+      };
+    } catch (err) {
+      updateLogger.warn("Manual update check failed", err?.message || err);
+      return { success: false, error: err?.message || String(err) };
+    }
+  });
+  if (!electron.app.isPackaged || !um) return;
+  setTimeout(() => {
+    runBackgroundUpdateCheck(um);
+  }, 5e3);
+}
+async function runBackgroundUpdateCheck(um) {
+  try {
+    updateLogger.info("Checking for application updates via Velopack...");
+    const updateInfo = await um.checkForUpdatesAsync();
+    if (!updateInfo) {
+      updateLogger.info("Application is up to date.");
+      return;
+    }
+    const targetVersion = updateInfo.TargetFullRelease?.Version || "latest";
+    const isDelta = updateInfo.DeltasToTarget && updateInfo.DeltasToTarget.length > 0;
+    updateLogger.info(
+      `Update found (${targetVersion}, ${isDelta ? "binary delta" : "full package"}). Downloading...`
+    );
+    await um.downloadUpdateAsync(updateInfo);
+    updateLogger.info(`Update ${targetVersion} downloaded and verified.`);
+    const result = await electron.dialog.showMessageBox({
+      type: "info",
+      title: "Update Ready",
+      message: `Apposition ${targetVersion} has been downloaded.`,
+      detail: "Restart Apposition now to apply the update.",
+      buttons: ["Restart and Update", "Later"],
+      defaultId: 0,
+      cancelId: 1
+    });
+    if (result.response === 0) {
+      updateLogger.info("Applying update and restarting application...");
+      um.waitExitThenApplyUpdate(updateInfo, false, true);
+      electron.app.quit();
+    }
+  } catch (err) {
+    updateLogger.warn("Background auto-update check skipped", err?.message || err);
+  }
+}
+function initDiagnosticsIpc(logFilePath, isDevMode2) {
+  electron.ipcMain.handle("diagnostics.getHealth", () => {
+    return {
+      uptimeSec: Math.floor(process.uptime()),
+      ...runtimeState.getState()
+    };
+  });
+  electron.ipcMain.handle("diagnostics.getErrors", () => {
+    return flightRecorder.getErrors();
+  });
+  electron.ipcMain.handle("diagnostics.getFlightRecorder", () => {
+    return flightRecorder.snapshot();
+  });
+  electron.ipcMain.handle("diagnostics.toggleGuestNoise", () => {
+    const next = !runtimeState.getState().guestLogsMuted;
+    runtimeState.setGuestLogsMuted(next);
+    return next;
+  });
+  electron.ipcMain.handle("diagnostics.openLogFile", () => {
+    electron.shell.openPath(logFilePath);
+  });
+}
+function initDevCommandBridge(isDevMode2) {
+  if (!isDevMode2) return;
+  const cmdPath = path.join(electron.app.getPath("userData"), ".apposition-command.json");
+  const checkCommand = () => {
+    if (!fs.existsSync(cmdPath)) return;
+    try {
+      const data = JSON.parse(fs.readFileSync(cmdPath, "utf8"));
+      fs.unlinkSync(cmdPath);
+      if (data.command === "reload") {
+        if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+          logger.info("Soft reloading app overlay view via dev command");
+          global.appOverlayView.webContents.reload();
+        } else if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          logger.info("Soft reloading main window via dev command");
+          global.mainWindow.webContents.reload();
+        }
+      } else if (data.command === "quit") {
+        logger.info("Gracefully quitting via dev command");
+        electron.app.quit();
+      }
+    } catch {
+    }
+  };
+  try {
+    const dir = electron.app.getPath("userData");
+    fs.watch(dir, (_event, filename) => {
+      if (filename && filename.includes(".apposition-command.json")) {
+        checkCommand();
+      }
+    });
+  } catch {
+    setInterval(checkCommand, 1e3);
+  }
+}
+const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
+let isDev = true;
+function initMainSentry(isDevMode2) {
+  isDev = isDevMode2;
+  if (isDevMode2) {
+    return;
+  }
+  try {
+    Sentry__namespace.init({
+      dsn: SENTRY_DSN,
+      release: `apposition@${electron.app.getVersion()}`,
+      environment: "production",
+      enabled: !isDevMode2,
+      sampleRate: 1,
+      beforeSend(event) {
+        if (isDevMode2) return null;
+        return sanitizeSentryEvent(event);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize Sentry in main process", err);
+  }
+}
+function captureMainException(err, context) {
+  if (isDev) return;
+  try {
+    Sentry__namespace.captureException(err, {
+      extra: context
+    });
+  } catch {
+  }
+}
+let overlayPreloadPath = "";
+const transientSpecs = /* @__PURE__ */ new Map();
+function initOverlayProjector(getWindow, preloadPath = "") {
+  overlayPreloadPath = preloadPath;
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.SHOW, (_e, specs) => {
+    const win = getWindow();
+    if (!win) return;
+    const desired = new Set(specs.map((s) => s.id));
+    const state = composers.get(win.id);
+    if (!state) return;
+    let specsForWin = transientSpecs.get(win.id);
+    if (!specsForWin) {
+      specsForWin = /* @__PURE__ */ new Map();
+      transientSpecs.set(win.id, specsForWin);
+    }
+    for (const spec of specs) {
+      const view = ensureView(win, state, spec);
+      positionView(view, spec);
+      view.setVisible(true);
+      specsForWin.set(spec.id, spec);
+    }
+    for (const id of [...state.stack.transientOrder]) {
+      if (!desired.has(id)) {
+        hideView(win, state, id);
+        specsForWin.delete(id);
+      }
+    }
+  });
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.INTENT, (_e, intent) => {
+    global.appOverlayView?.webContents.send("app:overlay-intent", intent);
+  });
+}
+function ensureView(win, state, spec) {
+  const existing = state.views.get(spec.id);
+  if (existing && !existing.webContents.isDestroyed()) return existing;
+  const view = new electron.WebContentsView({
+    webPreferences: {
+      preload: overlayPreloadPath,
+      contextIsolation: true,
+      sandbox: false,
+      partition: "persist:overlay"
+    }
+  });
+  view.webContents.loadURL("app://overlay/index.html");
+  setTransientOverlay(win, spec.id, view);
+  return view;
+}
+function positionView(view, spec) {
+  const rect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
+  if (isValidPhysicalRect(rect)) view.setBounds(rect);
+}
+function hideView(win, state, id) {
+  hideTransient(win, id);
+  const v = state.views.get(id);
+  if (v) {
+    v.setVisible(false);
+    v.setBounds({ x: -1e4, y: -1e4, width: 1, height: 1 });
+  }
+}
+function repositionTransientOverlays(win) {
+  const specsForWin = transientSpecs.get(win.id);
+  if (!specsForWin) return;
+  const state = composers.get(win.id);
+  if (!state) return;
+  for (const [id, spec] of specsForWin) {
+    const v = state.views.get(id);
+    if (v) {
+      positionView(v, spec);
+      v.setVisible(true);
+    }
+  }
 }
 function unregisterAppShortcuts() {
   electron.globalShortcut.unregisterAll();
@@ -7394,6 +7685,91 @@ function initCatalogService() {
     }
   );
 }
+const t = server.initTRPC.create();
+const router = t.router;
+const publicProcedure = t.procedure;
+t.middleware;
+const createCallerFactory = t.createCallerFactory;
+const mediaRouter = router({
+  getActiveSources: publicProcedure.query(() => {
+    return Array.from(audioMatrix["sources"]?.values?.() || []);
+  }),
+  toggleMute: publicProcedure.input(zod.z.object({ paneId: zod.z.string() })).mutation(({ input }) => {
+    return audioMatrix.toggleMute(input.paneId);
+  }),
+  setMuted: publicProcedure.input(zod.z.object({ paneId: zod.z.string(), muted: zod.z.boolean() })).mutation(({ input }) => {
+    audioMatrix.setAudioMuted(input.paneId, input.muted);
+    return { success: true };
+  }),
+  toggleMasterMute: publicProcedure.mutation(() => {
+    return audioMatrix.toggleMasterMute();
+  })
+});
+const screenRouter = router({
+  getAvailableSources: publicProcedure.query(async () => {
+    return screenCaptureService.getAvailableSources();
+  }),
+  selectSource: publicProcedure.input(
+    zod.z.object({
+      requestId: zod.z.string(),
+      sourceId: zod.z.string().nullable()
+    })
+  ).mutation(async ({ input }) => {
+    const success = await screenCaptureService.selectSource(
+      input.requestId,
+      input.sourceId
+    );
+    return { success };
+  }),
+  cancelRequest: publicProcedure.input(zod.z.object({ requestId: zod.z.string() })).mutation(({ input }) => {
+    screenCaptureService.cancelRequest(input.requestId);
+    return { success: true };
+  })
+});
+const hibernationRouter = router({
+  wakePane: publicProcedure.input(zod.z.object({ paneId: zod.z.string() })).mutation(({ input }) => {
+    const success = hibernationEngine.wakePane(input.paneId);
+    return { success };
+  }),
+  hibernatePane: publicProcedure.input(zod.z.object({ paneId: zod.z.string() })).mutation(async ({ input }) => {
+    const success = await hibernationEngine.hibernatePane(input.paneId);
+    return { success };
+  }),
+  getHibernatedStatus: publicProcedure.input(zod.z.object({ paneId: zod.z.string() })).query(({ input }) => {
+    const desc = viewRegistry.getHibernated(input.paneId);
+    return { isHibernated: Boolean(desc), descriptor: desc || null };
+  })
+});
+const appRouter = router({
+  media: mediaRouter,
+  screen: screenRouter,
+  hibernation: hibernationRouter
+});
+const createCaller = createCallerFactory(appRouter);
+function initTrpcIpcAdapter() {
+  const caller = createCaller({});
+  electron.ipcMain.handle(
+    "trpc-ipc",
+    async (_event, req) => {
+      try {
+        const parts = req.path.split(".");
+        let target = caller;
+        for (const part of parts) {
+          if (!target || typeof target !== "object") break;
+          target = target[part];
+        }
+        if (typeof target !== "function") {
+          throw new Error(`Invalid tRPC procedure path: ${req.path}`);
+        }
+        const data = await target(req.input);
+        return { ok: true, data };
+      } catch (err) {
+        console.error(`[tRPC-IPC error at ${req.path}]:`, err);
+        return { ok: false, error: err?.message || String(err) };
+      }
+    }
+  );
+}
 velopack.VelopackApp.build().run();
 applyBrowserSwitches(electron.app);
 const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
@@ -7452,6 +7828,9 @@ if (!gotTheLock) {
     initPointerForwarder(() => global.mainWindow || void 0);
     initOverlayProjector(() => global.mainWindow || void 0, resolvePreload("index.js"));
     initPaneLifecycle(() => global.mainWindow || void 0);
+    initTrpcIpcAdapter();
+    screenCaptureService.init();
+    hibernationEngine.init();
     let isShown = false;
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
@@ -7520,6 +7899,7 @@ if (!gotTheLock) {
     }
   });
   electron.app.on("will-quit", () => {
+    hibernationEngine.stop();
     try {
       destroyAllViews();
     } catch {

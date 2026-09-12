@@ -2052,63 +2052,328 @@ const performTransition = async (type, direction, callback) => {
     }
   }
 };
-const safeSetLocal = (key, val) => {
-  if (window.IS_WEB_DEMO) return;
-  try {
-    localStorage.setItem(key, val);
-  } catch (e) {
+function isNodeReachable(tree, targetId) {
+  if (!tree.rootId || !tree.nodes) return false;
+  if (tree.rootId === targetId) return true;
+  const visited = /* @__PURE__ */ new Set();
+  const queue = [tree.rootId];
+  while (queue.length > 0) {
+    const curr = queue.shift();
+    if (!curr || visited.has(curr)) continue;
+    visited.add(curr);
+    if (curr === targetId) return true;
+    const node = tree.nodes[curr];
+    if (node && node.type === "split") {
+      if (node.a) queue.push(node.a);
+      if (node.b) queue.push(node.b);
+    }
   }
-};
-const safeGetLocal = (key) => {
-  if (window.IS_WEB_DEMO) return null;
-  try {
-    return localStorage.getItem(key);
-  } catch (e) {
+  return false;
+}
+function resolveActivePaneFallback(tree, preferredId) {
+  if (!tree.rootId || !tree.nodes || Object.keys(tree.nodes).length === 0) {
     return null;
   }
-};
-function useWorkspaceState() {
-  const [workspaces, setWorkspaces] = createSignal([]);
-  const [activeWorkspace, setActiveWorkspace] = createSignal("");
-  const [tabs, setTabs] = createSignal([]);
-  const [activeTabId, setActiveTabId] = createSignal("");
-  const [activePaneId, setActivePaneId] = createSignal("pane_initial");
-  const [isCreatingWorkspace, setIsCreatingWorkspace] = createSignal(false);
-  const [closedItemsStack, setClosedItemsStack] = createSignal([]);
-  const getParent = (id) => {
-    for (const key in layoutStore.nodes) {
-      const node = layoutStore.nodes[key];
-      if (node && node.type === "split") {
-        if (node.a === id) return [node, "a"];
-        if (node.b === id) return [node, "b"];
-      }
+  if (preferredId && tree.nodes[preferredId]?.type === "pane") {
+    if (isNodeReachable(tree, preferredId)) {
+      return preferredId;
+    }
+  }
+  const visited = /* @__PURE__ */ new Set();
+  const findFirstReachable = (nodeId) => {
+    if (!nodeId || visited.has(nodeId)) return null;
+    visited.add(nodeId);
+    const node = tree.nodes[nodeId];
+    if (!node) return null;
+    if (node.type === "pane") return nodeId;
+    if (node.type === "split") {
+      return findFirstReachable(node.a) || findFirstReachable(node.b);
     }
     return null;
   };
-  const findFirstPane = (id) => {
-    const node = layoutStore.nodes[id];
-    if (!node) return id;
-    if (node.type === "pane") return id;
-    return findFirstPane(node.a);
+  const found = findFirstReachable(tree.rootId);
+  if (found) return found;
+  for (const [id, node] of Object.entries(tree.nodes)) {
+    if (node && node.type === "pane") return id;
+  }
+  return null;
+}
+class FocusQuarantine {
+  state = { status: "IDLE" };
+  settlingTimer = null;
+  tokenCounter = 0;
+  acquire(paneId, owner) {
+    this.clearSettlingTimer();
+    const leaseToken = `lease_${++this.tokenCounter}_${Date.now()}`;
+    this.state = {
+      status: "QUARANTINED",
+      leaseToken,
+      leasedPaneId: paneId,
+      owner,
+      acquiredAt: Date.now()
+    };
+    return leaseToken;
+  }
+  isQuarantined() {
+    if (this.state.status === "SETTLING" && Date.now() >= this.state.settlingUntil) {
+      this.state = { status: "IDLE" };
+      this.clearSettlingTimer();
+      return false;
+    }
+    return this.state.status !== "IDLE";
+  }
+  getStatus() {
+    if (this.state.status === "SETTLING" && Date.now() >= this.state.settlingUntil) {
+      this.state = { status: "IDLE" };
+      this.clearSettlingTimer();
+    }
+    return this.state.status;
+  }
+  getLeasedPaneId() {
+    if (this.state.status === "QUARANTINED") return this.state.leasedPaneId;
+    if (this.state.status === "SETTLING") return this.state.targetPaneId;
+    return null;
+  }
+  validateAdmission(targetPaneId, options = {}) {
+    const status = this.getStatus();
+    if (status === "IDLE") {
+      return { allowed: true, effectivePaneId: targetPaneId };
+    }
+    if (this.state.status === "QUARANTINED") {
+      if (options.leaseToken === this.state.leaseToken) {
+        return { allowed: true, effectivePaneId: targetPaneId };
+      }
+      if (targetPaneId === this.state.leasedPaneId) {
+        return { allowed: true, effectivePaneId: targetPaneId };
+      }
+      return {
+        allowed: false,
+        effectivePaneId: this.state.leasedPaneId,
+        reason: "quarantined_by_lease"
+      };
+    }
+    if (this.state.status === "SETTLING") {
+      if (targetPaneId === this.state.targetPaneId) {
+        return { allowed: true, effectivePaneId: targetPaneId };
+      }
+      if (options.source === "click" || options.force) {
+        this.state = { status: "IDLE" };
+        this.clearSettlingTimer();
+        return { allowed: true, effectivePaneId: targetPaneId };
+      }
+      return {
+        allowed: false,
+        effectivePaneId: this.state.targetPaneId,
+        reason: "suppressed_during_settling"
+      };
+    }
+    return { allowed: true, effectivePaneId: targetPaneId };
+  }
+  commitLease(token, targetPaneId, settlingMs = 150) {
+    if (this.state.status === "QUARANTINED" && this.state.leaseToken !== token && token !== "") {
+      return false;
+    }
+    this.clearSettlingTimer();
+    const settlingUntil = Date.now() + settlingMs;
+    this.state = { status: "SETTLING", targetPaneId, settlingUntil };
+    if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+      this.settlingTimer = window.setTimeout(() => {
+        if (this.state.status === "SETTLING") {
+          this.state = { status: "IDLE" };
+        }
+        this.settlingTimer = null;
+      }, settlingMs);
+    }
+    return true;
+  }
+  releaseLease(token) {
+    if (this.state.status === "QUARANTINED") {
+      if (!token || this.state.leaseToken === token) {
+        this.state = { status: "IDLE" };
+        this.clearSettlingTimer();
+      }
+    } else if (this.state.status === "SETTLING") {
+      this.state = { status: "IDLE" };
+      this.clearSettlingTimer();
+    }
+  }
+  clearSettlingTimer() {
+    if (this.settlingTimer !== null && typeof window !== "undefined") {
+      clearTimeout(this.settlingTimer);
+      this.settlingTimer = null;
+    }
+  }
+  reset() {
+    this.clearSettlingTimer();
+    this.state = { status: "IDLE" };
+  }
+}
+class FocusCircuitBreaker {
+  history = [];
+  trippedUntil = 0;
+  windowMs;
+  maxTransitions;
+  cooldownMs;
+  constructor(windowMs = 150, maxTransitions = 2, cooldownMs = 100) {
+    this.windowMs = windowMs;
+    this.maxTransitions = maxTransitions;
+    this.cooldownMs = cooldownMs;
+  }
+  checkAdmission(targetPaneId, currentPaneId, source) {
+    if (!targetPaneId || targetPaneId === currentPaneId) {
+      return { allow: true };
+    }
+    const now = Date.now();
+    if (source === "click") {
+      this.history.push({ paneId: targetPaneId, timestamp: now, source });
+      this.prune(now);
+      return { allow: true };
+    }
+    if (now < this.trippedUntil) {
+      return { allow: false, reason: "circuit_breaker_tripped" };
+    }
+    this.prune(now);
+    let transitions = 0;
+    for (let i = 1; i < this.history.length; i++) {
+      if (this.history[i].paneId !== this.history[i - 1].paneId) {
+        transitions++;
+      }
+    }
+    if (this.history.length > 0 && this.history[this.history.length - 1].paneId !== targetPaneId) {
+      transitions++;
+    }
+    if (transitions > this.maxTransitions) {
+      this.trippedUntil = now + this.cooldownMs;
+      console.warn(
+        `[FocusCircuitBreaker] Flapping detected: attempted switch to '${targetPaneId}' (source: ${source}). Clamped to '${currentPaneId}'.`
+      );
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        window.dispatchEvent(
+          new CustomEvent("app:focus-flapping-clamped", {
+            detail: { targetPaneId, currentPaneId, source }
+          })
+        );
+      }
+      return { allow: false, reason: "flapping_velocity_exceeded" };
+    }
+    this.history.push({ paneId: targetPaneId, timestamp: now, source });
+    return { allow: true };
+  }
+  prune(now) {
+    const cutoff = now - this.windowMs;
+    while (this.history.length > 0 && this.history[0].timestamp < cutoff) {
+      this.history.shift();
+    }
+  }
+  reset() {
+    this.history = [];
+    this.trippedUntil = 0;
+  }
+}
+let currentFocusToken = 0;
+function cancelPendingDomFocus() {
+  currentFocusToken++;
+}
+function forceDomFocus(elementId, maxAttempts = 20, interval = 40, options = {}) {
+  const token = ++currentFocusToken;
+  let attempts = 0;
+  const cancel = () => {
+    if (currentFocusToken === token) {
+      currentFocusToken++;
+    }
   };
-  return {
-    workspaces,
-    setWorkspaces,
-    activeWorkspace,
-    setActiveWorkspace,
-    tabs,
-    setTabs,
-    activeTabId,
-    setActiveTabId,
-    activePaneId,
-    setActivePaneId,
-    isCreatingWorkspace,
-    setIsCreatingWorkspace,
-    closedItemsStack,
-    setClosedItemsStack,
-    getParent,
-    findFirstPane
+  const attemptFocus = () => {
+    if (currentFocusToken !== token) {
+      options.onAbort?.();
+      return;
+    }
+    if (options.respectExistingInputFocus) {
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== document.documentElement && (active.closest?.("[data-store-modal]") || active.closest?.("[data-modal]") || active.closest?.("[role='dialog']") || active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
+        options.onAbort?.();
+        return;
+      }
+    }
+    const input = document.getElementById(elementId);
+    if (!input) {
+      if (attempts < maxAttempts) {
+        attempts++;
+        setTimeout(attemptFocus, interval);
+      } else {
+        options.onAbort?.();
+      }
+      return;
+    }
+    if (input.inert || input.closest?.("[inert]")) {
+      options.onAbort?.();
+      return;
+    }
+    if (document.activeElement === input) {
+      options.onSuccess?.(input);
+      return;
+    }
+    window.api?.focusOverlayWindow?.();
+    input.focus({ preventScroll: options.preventScroll ?? true });
+    if (document.activeElement !== input) {
+      if (attempts < maxAttempts) {
+        attempts++;
+        setTimeout(attemptFocus, interval);
+      } else {
+        options.onAbort?.();
+      }
+    } else {
+      options.onSuccess?.(input);
+    }
   };
+  attemptFocus();
+  return cancel;
+}
+function isElementInModal(el) {
+  if (!el) return false;
+  return Boolean(
+    el.closest?.("[data-store-modal]") || el.closest?.("[data-modal]") || el.closest?.("[role='dialog']")
+  );
+}
+function hasActiveModalInPane(paneId) {
+  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
+  if (paneEl && (paneEl.querySelector("[data-store-modal]") || paneEl.querySelector("[role='dialog']"))) {
+    return true;
+  }
+  return false;
+}
+function findPaneModalInput(paneId) {
+  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
+  if (!paneEl) return null;
+  return paneEl.querySelector(
+    "[data-store-modal] input, [role='dialog'] input"
+  ) || null;
+}
+function routePaneFocus(paneId, options = {}) {
+  window.api?.focusOverlayWindow?.();
+  if (options.skipDomFocus) {
+    return;
+  }
+  const activeEl = document.activeElement;
+  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
+  if (activeEl && activeEl !== document.body && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") && (paneEl ? paneEl.contains(activeEl) : true)) {
+    cancelPendingDomFocus();
+    return;
+  }
+  const isAlreadyFocusedInPaneInput = Boolean(
+    activeEl && activeEl !== document.body && activeEl !== document.documentElement && (paneEl ? paneEl.contains(activeEl) : true) && isElementInModal(activeEl)
+  );
+  const hasModal = hasActiveModalInPane(paneId);
+  if (isAlreadyFocusedInPaneInput || hasModal) {
+    cancelPendingDomFocus();
+    const modalInput = findPaneModalInput(paneId);
+    if (modalInput && activeEl !== modalInput && !modalInput.contains(activeEl)) {
+      modalInput.focus({ preventScroll: true });
+    }
+    return;
+  }
+  forceDomFocus(`apposition-command-bar-${paneId}`, 20, 40, {
+    respectExistingInputFocus: true
+  });
 }
 function asPaneId(id) {
   return id;
@@ -2145,6 +2410,72 @@ function getReachableNodeIds(tree) {
   };
   traverse(tree.rootId);
   return reachable;
+}
+function findOrphanedNodeIds(tree) {
+  const reachable = getReachableNodeIds(tree);
+  const allIds = Object.keys(tree.nodes);
+  return allIds.filter((id) => !reachable.has(id));
+}
+function validateTreeInvariants(tree) {
+  const errors = [];
+  if (!tree.rootId) {
+    if (Object.keys(tree.nodes).length > 0) {
+      errors.push("Root ID is null but nodes collection is non-empty");
+    }
+    return { isValid: errors.length === 0, errors };
+  }
+  const rootNode = tree.nodes[tree.rootId];
+  if (!rootNode) {
+    errors.push(
+      `Root node '${tree.rootId}' does not exist in nodes dictionary`
+    );
+    return { isValid: false, errors };
+  }
+  const reachable = getReachableNodeIds(tree);
+  const orphaned = findOrphanedNodeIds(tree);
+  if (orphaned.length > 0) {
+    errors.push(
+      `Found ${orphaned.length} orphaned nodes: ${orphaned.join(", ")}`
+    );
+  }
+  const panes = [];
+  const splits = [];
+  for (const id of reachable) {
+    const node = tree.nodes[id];
+    if (!node) {
+      errors.push(`Reachable node '${id}' is missing from tree`);
+      continue;
+    }
+    if (node.type === "pane") {
+      panes.push(node);
+    } else if (node.type === "split") {
+      splits.push(node);
+      if (!node.a || !tree.nodes[node.a]) {
+        errors.push(
+          `Split '${node.id}' references missing child 'a' (${node.a})`
+        );
+      }
+      if (!node.b || !tree.nodes[node.b]) {
+        errors.push(
+          `Split '${node.id}' references missing child 'b' (${node.b})`
+        );
+      }
+      if (node.ratio < 0.049 || node.ratio > 0.951) {
+        errors.push(
+          `Split '${node.id}' has out-of-bounds ratio: ${node.ratio}`
+        );
+      }
+    }
+  }
+  if (panes.length > 0) {
+    const expectedSplits = panes.length - 1;
+    if (splits.length !== expectedSplits) {
+      errors.push(
+        `Invariant violated: Expected ${expectedSplits} splits for ${panes.length} panes, found ${splits.length}`
+      );
+    }
+  }
+  return { isValid: errors.length === 0, errors };
 }
 function cleanTree(tree) {
   const reachable = getReachableNodeIds(tree);
@@ -2366,12 +2697,14 @@ function movePaneSplit(tree, sourcePaneId, targetPaneId, direction, ratio = 0.5)
   if (!sourceNode || !targetNode || sourceNode.type !== "pane") {
     return [tree, []];
   }
+  const isTargetRoot = tree.rootId === targetPaneId;
   const detachedTree = detachPaneFromTree(tree, sourcePaneId);
-  const targetNodeInDetached = detachedTree.nodes[targetPaneId];
+  const effectiveTargetId = isTargetRoot && detachedTree.rootId ? detachedTree.rootId : targetPaneId;
+  const targetNodeInDetached = detachedTree.nodes[effectiveTargetId];
   if (!targetNodeInDetached) return [tree, []];
   return splitPane(
     detachedTree,
-    targetPaneId,
+    effectiveTargetId,
     sourceNode,
     direction,
     ratio
@@ -2834,6 +3167,28 @@ function resolveInputUrl(val) {
       }
     }
   }
+  const DIRECT_APP_SHORTCUTS = {
+    gmail: "https://mail.google.com",
+    notion: "https://notion.so",
+    figma: "https://figma.com",
+    linear: "https://linear.app",
+    slack: "https://app.slack.com",
+    spotify: "https://open.spotify.com",
+    canva: "https://canva.com",
+    youtube: "https://youtube.com",
+    github: "https://github.com",
+    gitlab: "https://gitlab.com",
+    chatgpt: "https://chatgpt.com",
+    claude: "https://claude.ai",
+    gemini: "https://gemini.google.com",
+    discord: "https://discord.com",
+    reddit: "https://reddit.com",
+    trello: "https://trello.com",
+    timestripe: "https://timestripe.com"
+  };
+  if (DIRECT_APP_SHORTCUTS[lower]) {
+    return DIRECT_APP_SHORTCUTS[lower];
+  }
   if (isDirectDomainPattern(trimmed)) {
     return `https://${trimmed}`;
   }
@@ -3289,111 +3644,6 @@ function calculateSpatialRailLayout(input, customConfig) {
     isOmniFocused: Boolean(input.isOmniFocused)
   };
 }
-let currentFocusToken = 0;
-function cancelPendingDomFocus() {
-  currentFocusToken++;
-}
-function forceDomFocus(elementId, maxAttempts = 20, interval = 40, options = {}) {
-  const token = ++currentFocusToken;
-  let attempts = 0;
-  const cancel = () => {
-    if (currentFocusToken === token) {
-      currentFocusToken++;
-    }
-  };
-  const attemptFocus = () => {
-    if (currentFocusToken !== token) {
-      options.onAbort?.();
-      return;
-    }
-    if (options.respectExistingInputFocus) {
-      const active = document.activeElement;
-      if (active && active !== document.body && active !== document.documentElement && (active.closest?.("[data-store-modal]") || active.closest?.("[data-modal]") || active.closest?.("[role='dialog']") || active.tagName === "INPUT" || active.tagName === "TEXTAREA")) {
-        options.onAbort?.();
-        return;
-      }
-    }
-    const input = document.getElementById(elementId);
-    if (!input) {
-      if (attempts < maxAttempts) {
-        attempts++;
-        setTimeout(attemptFocus, interval);
-      } else {
-        options.onAbort?.();
-      }
-      return;
-    }
-    if (input.inert || input.closest?.("[inert]")) {
-      options.onAbort?.();
-      return;
-    }
-    if (document.activeElement === input) {
-      options.onSuccess?.(input);
-      return;
-    }
-    window.api?.focusOverlayWindow?.();
-    input.focus({ preventScroll: options.preventScroll ?? true });
-    if (document.activeElement !== input) {
-      if (attempts < maxAttempts) {
-        attempts++;
-        setTimeout(attemptFocus, interval);
-      } else {
-        options.onAbort?.();
-      }
-    } else {
-      options.onSuccess?.(input);
-    }
-  };
-  attemptFocus();
-  return cancel;
-}
-function isElementInModal(el) {
-  if (!el) return false;
-  return Boolean(
-    el.closest?.("[data-store-modal]") || el.closest?.("[data-modal]") || el.closest?.("[role='dialog']")
-  );
-}
-function hasActiveModalInPane(paneId) {
-  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
-  if (paneEl && (paneEl.querySelector("[data-store-modal]") || paneEl.querySelector("[role='dialog']"))) {
-    return true;
-  }
-  return false;
-}
-function findPaneModalInput(paneId) {
-  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
-  if (!paneEl) return null;
-  return paneEl.querySelector(
-    "[data-store-modal] input, [role='dialog'] input"
-  ) || null;
-}
-function routePaneFocus(paneId, options = {}) {
-  window.api?.focusOverlayWindow?.();
-  if (options.skipDomFocus) {
-    return;
-  }
-  const activeEl = document.activeElement;
-  const paneEl = document.getElementById(`pane-${paneId}`) || document.querySelector(`[data-pane-id="${paneId}"]`);
-  if (activeEl && activeEl !== document.body && (activeEl.tagName === "INPUT" || activeEl.tagName === "TEXTAREA") && (paneEl ? paneEl.contains(activeEl) : true)) {
-    cancelPendingDomFocus();
-    return;
-  }
-  const isAlreadyFocusedInPaneInput = Boolean(
-    activeEl && activeEl !== document.body && activeEl !== document.documentElement && (paneEl ? paneEl.contains(activeEl) : true) && isElementInModal(activeEl)
-  );
-  const hasModal = hasActiveModalInPane(paneId);
-  if (isAlreadyFocusedInPaneInput || hasModal) {
-    cancelPendingDomFocus();
-    const modalInput = findPaneModalInput(paneId);
-    if (modalInput && activeEl !== modalInput && !modalInput.contains(activeEl)) {
-      modalInput.focus({ preventScroll: true });
-    }
-    return;
-  }
-  forceDomFocus(`apposition-command-bar-${paneId}`, 20, 40, {
-    respectExistingInputFocus: true
-  });
-}
 function findSpatialTargetPane(activeId, dir, treeOverride) {
   const tree = {
     rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
@@ -3434,81 +3684,251 @@ function findSpatialTargetPane(activeId, dir, treeOverride) {
   }
   return bestId;
 }
-class ActivePaneCoordinator {
-  activePaneSignal;
-  lastActivationTimestamp = 0;
-  lastActivationSource = "dom";
+class ActivePaneAuthority {
+  activeIdSignal;
+  currentRecord;
+  isEnforcing = false;
+  quarantine = new FocusQuarantine();
+  circuitBreaker = new FocusCircuitBreaker();
   constructor() {
-    this.activePaneSignal = createSignal("pane_initial");
+    this.activeIdSignal = createSignal("pane_initial");
+    this.currentRecord = {
+      paneId: "pane_initial",
+      previousPaneId: null,
+      lastActivationTime: Date.now(),
+      source: "dom"
+    };
   }
   get activePaneId() {
-    return this.activePaneSignal[0];
+    return this.activeIdSignal[0];
   }
   getActivePaneId() {
-    return this.activePaneSignal[0]();
+    return this.activeIdSignal[0]();
   }
-  getLastActivationTime() {
-    return this.lastActivationTimestamp;
+  getLastRecord() {
+    return this.currentRecord;
   }
-  getLastActivationSource() {
-    return this.lastActivationSource;
-  }
-  isRecentActivation(windowMs = 400) {
-    return Date.now() - this.lastActivationTimestamp < windowMs;
-  }
-  setActivePaneId(id) {
-    const nextId = typeof id === "function" ? id(this.getActivePaneId()) : id;
-    this.activatePane(nextId, { source: "dom" });
-  }
-  activatePane(paneId, options = {}) {
-    if (!paneId) return;
-    const source = options.source || "dom";
-    this.lastActivationTimestamp = Date.now();
-    this.lastActivationSource = source;
-    window.activePaneIdForFocus = paneId;
-    this.activePaneSignal[1](paneId);
-    const node = layoutStore.nodes[paneId];
-    if (!node || node.type !== "pane") return;
-    const isWebOrTerminal = Boolean(node.url || node.paneType === "terminal");
-    if (isWebOrTerminal) {
-      try {
-        window.api?.viewFocus?.(paneId);
-        const webviewEl = document.getElementById(`webview-${paneId}`);
-        if (webviewEl && typeof webviewEl.focus === "function") {
-          webviewEl.focus({ preventScroll: true });
-        }
-      } catch {
-      }
-    } else {
-      if (!window.IS_WEB_DEMO) {
-        routePaneFocus(paneId, options);
-      }
+  acquireLease(paneId, owner) {
+    const token = this.quarantine.acquire(paneId, owner);
+    if (this.getActivePaneId() !== paneId) {
+      this.setActivePane(paneId, { source: "dnd_drop", force: true, leaseToken: token });
     }
-    window.dispatchEvent(
-      new CustomEvent("app:pane-focus-changed", { detail: { paneId } })
-    );
+    return token;
   }
-  syncActivePane(paneId) {
-    if (!paneId) return;
-    this.lastActivationTimestamp = Date.now();
-    this.lastActivationSource = "dom";
-    window.activePaneIdForFocus = paneId;
-    this.activePaneSignal[1](paneId);
-    window.api?.focusOverlayWindow?.();
-    window.dispatchEvent(
-      new CustomEvent("app:pane-focus-changed", { detail: { paneId } })
+  commitLease(token, targetPaneId, options = {}) {
+    this.quarantine.commitLease(token, targetPaneId);
+    return this.setActivePane(targetPaneId, { ...options, force: true, leaseToken: token });
+  }
+  releaseLease(token) {
+    this.quarantine.releaseLease(token);
+  }
+  isQuarantined() {
+    return this.quarantine.isQuarantined();
+  }
+  getQuarantineStatus() {
+    return this.quarantine.getStatus();
+  }
+  resetQuarantine() {
+    this.quarantine.reset();
+    this.circuitBreaker.reset();
+  }
+  setActivePane(paneId, options = {}) {
+    if (this.isEnforcing) return paneId;
+    this.isEnforcing = true;
+    try {
+      const source = options.source || "dom";
+      const prevId = this.getActivePaneId();
+      const admission = this.quarantine.validateAdmission(paneId || "", options);
+      if (!admission.allowed) {
+        return admission.effectivePaneId || prevId;
+      }
+      const candidateId = admission.effectivePaneId;
+      const targetId = resolveActivePaneFallback(
+        { rootId: layoutStore.rootId, nodes: layoutStore.nodes },
+        candidateId
+      );
+      if (!targetId) {
+        window.activePaneIdForFocus = "";
+        this.activeIdSignal[1]("");
+        return null;
+      }
+      if (targetId === prevId && !options.force) {
+        return targetId;
+      }
+      if (!options.force && !options.leaseToken) {
+        const breakerCheck = this.circuitBreaker.checkAdmission(targetId, prevId, source);
+        if (!breakerCheck.allow) {
+          return prevId;
+        }
+      }
+      this.currentRecord = {
+        paneId: targetId,
+        previousPaneId: prevId,
+        lastActivationTime: Date.now(),
+        source
+      };
+      window.activePaneIdForFocus = targetId;
+      this.activeIdSignal[1](targetId);
+      const node = layoutStore.nodes[targetId];
+      if (node && node.type === "pane" && !options.skipNativeFocus) {
+        const isWebOrTerminal = Boolean(node.url || node.paneType === "terminal");
+        if (isWebOrTerminal) {
+          try {
+            if (window.api?.isNativeViews) {
+              window.api?.view?.focus?.(targetId);
+            } else {
+              window.api?.viewFocus?.(targetId);
+              const webviewEl = document.getElementById(`webview-${targetId}`);
+              if (webviewEl && typeof webviewEl.focus === "function") {
+                webviewEl.focus({ preventScroll: true });
+              }
+            }
+          } catch {
+          }
+        } else if (!window.IS_WEB_DEMO) {
+          routePaneFocus(targetId, options);
+        }
+      }
+      window.dispatchEvent(
+        new CustomEvent("app:pane-focus-changed", {
+          detail: { paneId: targetId, previousPaneId: prevId, source }
+        })
+      );
+      return targetId;
+    } finally {
+      this.isEnforcing = false;
+    }
+  }
+  autoRecoverActivePane() {
+    const current = this.getActivePaneId();
+    const fallback = resolveActivePaneFallback(
+      { rootId: layoutStore.rootId, nodes: layoutStore.nodes },
+      current
     );
+    if (fallback !== current) {
+      return this.setActivePane(fallback, { source: "fallback", force: true });
+    }
+    return current;
   }
   navigateSpatial(dir) {
     const currentId = this.getActivePaneId();
     if (!currentId) return null;
     const targetId = findSpatialTargetPane(currentId, dir);
     if (!targetId) return null;
-    this.activatePane(targetId, { source: "shortcut" });
+    this.setActivePane(targetId, { source: "shortcut" });
     if (layoutStore.maximizedPaneId) {
       setLayoutStore("maximizedPaneId", targetId);
     }
     return targetId;
+  }
+}
+const activePaneAuthority = new ActivePaneAuthority();
+const safeSetLocal = (key, val) => {
+  if (window.IS_WEB_DEMO) return;
+  try {
+    localStorage.setItem(key, val);
+  } catch (e) {
+  }
+};
+const safeGetLocal = (key) => {
+  if (window.IS_WEB_DEMO) return null;
+  try {
+    return localStorage.getItem(key);
+  } catch (e) {
+    return null;
+  }
+};
+function useWorkspaceState() {
+  const [workspaces, setWorkspaces] = createSignal([]);
+  const [activeWorkspace, setActiveWorkspace] = createSignal("");
+  const [tabs, setTabs] = createSignal([]);
+  const [activeTabId, setActiveTabId] = createSignal("");
+  const activePaneId = activePaneAuthority.activePaneId;
+  const setActivePaneId = (id) => {
+    const nextId = typeof id === "function" ? id(activePaneAuthority.getActivePaneId()) : id;
+    activePaneAuthority.setActivePane(nextId, { source: "dom" });
+  };
+  const [isCreatingWorkspace, setIsCreatingWorkspace] = createSignal(false);
+  const [closedItemsStack, setClosedItemsStack] = createSignal([]);
+  const getParent = (id) => {
+    for (const key in layoutStore.nodes) {
+      const node = layoutStore.nodes[key];
+      if (node && node.type === "split") {
+        if (node.a === id) return [node, "a"];
+        if (node.b === id) return [node, "b"];
+      }
+    }
+    return null;
+  };
+  const findFirstPane = (id) => {
+    const node = layoutStore.nodes[id];
+    if (!node) return id;
+    if (node.type === "pane") return id;
+    return findFirstPane(node.a);
+  };
+  return {
+    workspaces,
+    setWorkspaces,
+    activeWorkspace,
+    setActiveWorkspace,
+    tabs,
+    setTabs,
+    activeTabId,
+    setActiveTabId,
+    activePaneId,
+    setActivePaneId,
+    isCreatingWorkspace,
+    setIsCreatingWorkspace,
+    closedItemsStack,
+    setClosedItemsStack,
+    getParent,
+    findFirstPane
+  };
+}
+class ActivePaneCoordinator {
+  get activePaneId() {
+    return activePaneAuthority.activePaneId;
+  }
+  getActivePaneId() {
+    return activePaneAuthority.getActivePaneId();
+  }
+  getLastActivationTime() {
+    return activePaneAuthority.getLastRecord().lastActivationTime;
+  }
+  getLastActivationSource() {
+    return activePaneAuthority.getLastRecord().source;
+  }
+  isRecentActivation(windowMs = 400) {
+    return Date.now() - this.getLastActivationTime() < windowMs;
+  }
+  setActivePaneId(id) {
+    const nextId = typeof id === "function" ? id(this.getActivePaneId()) : id;
+    activePaneAuthority.setActivePane(nextId, { source: "dom" });
+  }
+  activatePane(paneId, options = {}) {
+    activePaneAuthority.setActivePane(paneId, options);
+  }
+  setActivePane(paneId, options = {}) {
+    activePaneAuthority.setActivePane(paneId, options);
+  }
+  syncActivePane(paneId) {
+    activePaneAuthority.setActivePane(paneId, { source: "dom", force: true });
+    window.api?.focusOverlayWindow?.();
+  }
+  navigateSpatial(dir) {
+    return activePaneAuthority.navigateSpatial(dir);
+  }
+  acquireLease(paneId, owner) {
+    return activePaneAuthority.acquireLease(paneId, owner);
+  }
+  commitLease(token, targetPaneId, options = {}) {
+    return activePaneAuthority.commitLease(token, targetPaneId, options);
+  }
+  releaseLease(token) {
+    activePaneAuthority.releaseLease(token);
+  }
+  isQuarantined() {
+    return activePaneAuthority.isQuarantined();
   }
 }
 const activePaneCoordinator = new ActivePaneCoordinator();
@@ -3624,6 +4044,183 @@ class EffectRunner {
     return geometry;
   }
 }
+const [mediaStreamStore, setMediaStreamStore] = createStore({});
+const silenceGraceTimers = /* @__PURE__ */ new Map();
+const GRACE_PERIOD_MS = 6e4;
+function registerDynamicStatus(paneId, status, node) {
+  if (!paneId) return;
+  const existingTimer = silenceGraceTimers.get(paneId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    silenceGraceTimers.delete(paneId);
+  }
+  const isPlaying = Boolean(status.isPlaying);
+  const isAudible = Boolean(status.isAudible);
+  const hasLiveStream = Boolean(status.hasLiveStream);
+  const hasWebRtc = Boolean(status.hasWebRtc);
+  const isActive = isPlaying || isAudible || hasLiveStream || hasWebRtc;
+  let category = "NONE";
+  if (hasLiveStream) category = "LIVE_STREAM";
+  else if (hasWebRtc) category = "CALL";
+  else if (isAudible) category = "AUDIO";
+  else if (isPlaying) category = "VIDEO";
+  if (isActive) {
+    setMediaStreamStore(paneId, (prev) => ({
+      paneId,
+      category,
+      isPlaying,
+      isAudible,
+      hasLiveStream,
+      hasWebRtc,
+      lastActiveAt: Date.now(),
+      node: node || prev?.node
+    }));
+  } else {
+    setMediaStreamStore(paneId, (prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        isPlaying: false,
+        isAudible: false,
+        hasLiveStream: false,
+        hasWebRtc: false
+      };
+    });
+    const timer = window.setTimeout(() => {
+      silenceGraceTimers.delete(paneId);
+      setMediaStreamStore(paneId, (prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          category: "NONE"
+        };
+      });
+    }, GRACE_PERIOD_MS);
+    silenceGraceTimers.set(paneId, timer);
+  }
+}
+function isPaneProtectedMedia(paneId) {
+  if (!paneId) return false;
+  const info = mediaStreamStore[paneId];
+  if (!info) return false;
+  if (info.category !== "NONE" || info.isPlaying || info.isAudible || info.hasLiveStream || info.hasWebRtc) {
+    return true;
+  }
+  if (silenceGraceTimers.has(paneId)) return true;
+  return false;
+}
+function getAllProtectedMediaPaneIds() {
+  return Object.values(mediaStreamStore).filter((info) => info && (info.category !== "NONE" || info.isPlaying || info.isAudible || info.hasLiveStream || info.hasWebRtc || silenceGraceTimers.has(info.paneId))).map((info) => info.paneId);
+}
+function unregisterMediaPane(paneId) {
+  if (!paneId) return;
+  const timer = silenceGraceTimers.get(paneId);
+  if (timer) {
+    clearTimeout(timer);
+    silenceGraceTimers.delete(paneId);
+  }
+  setMediaStreamStore((prev) => {
+    if (!prev[paneId]) return prev;
+    const next = { ...prev };
+    delete next[paneId];
+    return next;
+  });
+}
+class AirspaceCoordinator {
+  panes = /* @__PURE__ */ new Map();
+  scheduledRaf = 0;
+  register(paneId, getContainerRef, getUrl) {
+    this.panes.set(paneId, { paneId, getContainerRef, getUrl });
+    this.syncPane(paneId);
+    return () => {
+      this.panes.delete(paneId);
+    };
+  }
+  computeBounds(paneId) {
+    const reg = this.panes.get(paneId);
+    if (!reg) return { x: -1e4, y: -1e4, width: 100, height: 100 };
+    const isOtherMaximized = Boolean(
+      layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== paneId
+    );
+    const url = reg.getUrl?.();
+    if (isOtherMaximized || !url || url.trim().length === 0 || url === "about:blank") {
+      return { x: -1e4, y: -1e4, width: 100, height: 100 };
+    }
+    const target = document.getElementById(`pane-container-${paneId}`);
+    if (!target) {
+      return { x: -1e4, y: -1e4, width: 100, height: 100 };
+    }
+    if (layoutStore.maximizedPaneId === paneId) {
+      const mainCanvas = document.getElementById("main-canvas");
+      if (mainCanvas) {
+        const cr = mainCanvas.getBoundingClientRect();
+        if (cr.width > 24 && cr.height > 24) {
+          return {
+            x: Math.round(cr.left + 12),
+            y: Math.round(cr.top + 12),
+            width: Math.round(cr.width - 24),
+            height: Math.round(cr.height - 24)
+          };
+        }
+      }
+    }
+    const tr = target.getBoundingClientRect();
+    if (tr.width > 0 && tr.height > 0 && tr.left >= -50 && tr.top >= -50) {
+      return {
+        x: Math.round(tr.left),
+        y: Math.round(tr.top),
+        width: Math.round(tr.width),
+        height: Math.round(tr.height)
+      };
+    }
+    const container = reg.getContainerRef();
+    if (!container) {
+      return { x: -1e4, y: -1e4, width: 100, height: 100 };
+    }
+    const r = container.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && r.left >= -50 && r.top >= -50) {
+      return {
+        x: Math.round(r.left),
+        y: Math.round(r.top),
+        width: Math.round(r.width),
+        height: Math.round(r.height)
+      };
+    }
+    return { x: -1e4, y: -1e4, width: 100, height: 100 };
+  }
+  syncPane(paneId) {
+    const bounds = this.computeBounds(paneId);
+    window.api?.view?.setBounds(paneId, bounds);
+  }
+  syncAll() {
+    for (const paneId of this.panes.keys()) {
+      this.syncPane(paneId);
+    }
+  }
+  scheduleSync() {
+    if (this.scheduledRaf) return;
+    this.scheduledRaf = requestAnimationFrame(() => {
+      this.scheduledRaf = 0;
+      this.syncAll();
+    });
+  }
+  /**
+   * Triple-stage settlement flush executing after any transition, resize, or tab change.
+   * Guarantees zero stuck offscreen native WebContentsViews.
+   */
+  scheduleSettlementSync() {
+    this.scheduleSync();
+    setTimeout(() => this.scheduleSync(), 50);
+    setTimeout(() => this.scheduleSync(), 350);
+  }
+}
+const airspaceCoordinator = new AirspaceCoordinator();
+if (typeof window !== "undefined") {
+  window.addEventListener("resize", () => airspaceCoordinator.scheduleSync());
+  window.addEventListener("app:layout-sync", () => airspaceCoordinator.scheduleSettlementSync());
+  window.addEventListener("pane.force-sync-bounds", () => airspaceCoordinator.scheduleSettlementSync());
+  window.addEventListener("pane-target-mounted", () => airspaceCoordinator.scheduleSettlementSync());
+}
 const COMMUNICATION_DOMAINS = [
   "meet.google.com",
   "zoom.us",
@@ -3634,12 +4231,37 @@ const COMMUNICATION_DOMAINS = [
   "gather.town",
   "huddle"
 ];
+const PERSISTENT_MEDIA_DOMAINS = [
+  "youtube.com",
+  "youtu.be",
+  "music.youtube.com",
+  "spotify.com",
+  "soundcloud.com",
+  "twitch.tv",
+  "netflix.com",
+  "disneyplus.com",
+  "primevideo.com",
+  "hulu.com",
+  "music.apple.com",
+  "podcasts.apple.com",
+  "vimeo.com",
+  "bilibili.com",
+  "dailymotion.com",
+  "pandora.com",
+  "deezer.com",
+  "tidal.com"
+];
 const [criticalPanesStore, setCriticalPanesStore] = createStore({});
 const audioSilenceTimers = /* @__PURE__ */ new Map();
 function isCommunicationUrl(url) {
   if (!url) return false;
   const lower = url.toLowerCase();
   return COMMUNICATION_DOMAINS.some((domain) => lower.includes(domain));
+}
+function isPersistentMediaUrl(url) {
+  if (!url) return false;
+  const lower = url.toLowerCase();
+  return PERSISTENT_MEDIA_DOMAINS.some((domain) => lower.includes(domain));
 }
 function updatePaneAudio(paneId, isPlaying, node) {
   if (!paneId) return;
@@ -3668,7 +4290,7 @@ function updatePaneAudio(paneId, isPlaying, node) {
         const next = { ...prev, isPlaying: false, reason: "NONE" };
         return next;
       });
-    }, 1e4);
+    }, 6e4);
     audioSilenceTimers.set(paneId, timer);
   }
 }
@@ -3696,10 +4318,49 @@ function unregisterCriticalPane(paneId) {
     return next;
   });
 }
+function isPaneCritical(paneId, url) {
+  if (!paneId) return false;
+  if (isPaneProtectedMedia(paneId)) return true;
+  const targetUrl = url || layoutStore.nodes[paneId]?.url;
+  if (isCommunicationUrl(targetUrl) || isPersistentMediaUrl(targetUrl)) return true;
+  const info = criticalPanesStore[paneId];
+  if (!info) return false;
+  return info.reason !== "NONE" || Boolean(info.isPlaying) || Boolean(info.isInCall);
+}
 function getAllCriticalPanes() {
-  return Object.values(criticalPanesStore).filter(
+  const fromStore = Object.values(criticalPanesStore).filter(
     (info) => info && (info.reason !== "NONE" || info.isPlaying || info.isInCall)
   );
+  const mediaIds = getAllProtectedMediaPaneIds();
+  const knownIds = new Set(fromStore.map((s) => s.paneId));
+  for (const mid of mediaIds) {
+    if (!knownIds.has(mid)) {
+      knownIds.add(mid);
+      fromStore.push({
+        paneId: mid,
+        reason: "AUDIO_STREAM",
+        isPlaying: true
+      });
+    }
+  }
+  for (const [nodeId, node] of Object.entries(layoutStore.nodes)) {
+    if (node && node.type === "pane") {
+      const u = node.url;
+      if (isCommunicationUrl(u) || isPersistentMediaUrl(u)) {
+        if (!knownIds.has(nodeId)) {
+          knownIds.add(nodeId);
+          fromStore.push({
+            paneId: nodeId,
+            reason: isCommunicationUrl(u) ? "LIVE_MEETING" : "AUDIO_STREAM",
+            isInCall: isCommunicationUrl(u),
+            isPlaying: isPersistentMediaUrl(u),
+            node
+          });
+        }
+      }
+    }
+  }
+  return fromStore;
 }
 const [tabPoolStore, setTabPoolStore] = createStore(
   createInitialTabPoolState()
@@ -3734,6 +4395,9 @@ function markPaneCallActive(paneId, isInCall) {
   if (!paneId) return;
   dispatchPool({ type: "SET_PANE_CALL", paneId, isInCall });
 }
+function isPaneProtected(paneId, url) {
+  return Boolean(tabPoolStore.audiblePanes[paneId]) || Boolean(tabPoolStore.callActivePanes[paneId]) || isPaneProtectedMedia(paneId) || isPaneCritical(paneId, url);
+}
 function getPaneFromPool(paneId) {
   for (const panes of Object.values(tabPoolStore.tabPanes)) {
     if (panes && panes[paneId]) return panes[paneId];
@@ -3742,7 +4406,9 @@ function getPaneFromPool(paneId) {
 }
 function computeRenderedPoolPaneIds(activePaneIds, isColdStart = false) {
   const criticalIds = getAllCriticalPanes().map((c) => c.paneId).filter(Boolean);
-  return computeRenderedPaneIds(tabPoolStore, activePaneIds, criticalIds, isColdStart);
+  const mediaIds = getAllProtectedMediaPaneIds();
+  const allProtected = Array.from(/* @__PURE__ */ new Set([...criticalIds, ...mediaIds]));
+  return computeRenderedPaneIds(tabPoolStore, activePaneIds, allProtected, isColdStart);
 }
 const [mediaStateStore, setMediaStateStore] = createStore({});
 function setMediaTimestamp(paneId, url, currentTime, duration) {
@@ -3802,19 +4468,42 @@ function initMediaTimestampTracker() {
 }
 const [workspaceTabHostStore, setWorkspaceTabHostStore] = createStore({
   persistedNodes: {},
-  activeWorkspaceId: ""
+  activeWorkspaceId: "",
+  paneWorkspaceMap: {},
+  tabWorkspaceMap: {}
 });
 function registerWorkspaceNodes(wsId, nodes) {
   if (!nodes) return;
   for (const [id, node] of Object.entries(nodes)) {
     if (node && node.type === "pane") {
       setWorkspaceTabHostStore("persistedNodes", id, node);
+      if (wsId) {
+        setWorkspaceTabHostStore("paneWorkspaceMap", id, wsId);
+      }
     }
   }
+}
+function registerTabWorkspace(tabId, wsId) {
+  if (!tabId || !wsId) return;
+  setWorkspaceTabHostStore("tabWorkspaceMap", tabId, wsId);
+}
+function getPaneWorkspaceId(paneId) {
+  if (!paneId) return void 0;
+  return workspaceTabHostStore.paneWorkspaceMap[paneId];
+}
+function getTabWorkspaceId(tabId) {
+  if (!tabId) return void 0;
+  return workspaceTabHostStore.tabWorkspaceMap[tabId];
 }
 function unregisterWorkspacePane(paneId) {
   if (!paneId) return;
   setWorkspaceTabHostStore("persistedNodes", (prev) => {
+    if (!prev[paneId]) return prev;
+    const next = { ...prev };
+    delete next[paneId];
+    return next;
+  });
+  setWorkspaceTabHostStore("paneWorkspaceMap", (prev) => {
     if (!prev[paneId]) return prev;
     const next = { ...prev };
     delete next[paneId];
@@ -4040,7 +4729,10 @@ function useLayoutMutator(state, dependencies) {
       data
     });
     setLayoutStore("nodes", reconcile(nextTree.nodes));
-    if (data.profileId) window.api?.viewUpdateProfile?.(paneId, data.profileId);
+    if (data.profileId) {
+      window.api?.viewUpdateProfile?.(paneId, data.profileId);
+      window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    }
     saveLayout(true);
   };
   const handleOpenUrlInPaneOrTab = async (url) => {
@@ -4379,54 +5071,9 @@ function useWorkspaceLayout(state, dependencies) {
     reopenClosedTab
   };
 }
-function useWorkspaceNavigation(state, dependencies) {
+function createDemoNavigation(state, dependencies) {
   const { activeWorkspace, setActiveWorkspace, setTabs, setActiveTabId } = state;
-  const { loadNodesForTab, safeSetLocal: safeSetLocal2, safeGetLocal: safeGetLocal2, performTransition: performTransition2 } = dependencies;
-  const handleCreateTab = async (rect, initialUrl, initialLayoutState, title) => {
-    if (!activeWorkspace()) return;
-    if (!layoutStore.isPremium && state.tabs().length >= 3) {
-      if (rect)
-        setLayoutStore("paywallAnchor", {
-          top: rect.top,
-          left: rect.left,
-          width: rect.width,
-          height: rect.height
-        });
-      setLayoutStore("paywallReason", "tab");
-      setLayoutStore("showPaywall", true);
-      return;
-    }
-    const id = generateUniqueId("tab");
-    await window.api?.createTab(id, activeWorkspace(), title || "New Tab");
-    if (initialLayoutState) {
-      await window.api?.saveTabLayout(id, initialLayoutState);
-    }
-    window.api?.focusMainWindow?.();
-    const t = await window.api?.getTabs(activeWorkspace());
-    setTabs(t || []);
-    await performTransition2("horizontal", "forward", async () => {
-      setActiveTabId(id);
-      safeSetLocal2(`last_active_tab_${activeWorkspace()}`, id);
-      await loadNodesForTab(id, t, initialUrl);
-    });
-  };
-  const fastSwitchWorkspace = async (wsId) => {
-    setLayoutStore("isTransitioning", true);
-    window.api?.viewHideAll?.();
-    window.api?.focusMainWindow?.();
-    setActiveWorkspace(wsId);
-    safeSetLocal2("last_active_workspace", wsId);
-    let t = await window.api?.getTabs(wsId).catch(() => []);
-    if (state.activeWorkspace() !== wsId) return;
-    setTabs(t || []);
-    if (t && t.length > 0) {
-      const lastTab = safeGetLocal2(`last_active_tab_${wsId}`);
-      const activeTab = t.find((tab) => tab.id === lastTab) ? lastTab : t[0].id;
-      setActiveTabId(activeTab);
-      await loadNodesForTab(activeTab, t);
-    }
-    setLayoutStore("isTransitioning", false);
-  };
+  const { loadNodesForTab, safeSetLocal: safeSetLocal2, performTransition: performTransition2 } = dependencies;
   const demoTransitionTo = async (targetWsId, targetTabId, mockTabs, direction) => {
     if (activeWorkspace() === targetWsId && state.activeTabId() === targetTabId) {
       return;
@@ -4507,50 +5154,6 @@ function useWorkspaceNavigation(state, dependencies) {
       focusPane(state.activePaneId(), layoutStore.nodes[state.activePaneId()]);
     }
   };
-  const switchWorkspace = async (wsId, direction) => {
-    setLayoutStore("isTransitioning", true);
-    if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
-    window.api?.viewHideAll?.();
-    window.api?.focusMainWindow?.();
-    await performTransition2("vertical", direction, async () => {
-      setActiveWorkspace(wsId);
-      safeSetLocal2("last_active_workspace", wsId);
-      let t = await window.api?.getTabs(wsId).catch(() => []);
-      if (state.activeWorkspace() !== wsId) return;
-      setTabs(t || []);
-      if (t && t.length > 0) {
-        const lastTab = safeGetLocal2(`last_active_tab_${wsId}`);
-        const activeTab = t.find((tab) => tab.id === lastTab) ? lastTab : t[0].id;
-        setActiveTabId(activeTab);
-        await loadNodesForTab(activeTab, t);
-      }
-    });
-    setLayoutStore("isTransitioning", false);
-    focusPane(state.activePaneId(), layoutStore.nodes[state.activePaneId()]);
-    if (window.IS_WEB_DEMO) {
-      window.dispatchEvent(
-        new CustomEvent("demo:workspace-switched", { detail: wsId })
-      );
-    }
-  };
-  const switchTab = async (tabId, direction) => {
-    setLayoutStore("isTransitioning", true);
-    if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
-    window.api?.viewHideAll?.();
-    window.api?.focusMainWindow?.();
-    await performTransition2("horizontal", direction, async () => {
-      setActiveTabId(tabId);
-      safeSetLocal2(`last_active_tab_${activeWorkspace()}`, tabId);
-      await loadNodesForTab(tabId);
-    });
-    setLayoutStore("isTransitioning", false);
-    focusPane(state.activePaneId(), layoutStore.nodes[state.activePaneId()]);
-    if (window.IS_WEB_DEMO) {
-      window.dispatchEvent(
-        new CustomEvent("demo:tab-switched", { detail: tabId })
-      );
-    }
-  };
   if (typeof window !== "undefined") {
     const handleSelectTabEvent = (e) => {
       const detail = e.detail;
@@ -4568,6 +5171,130 @@ function useWorkspaceNavigation(state, dependencies) {
       window.removeEventListener("app:select-tab", handleSelectTabEvent);
     });
   }
+  return {
+    demoTransitionTo,
+    demoSwitchTo
+  };
+}
+function useWorkspaceNavigation(state, dependencies) {
+  const { activeWorkspace, setActiveWorkspace, setTabs, setActiveTabId } = state;
+  const { loadNodesForTab, saveLayout, safeSetLocal: safeSetLocal2, safeGetLocal: safeGetLocal2, performTransition: performTransition2 } = dependencies;
+  const { demoTransitionTo, demoSwitchTo } = createDemoNavigation(state, dependencies);
+  const handleCreateTab = async (rect, initialUrl, initialLayoutState, title) => {
+    if (!activeWorkspace()) return;
+    saveLayout?.(true);
+    if (!layoutStore.isPremium && state.tabs().length >= 3) {
+      if (rect)
+        setLayoutStore("paywallAnchor", {
+          top: rect.top,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height
+        });
+      setLayoutStore("paywallReason", "tab");
+      setLayoutStore("showPaywall", true);
+      return;
+    }
+    const id = generateUniqueId("tab");
+    await window.api?.createTab(id, activeWorkspace(), title || "New Tab");
+    if (initialLayoutState) {
+      await window.api?.saveTabLayout(id, initialLayoutState);
+    }
+    window.api?.focusMainWindow?.();
+    const t = await window.api?.getTabs(activeWorkspace());
+    if (t) {
+      for (const tab of t) {
+        if (tab.id && tab.workspace_id) registerTabWorkspace(tab.id, tab.workspace_id);
+      }
+    }
+    setTabs(t || []);
+    setLayoutStore("isTransitioning", true);
+    await performTransition2("horizontal", "forward", async () => {
+      setActiveTabId(id);
+      safeSetLocal2(`last_active_tab_${activeWorkspace()}`, id);
+      await loadNodesForTab(id, t, initialUrl);
+    });
+    setLayoutStore("isTransitioning", false);
+    airspaceCoordinator.scheduleSettlementSync();
+  };
+  const fastSwitchWorkspace = async (wsId) => {
+    if (wsId === state.activeWorkspace()) return;
+    saveLayout?.(true);
+    setLayoutStore("isTransitioning", true);
+    window.api?.focusMainWindow?.();
+    setActiveWorkspace(wsId);
+    safeSetLocal2("last_active_workspace", wsId);
+    let t = await window.api?.getTabs(wsId).catch(() => []);
+    if (state.activeWorkspace() !== wsId) return;
+    if (t) {
+      for (const tab of t) {
+        if (tab.id && tab.workspace_id) registerTabWorkspace(tab.id, tab.workspace_id);
+      }
+    }
+    setTabs(t || []);
+    if (t && t.length > 0) {
+      const lastTab = safeGetLocal2(`last_active_tab_${wsId}`);
+      const activeTab = t.find((tab) => tab.id === lastTab) ? lastTab : t[0].id;
+      setActiveTabId(activeTab);
+      await loadNodesForTab(activeTab, t);
+    }
+    setLayoutStore("isTransitioning", false);
+    airspaceCoordinator.scheduleSettlementSync();
+  };
+  const switchWorkspace = async (wsId, direction) => {
+    if (wsId === activeWorkspace()) return;
+    saveLayout?.(true);
+    setLayoutStore("isTransitioning", true);
+    if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
+    window.api?.focusMainWindow?.();
+    await performTransition2("vertical", direction, async () => {
+      setActiveWorkspace(wsId);
+      safeSetLocal2("last_active_workspace", wsId);
+      let t = await window.api?.getTabs(wsId).catch(() => []);
+      if (state.activeWorkspace() !== wsId) return;
+      setTabs(t || []);
+      if (t && t.length > 0) {
+        const lastTab = safeGetLocal2(`last_active_tab_${wsId}`);
+        const activeTab = t.find((tab) => tab.id === lastTab) ? lastTab : t[0].id;
+        setActiveTabId(activeTab);
+        await loadNodesForTab(activeTab, t);
+      }
+    });
+    setLayoutStore("isTransitioning", false);
+    airspaceCoordinator.scheduleSettlementSync();
+    const finalActiveId = state.activePaneId();
+    if (finalActiveId && layoutStore.nodes[finalActiveId]) {
+      focusPane(finalActiveId, layoutStore.nodes[finalActiveId]);
+    }
+    if (window.IS_WEB_DEMO) {
+      window.dispatchEvent(
+        new CustomEvent("demo:workspace-switched", { detail: wsId })
+      );
+    }
+  };
+  const switchTab = async (tabId, direction) => {
+    if (tabId === state.activeTabId()) return;
+    saveLayout?.(true);
+    setLayoutStore("isTransitioning", true);
+    if (layoutStore.maximizedPaneId) setLayoutStore("maximizedPaneId", null);
+    window.api?.focusMainWindow?.();
+    await performTransition2("horizontal", direction, async () => {
+      setActiveTabId(tabId);
+      safeSetLocal2(`last_active_tab_${activeWorkspace()}`, tabId);
+      await loadNodesForTab(tabId);
+    });
+    setLayoutStore("isTransitioning", false);
+    airspaceCoordinator.scheduleSettlementSync();
+    const finalActiveId = state.activePaneId();
+    if (finalActiveId && layoutStore.nodes[finalActiveId]) {
+      focusPane(finalActiveId, layoutStore.nodes[finalActiveId]);
+    }
+    if (window.IS_WEB_DEMO) {
+      window.dispatchEvent(
+        new CustomEvent("demo:tab-switched", { detail: tabId })
+      );
+    }
+  };
   return {
     handleCreateTab,
     switchWorkspace,
@@ -5155,6 +5882,8 @@ function createWorkspaceLoader(state, history) {
         history.recordLayoutHistory(currentTabId, serialized);
         window.api?.saveTabLayout(currentTabId, serialized);
         layoutMemory.recordSplitSnapshot(state.activeWorkspace());
+        registerTabNodes(currentTabId, activeNodes);
+        registerWorkspaceNodes(state.activeWorkspace(), activeNodes);
         state.setTabs(
           (tbs) => tbs.map(
             (t) => t.id === currentTabId ? { ...t, layout_state: serialized } : t
@@ -5183,7 +5912,6 @@ function createWorkspaceLoader(state, history) {
     const tabList = preloadedTabs || state.tabs();
     const tab = tabList.find((t) => t.id === tabId);
     if (!tab) return;
-    setLayoutStore("rootId", "");
     if (tab.layout_state) {
       try {
         const parsedState = JSON.parse(tab.layout_state);
@@ -5207,6 +5935,7 @@ function createWorkspaceLoader(state, history) {
           history.seedHistory(tabId, tab.layout_state);
           registerTabNodes(tabId, parsedState.nodes);
           registerWorkspaceNodes(state.activeWorkspace(), parsedState.nodes);
+          registerTabWorkspace(tabId, state.activeWorkspace());
           setActivePoolTab(tabId);
           const targetActivePaneId = parsedState.activePaneId && parsedState.nodes[parsedState.activePaneId] ? parsedState.activePaneId : (() => {
             const findPane = (id) => {
@@ -5250,6 +5979,7 @@ function createWorkspaceLoader(state, history) {
     };
     registerTabNodes(tabId, initialNodes);
     registerWorkspaceNodes(state.activeWorkspace(), initialNodes);
+    registerTabWorkspace(tabId, state.activeWorkspace());
     setActivePoolTab(tabId);
     batch(() => {
       setLayoutStore("nodes", reconcile(initialNodes));
@@ -5314,6 +6044,12 @@ function useWorkspaceManager() {
     } catch (e) {
       console.error("Failed to load profiles:", e);
     }
+    const unsubProfiles = window.api?.onProfilesUpdated?.((updated) => {
+      if (updated && Array.isArray(updated)) {
+        setLayoutStore("profiles", updated);
+      }
+    });
+    onCleanup(() => unsubProfiles?.());
     try {
       const init4 = await window.api?.getInitialAppState?.();
       if (init4 && init4.workspaces && init4.workspaces.length > 0) {
@@ -5334,6 +6070,11 @@ function useWorkspaceManager() {
             }
           ];
         }
+        if (tabList) {
+          for (const t of tabList) {
+            if (t.id && t.workspace_id) registerTabWorkspace(t.id, t.workspace_id);
+          }
+        }
         state.setTabs(tabList);
         const lastTab = safeGetLocal(`last_active_tab_${activeWs}`);
         const activeTab = (tabList.find((t) => t.id === lastTab) ? lastTab : tabList[0].id) || tabList[0].id;
@@ -5353,6 +6094,7 @@ function useWorkspaceManager() {
             order_idx: 0
           }
         ];
+        registerTabWorkspace(defaultTabId, defaultWs);
         state.setWorkspaces(initWs);
         state.setActiveWorkspace(defaultWs);
         state.setTabs(initTabs);
@@ -5409,6 +6151,455 @@ function useWorkspaceManager() {
     undoLayout: history.undoLayout,
     redoLayout: history.redoLayout
   };
+}
+const SCREEN_EDGE_PX = 24;
+const CORNER_DEADZONE_PX = 32;
+const ROOT_TIER_MARGIN_PX = 80;
+function detectScreenEdgeZone(clientX, clientY, winWidth, winHeight) {
+  const isLeft = clientX <= SCREEN_EDGE_PX;
+  const isRight = clientX >= winWidth - SCREEN_EDGE_PX;
+  const isTop = clientY <= SCREEN_EDGE_PX;
+  const isBottom = clientY >= winHeight - SCREEN_EDGE_PX;
+  const inCorner = (isLeft || isRight) && (isTop || isBottom) && (clientX < CORNER_DEADZONE_PX || clientX > winWidth - CORNER_DEADZONE_PX) && (clientY < CORNER_DEADZONE_PX || clientY > winHeight - CORNER_DEADZONE_PX);
+  if (inCorner) return null;
+  if (isLeft) return "left";
+  if (isRight) return "right";
+  if (isTop) return "top";
+  if (isBottom) return "bottom";
+  return null;
+}
+function calculateTieredDropTarget(clientX, clientY, activeDragId) {
+  if (!activeDragId) return null;
+  const tabElements = document.querySelectorAll("[data-tab-id]");
+  for (let i = 0; i < tabElements.length; i++) {
+    const tab = tabElements[i];
+    const rect = tab.getBoundingClientRect();
+    if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+      const tabId = tab.getAttribute("data-tab-id");
+      return { id: tabId, direction: "tab", tier: "tab", label: "Move to Tab" };
+    }
+  }
+  const container = document.getElementById("main-canvas");
+  if (!container || !layoutStore.rootId) return null;
+  const cRect = container.getBoundingClientRect();
+  const OUTSIDE_TOLERANCE_PX = 32;
+  const inCanvasProximity = clientX >= cRect.left - OUTSIDE_TOLERANCE_PX && clientX <= cRect.right + OUTSIDE_TOLERANCE_PX && clientY >= cRect.top - OUTSIDE_TOLERANCE_PX && clientY <= cRect.bottom + OUTSIDE_TOLERANCE_PX;
+  if (!inCanvasProximity) return null;
+  const clampedX = Math.max(cRect.left, Math.min(cRect.right, clientX));
+  const clampedY = Math.max(cRect.top, Math.min(cRect.bottom, clientY));
+  const dLeft = clampedX - cRect.left;
+  const dRight = cRect.right - clampedX;
+  const dTop = clampedY - cRect.top;
+  const dBottom = cRect.bottom - clampedY;
+  const minCanvasDist = Math.min(dLeft, dRight, dTop, dBottom);
+  const activePanes = document.querySelectorAll("[data-pane-id]");
+  const otherPanesCount = Array.from(activePanes).filter(
+    (el) => el.getAttribute("data-pane-id") !== activeDragId
+  ).length;
+  if (minCanvasDist <= ROOT_TIER_MARGIN_PX && otherPanesCount >= 1) {
+    const rootId = layoutStore.rootId;
+    if (minCanvasDist === dLeft)
+      return { id: rootId, direction: "left", tier: "root", label: "Dock Full Layout Left" };
+    if (minCanvasDist === dRight)
+      return { id: rootId, direction: "right", tier: "root", label: "Dock Full Layout Right" };
+    if (minCanvasDist === dTop)
+      return { id: rootId, direction: "top", tier: "root", label: "Dock Full Layout Top" };
+    return { id: rootId, direction: "bottom", tier: "root", label: "Dock Full Layout Bottom" };
+  }
+  for (let i = 0; i < activePanes.length; i++) {
+    const pane = activePanes[i];
+    const pid = pane.getAttribute("data-pane-id");
+    if (pid === activeDragId) continue;
+    const r = pane.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) continue;
+    if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+      const node = layoutStore.nodes[pid];
+      const isPlaceholder = node && node.type === "pane" && node.title === "New Tab" && !node.url && node.paneType === "web" && layoutStore.rootId === pid;
+      if (isPlaceholder) {
+        return { id: pid, direction: "replace", tier: "leaf", label: "Replace" };
+      }
+      const u = (clientX - r.left) / r.width;
+      const v = (clientY - r.top) / r.height;
+      if (u >= 0.3 && u <= 0.7 && v >= 0.3 && v <= 0.7) {
+        return { id: pid, direction: "replace", tier: "leaf", label: "Swap / Replace" };
+      }
+      const pLeft = u;
+      const pRight = 1 - u;
+      const pTop = v;
+      const pBottom = 1 - v;
+      const min = Math.min(pLeft, pRight, pTop, pBottom);
+      if (min === pLeft) return { id: pid, direction: "left", tier: "leaf", label: "Split Left" };
+      if (min === pRight) return { id: pid, direction: "right", tier: "leaf", label: "Split Right" };
+      if (min === pTop) return { id: pid, direction: "top", tier: "leaf", label: "Split Top" };
+      return { id: pid, direction: "bottom", tier: "leaf", label: "Split Bottom" };
+    }
+  }
+  return null;
+}
+const DWELL_TIME_MS = 500;
+const COOLDOWN_TIME_MS = 600;
+class EdgeNavigationCoordinator {
+  currentDir = null;
+  dwellStart = 0;
+  isCoolingDown = false;
+  cooldownTimer = null;
+  hasCreatedTab = false;
+  updateEdge(newDir, callbacks, onProgress, onBeforeNavigate, onEdgeFired) {
+    if (this.isCoolingDown) {
+      onProgress(0);
+      return;
+    }
+    if (newDir !== this.currentDir) {
+      this.currentDir = newDir;
+      this.dwellStart = newDir ? performance.now() : 0;
+      onProgress(0);
+      return;
+    }
+    if (this.currentDir && this.dwellStart > 0) {
+      const elapsed = performance.now() - this.dwellStart;
+      const progress = Math.min(elapsed / DWELL_TIME_MS, 1);
+      onProgress(progress);
+      if (progress >= 1) {
+        const firedDir = this.currentDir;
+        onBeforeNavigate?.(firedDir);
+        this.triggerNavigation(firedDir, callbacks);
+        onEdgeFired?.(firedDir);
+        this.startCooldown(onProgress);
+      }
+    } else {
+      onProgress(0);
+    }
+  }
+  triggerNavigation(dir, callbacks) {
+    if (dir === "left" || dir === "right") {
+      const tabs = callbacks.getTabs();
+      const currentTabId = callbacks.getActiveTabId();
+      const idx = tabs.findIndex((t) => t.id === currentTabId);
+      if (dir === "left" && idx > 0) {
+        callbacks.switchTab(tabs[idx - 1].id, "backward");
+      } else if (dir === "right") {
+        if (idx < tabs.length - 1) {
+          callbacks.switchTab(tabs[idx + 1].id, "forward");
+        } else if (!this.hasCreatedTab) {
+          this.hasCreatedTab = true;
+          callbacks.handleCreateTab();
+        }
+      }
+    } else if (dir === "top" || dir === "bottom") {
+      const wks = callbacks.getWorkspaces();
+      const currentWsId = callbacks.getActiveWorkspaceId();
+      const idx = wks.findIndex((w) => w.id === currentWsId);
+      if (dir === "top" && idx > 0) {
+        callbacks.switchWorkspace(wks[idx - 1].id, "backward");
+      } else if (dir === "bottom" && idx < wks.length - 1) {
+        callbacks.switchWorkspace(wks[idx + 1].id, "forward");
+      }
+    }
+  }
+  startCooldown(onProgress) {
+    this.isCoolingDown = true;
+    this.dwellStart = 0;
+    onProgress(0);
+    if (this.cooldownTimer) clearTimeout(this.cooldownTimer);
+    this.cooldownTimer = setTimeout(() => {
+      this.isCoolingDown = false;
+      this.dwellStart = this.currentDir ? performance.now() : 0;
+    }, COOLDOWN_TIME_MS);
+  }
+  reset(onProgress) {
+    this.currentDir = null;
+    this.dwellStart = 0;
+    this.isCoolingDown = false;
+    this.hasCreatedTab = false;
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
+    onProgress?.(0);
+  }
+}
+let activeInFlightRecord = null;
+function getInFlightPane(paneId) {
+  if (!activeInFlightRecord) return null;
+  if (!paneId || activeInFlightRecord.paneId === paneId) {
+    return activeInFlightRecord.snapshot;
+  }
+  return null;
+}
+const serializeTree = (t) => JSON.stringify({ nodes: t.nodes, rootId: t.rootId || "" });
+class DragTransactionManager {
+  inFlight = null;
+  sourceTree = null;
+  detachedSourceTree = null;
+  serializedDetachedSource = null;
+  serializedSource = null;
+  leaseToken = null;
+  start(paneId, sourceTabId, sourceWorkspaceId, snapshot, initialTree, leaseToken) {
+    this.leaseToken = leaseToken || null;
+    this.inFlight = { paneId, sourceTabId, sourceWorkspaceId, snapshot: JSON.parse(JSON.stringify(snapshot)) };
+    activeInFlightRecord = this.inFlight;
+    const baseTree = initialTree || { rootId: layoutStore.rootId, nodes: { ...layoutStore.nodes }, generation: 1 };
+    this.sourceTree = JSON.parse(JSON.stringify(baseTree));
+    this.serializedSource = serializeTree(baseTree);
+    this.detachedSourceTree = detachPaneFromTree(baseTree, asPaneId(paneId));
+    this.serializedDetachedSource = serializeTree(this.detachedSourceTree);
+  }
+  getInFlight = () => this.inFlight;
+  hasInFlight = () => this.inFlight !== null;
+  prepareSourceDetachment(tree) {
+    if (!this.inFlight) return tree;
+    this.detachedSourceTree = detachPaneFromTree(tree, asPaneId(this.inFlight.paneId));
+    this.serializedDetachedSource = serializeTree(this.detachedSourceTree);
+    return this.detachedSourceTree;
+  }
+  commitDrop(targetMatch, destTabId, callbacks) {
+    if (!this.inFlight) return;
+    if (targetMatch.direction === "tab") {
+      this.commitTabDrop(targetMatch.id, callbacks);
+      return;
+    }
+    if (this.inFlight.sourceTabId === destTabId) {
+      this.commitSameTab(targetMatch, callbacks);
+    } else {
+      this.commitCrossTab(targetMatch, destTabId, callbacks);
+    }
+  }
+  commitSameTab(targetMatch, callbacks) {
+    if (!this.inFlight) return;
+    const { paneId } = this.inFlight;
+    if (targetMatch.id === paneId) {
+      this.abort(callbacks, "self_drop");
+      return;
+    }
+    const currentTree = { rootId: layoutStore.rootId, nodes: layoutStore.nodes, generation: 1 };
+    const dir = targetMatch.direction === "replace" || targetMatch.direction === "tab" ? "right" : targetMatch.direction;
+    const [nextTree, effects] = targetMatch.direction === "replace" ? swapPanes(currentTree, asPaneId(paneId), asPaneId(targetMatch.id)) : movePaneSplit(currentTree, asPaneId(paneId), targetMatch.id, dir);
+    const validation = validateTreeInvariants(nextTree);
+    if (!validation.isValid) {
+      console.error("[DragTransactionManager] Invariant failure:", validation.errors);
+      this.abort(callbacks, "invariant_failure");
+      return;
+    }
+    setLayoutStore("nodes", reconcile(nextTree.nodes));
+    if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
+    EffectRunner.runLayoutEffects(effects.filter((e) => e.type !== "FOCUS_PANE"), (p) => layoutStore.nodes[p]);
+    callbacks.saveLayout(true);
+    window.api?.viewWake?.(paneId);
+    activePaneAuthority.commitLease(this.leaseToken || "", paneId, { source: "dnd_drop", force: true });
+    this.clear();
+  }
+  commitCrossTab(targetMatch, destTabId, callbacks) {
+    if (!this.inFlight) return;
+    const { paneId, snapshot, sourceTabId } = this.inFlight;
+    if (!layoutStore.rootId || Object.keys(layoutStore.nodes).length === 0) {
+      setLayoutStore("nodes", { [paneId]: snapshot });
+      setLayoutStore("rootId", paneId);
+      registerTabNodes(destTabId, { [paneId]: snapshot });
+    } else {
+      const destTree = { rootId: layoutStore.rootId, nodes: layoutStore.nodes, generation: 1 };
+      const splitDir = targetMatch.direction === "replace" || targetMatch.direction === "tab" ? "right" : targetMatch.direction;
+      const [nextTree, effects] = targetMatch.direction === "replace" ? replacePane(destTree, asPaneId(targetMatch.id), snapshot) : splitPane(destTree, targetMatch.id, snapshot, splitDir);
+      setLayoutStore("nodes", reconcile(nextTree.nodes));
+      if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
+      registerTabNodes(destTabId, nextTree.nodes);
+      EffectRunner.runLayoutEffects(effects.filter((e) => e.type !== "FOCUS_PANE"), (p) => layoutStore.nodes[p]);
+    }
+    window.api?.moveNodeToTab?.(paneId, destTabId);
+    callbacks.saveLayout(true);
+    window.api?.viewWake?.(paneId);
+    activePaneAuthority.commitLease(this.leaseToken || "", paneId, { source: "dnd_drop", force: true });
+    this.syncSourceTab(sourceTabId, this.serializedDetachedSource, callbacks);
+    if (this.detachedSourceTree && !this.detachedSourceTree.rootId) callbacks.cleanupEmptyTabs();
+    this.clear();
+  }
+  syncSourceTab(tabId, layout, callbacks) {
+    if (!layout) return;
+    window.api?.saveTabLayout?.(tabId, layout);
+    callbacks.setTabs?.(
+      (tbs) => tbs.map((t) => t.id === tabId ? { ...t, layout_state: layout } : t)
+    );
+  }
+  commitTabDrop(targetTabId, callbacks) {
+    if (!this.inFlight) return;
+    const { paneId } = this.inFlight;
+    if (this.leaseToken) activePaneAuthority.releaseLease(this.leaseToken);
+    window.api?.moveNodeToTab?.(paneId, targetTabId);
+    callbacks.handleClose(paneId, false);
+    window.api?.viewWake?.(paneId);
+    this.clear();
+  }
+  abort(callbacks, reason = "cancel") {
+    if (!this.inFlight) return;
+    const { paneId, sourceTabId } = this.inFlight;
+    if (this.leaseToken) activePaneAuthority.releaseLease(this.leaseToken);
+    const currentTab = callbacks.getActiveTabId();
+    if (currentTab !== sourceTabId) {
+      callbacks.switchTab(sourceTabId, "backward");
+      window.api?.moveNodeToTab?.(paneId, sourceTabId);
+      this.syncSourceTab(sourceTabId, this.serializedSource, callbacks);
+    } else if (this.sourceTree) {
+      setLayoutStore("nodes", reconcile(this.sourceTree.nodes));
+      if (this.sourceTree.rootId) setLayoutStore("rootId", this.sourceTree.rootId);
+      callbacks.saveLayout(true);
+    }
+    window.api?.viewWake?.(paneId);
+    this.clear();
+  }
+  rollback = (callbacks) => this.abort(callbacks, "rollback");
+  clear() {
+    this.inFlight = null;
+    activeInFlightRecord = null;
+    this.sourceTree = null;
+    this.detachedSourceTree = null;
+    this.serializedDetachedSource = null;
+    this.serializedSource = null;
+    this.leaseToken = null;
+  }
+}
+function isSameTarget(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.id === b.id && a.direction === b.direction && a.tier === b.tier;
+}
+function startDragSession(options) {
+  const {
+    id,
+    pointerEvent,
+    spring,
+    setActiveDragId,
+    setDragTarget,
+    setDragRect,
+    setEdgeHoverDir,
+    setEdgeHoverProgress,
+    callbacks,
+    dragTarget
+  } = options;
+  const nodeSnapshot = layoutStore.nodes[id];
+  if (!nodeSnapshot) return;
+  const leaseToken = activePaneAuthority.acquireLease(id, "dnd_session");
+  setActiveDragId(id);
+  window.api?.viewSleep?.(id);
+  document.body.style.cursor = "grabbing";
+  document.body.style.userSelect = "none";
+  const el = document.querySelector(`[data-pane-id="${id}"]`);
+  const r = el?.getBoundingClientRect() || {
+    width: 260,
+    height: 160,
+    left: pointerEvent.clientX - 130,
+    top: pointerEvent.clientY - 80
+  };
+  const dRect = {
+    width: r.width,
+    height: r.height,
+    offsetX: pointerEvent.clientX - r.left,
+    offsetY: pointerEvent.clientY - r.top
+  };
+  setDragRect(dRect);
+  spring.start(id, pointerEvent.clientX, pointerEvent.clientY, dRect.offsetX, dRect.offsetY);
+  const txManager = new DragTransactionManager();
+  txManager.start(id, callbacks.getActiveTabId(), callbacks.getActiveWorkspaceId(), nodeSnapshot, void 0, leaseToken);
+  const edgeCoordinator = new EdgeNavigationCoordinator();
+  let isTearing = false;
+  let lastTearFrame = 0;
+  let hasSwitchedContext = false;
+  let currentTarget = null;
+  const updateDragTarget = (next) => {
+    if (isSameTarget(currentTarget, next)) return;
+    currentTarget = next;
+    setDragTarget(next);
+  };
+  const cleanupListeners = () => {
+    window.removeEventListener("pointermove", onPointerMove);
+    window.removeEventListener("pointerup", onPointerUp);
+    window.removeEventListener("pointercancel", onPointerCancel);
+    window.removeEventListener("mouseleave", onPointerCancel);
+    window.removeEventListener("keydown", onKeyDown);
+  };
+  const onKeyDown = (ev) => {
+    if (ev.key === "Escape") onPointerUp(null, true);
+  };
+  const onPointerCancel = () => onPointerUp(null, true);
+  const onPointerMove = (ev) => {
+    spring.updateTarget(ev.clientX, ev.clientY);
+    const TEAR_THRESHOLD_PX = 50;
+    const isOutside = ev.clientX < -TEAR_THRESHOLD_PX || ev.clientY < -TEAR_THRESHOLD_PX || ev.clientX > window.innerWidth + TEAR_THRESHOLD_PX || ev.clientY > window.innerHeight + TEAR_THRESHOLD_PX;
+    if (isOutside) {
+      isTearing = true;
+      if (performance.now() - lastTearFrame > 16) {
+        window.api?.updateTearWindow(id, window.screenX + ev.clientX, window.screenY + ev.clientY);
+        lastTearFrame = performance.now();
+      }
+      updateDragTarget(null);
+      setEdgeHoverDir(null);
+      edgeCoordinator.reset(setEdgeHoverProgress);
+      return;
+    } else if (isTearing) {
+      isTearing = false;
+      window.api?.hideTearWindow(id);
+    }
+    const edgeDir = detectScreenEdgeZone(ev.clientX, ev.clientY, window.innerWidth, window.innerHeight);
+    setEdgeHoverDir(edgeDir);
+    if (edgeDir) {
+      const rootId = layoutStore.rootId || "";
+      const edgeTarget = {
+        id: rootId,
+        direction: edgeDir,
+        tier: "root",
+        label: `Dock Full Layout ${edgeDir === "left" ? "Left" : edgeDir === "right" ? "Right" : edgeDir === "top" ? "Top" : "Bottom"}`
+      };
+      updateDragTarget(edgeTarget);
+      edgeCoordinator.updateEdge(
+        edgeDir,
+        callbacks,
+        setEdgeHoverProgress,
+        () => {
+          hasSwitchedContext = true;
+        }
+      );
+    } else {
+      edgeCoordinator.reset(setEdgeHoverProgress);
+      updateDragTarget(calculateTieredDropTarget(ev.clientX, ev.clientY, id));
+    }
+  };
+  const onPointerUp = (_ev, isCancel = false) => {
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    spring.stop();
+    edgeCoordinator.reset(setEdgeHoverProgress);
+    cleanupListeners();
+    setEdgeHoverDir(null);
+    setEdgeHoverProgress(0);
+    const target = dragTarget();
+    window.api?.viewWake?.(id);
+    setActiveDragId(null);
+    updateDragTarget(null);
+    window.dispatchEvent(new CustomEvent("app:dragend"));
+    if (isCancel) {
+      txManager.abort(callbacks, "cancelled");
+      return;
+    }
+    if (isTearing) {
+      activePaneAuthority.releaseLease(leaseToken);
+      window.api?.commitTearWindow(id);
+      callbacks.handleClose(id, true);
+      txManager.clear();
+      return;
+    }
+    let finalTarget = target;
+    if (!finalTarget && hasSwitchedContext) {
+      finalTarget = { id: layoutStore.rootId || "", direction: "right", tier: "root" };
+    }
+    if (finalTarget) {
+      txManager.commitDrop(finalTarget, callbacks.getActiveTabId(), callbacks);
+    } else {
+      txManager.abort(callbacks, "no_target");
+    }
+  };
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerCancel);
+  window.addEventListener("mouseleave", onPointerCancel);
+  window.addEventListener("keydown", onKeyDown);
 }
 function createDragSpringController() {
   let rAF = null;
@@ -5476,346 +6667,39 @@ function createDragSpringController() {
     }
   };
 }
-function calculateDropTarget(clientX, clientY, activeDragId) {
-  if (!activeDragId) return null;
-  const tabElements = document.querySelectorAll("[data-tab-id]");
-  for (let i = 0; i < tabElements.length; i++) {
-    const tab = tabElements[i];
-    const rect = tab.getBoundingClientRect();
-    if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
-      return {
-        id: tab.getAttribute("data-tab-id"),
-        direction: "tab"
-      };
-    }
-  }
-  const container = document.getElementById("main-canvas");
-  const activePanes = document.querySelectorAll("[data-pane-id]");
-  if (container && activePanes.length > 1 && layoutStore.rootId) {
-    const cRect = container.getBoundingClientRect();
-    const EDGE_MARGIN = 24;
-    if (clientX >= cRect.left && clientX <= cRect.right && clientY >= cRect.top && clientY <= cRect.bottom) {
-      const rootId = layoutStore.rootId;
-      if (rootId !== activeDragId) {
-        if (clientX - cRect.left <= EDGE_MARGIN) {
-          return { id: rootId, direction: "left" };
-        }
-        if (cRect.right - clientX <= EDGE_MARGIN) {
-          return { id: rootId, direction: "right" };
-        }
-        if (clientY - cRect.top <= EDGE_MARGIN) {
-          return { id: rootId, direction: "top" };
-        }
-        if (cRect.bottom - clientY <= EDGE_MARGIN) {
-          return { id: rootId, direction: "bottom" };
-        }
-      }
-    }
-  }
-  for (let i = 0; i < activePanes.length; i++) {
-    const pane = activePanes[i];
-    const pid = pane.getAttribute("data-pane-id");
-    if (pid === activeDragId) continue;
-    const rect = pane.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
-        const node = layoutStore.nodes[pid];
-        const isRootEmptyPlaceholder = node && node.type === "pane" && node.title === "New Tab" && !node.url && node.paneType === "web" && layoutStore.rootId === pid;
-        if (isRootEmptyPlaceholder) {
-          return { id: pid, direction: "replace" };
-        }
-        const u = (clientX - rect.left) / rect.width;
-        const v = (clientY - rect.top) / rect.height;
-        if (u >= 0.28 && u <= 0.72 && v >= 0.28 && v <= 0.72) {
-          return { id: pid, direction: "replace" };
-        }
-        const dLeft = u;
-        const dRight = 1 - u;
-        const dTop = v;
-        const dBottom = 1 - v;
-        const min = Math.min(dLeft, dRight, dTop, dBottom);
-        if (min === dLeft) return { id: pid, direction: "left" };
-        if (min === dRight) return { id: pid, direction: "right" };
-        if (min === dTop) return { id: pid, direction: "top" };
-        return { id: pid, direction: "bottom" };
-      }
-    }
-  }
-  return null;
-}
-const EDGE_ZONE = 20;
-const CORNER_DEADZONE = 40;
-function detectEdgeZone(clientX, clientY, windowWidth, windowHeight) {
-  const isLeft = clientX < EDGE_ZONE;
-  const isRight = clientX > windowWidth - EDGE_ZONE;
-  const isTop = clientY < EDGE_ZONE;
-  const isBottom = clientY > windowHeight - EDGE_ZONE;
-  const inCorner = (isLeft || isRight) && (isTop || isBottom) && (clientX < CORNER_DEADZONE || clientX > windowWidth - CORNER_DEADZONE) && (clientY < CORNER_DEADZONE || clientY > windowHeight - CORNER_DEADZONE);
-  if (inCorner) return null;
-  if (isLeft) return "left";
-  if (isRight) return "right";
-  if (isTop) return "top";
-  if (isBottom) return "bottom";
-  return null;
-}
-function startDragSession(params) {
-  const {
-    id,
-    pointerEvent,
-    spring,
-    setActiveDragId,
-    setDragTarget,
-    setDragRect,
-    setEdgeHoverDir,
-    setEdgeHoverProgress,
-    hasCreatedTab,
-    setHasCreatedTab,
-    saveLayout,
-    handleClose,
-    getActiveTabId,
-    switchTab,
-    dragTarget,
-    activeDragId
-  } = params;
-  setActiveDragId(id);
-  window.api?.viewSleep?.(id);
-  const el = document.querySelector(`[data-pane-id="${id}"]`);
-  const r = el ? el.getBoundingClientRect() : {
-    width: 250,
-    height: 150,
-    left: pointerEvent.clientX - 125,
-    top: pointerEvent.clientY - 75
+function useDragEngine(wsOrSaveLayout, ...rest) {
+  const ws = typeof wsOrSaveLayout === "object" && wsOrSaveLayout.activeTabId ? wsOrSaveLayout : {
+    saveLayout: wsOrSaveLayout,
+    handleClose: rest[0],
+    getParent: rest[1],
+    activeTabId: rest[2],
+    switchTab: rest[3],
+    cleanupEmptyTabs: rest[4]
   };
-  const dRect = {
-    width: r.width,
-    height: r.height,
-    offsetX: pointerEvent.clientX - r.left,
-    offsetY: pointerEvent.clientY - r.top
-  };
-  setDragRect(dRect);
-  spring.start(
-    id,
-    pointerEvent.clientX,
-    pointerEvent.clientY,
-    dRect.offsetX,
-    dRect.offsetY
-  );
-  let isTearing = false;
-  let lastTearFrame = 0;
-  let edgeHoverStart = 0;
-  let currentEdgeDir = null;
-  let edgeSwitchFired = false;
-  let isEdgeSwitchTransitioning = false;
-  let draggedNodeSnapshot = null;
-  let originalTabId = getActiveTabId();
-  setHasCreatedTab(false);
-  const dragEngineRef = {
-    get hasCreatedTab() {
-      return hasCreatedTab();
-    },
-    set hasCreatedTab(v) {
-      setHasCreatedTab(v);
-    }
-  };
-  const cleanupListeners = () => {
-    window.removeEventListener("pointermove", onPointerMove);
-    window.removeEventListener("pointerup", onPointerUp);
-    window.removeEventListener("pointercancel", onPointerUp);
-    window.removeEventListener("mouseleave", onPointerUp);
-    window.removeEventListener("keydown", onKeyDown);
-  };
-  const onKeyDown = (ev) => {
-    if (ev.key === "Escape") onPointerUp(null, true);
-  };
-  window.addEventListener("keydown", onKeyDown);
-  const edgeInterval = window.setInterval(() => {
-    if (currentEdgeDir && !edgeSwitchFired) {
-      const elapsed = performance.now() - edgeHoverStart;
-      const progress = Math.min(elapsed / 600, 1);
-      setEdgeHoverProgress(progress);
-      if (progress >= 1) {
-        edgeSwitchFired = true;
-        isEdgeSwitchTransitioning = true;
-        const aId = activeDragId();
-        if (aId && !draggedNodeSnapshot) {
-          draggedNodeSnapshot = layoutStore.nodes[aId];
-          originalTabId = getActiveTabId();
-          setLayoutStore("nodes", aId, void 0);
-          saveLayout(true);
-        }
-        window.dispatchEvent(
-          new CustomEvent("app:edge-hover", {
-            detail: { dir: currentEdgeDir, dragEngine: dragEngineRef }
-          })
-        );
-        setEdgeHoverDir(null);
-        setEdgeHoverProgress(0);
-        setTimeout(() => {
-          isEdgeSwitchTransitioning = false;
-        }, 800);
-      }
-    }
-  }, 16);
-  const onPointerMove = (ev) => {
-    spring.updateTarget(ev.clientX, ev.clientY);
-    const isOutside = ev.clientX < 0 || ev.clientY < 0 || ev.clientX > window.innerWidth || ev.clientY > window.innerHeight;
-    if (isOutside) {
-      isTearing = true;
-      if (performance.now() - lastTearFrame > 16) {
-        window.api?.updateTearWindow(
-          id,
-          window.screenX + ev.clientX,
-          window.screenY + ev.clientY
-        );
-        lastTearFrame = performance.now();
-      }
-      setDragTarget(null);
-      setEdgeHoverDir(null);
-      currentEdgeDir = null;
-      return;
-    } else if (isTearing) {
-      isTearing = false;
-      window.api?.hideTearWindow(id);
-    }
-    const newEdgeDir = isEdgeSwitchTransitioning ? null : detectEdgeZone(
-      ev.clientX,
-      ev.clientY,
-      window.innerWidth,
-      window.innerHeight
-    );
-    if (newEdgeDir !== currentEdgeDir && !isEdgeSwitchTransitioning) {
-      currentEdgeDir = newEdgeDir;
-      setEdgeHoverDir(newEdgeDir);
-      if (newEdgeDir) {
-        edgeHoverStart = performance.now();
-        edgeSwitchFired = false;
-      } else {
-        setEdgeHoverProgress(0);
-      }
-    }
-    if (!newEdgeDir) {
-      setDragTarget(
-        calculateDropTarget(ev.clientX, ev.clientY, activeDragId())
-      );
-    } else {
-      setDragTarget(null);
-    }
-  };
-  const onPointerUp = (_ev, isCancel = false) => {
-    clearInterval(edgeInterval);
-    spring.stop();
-    cleanupListeners();
-    setEdgeHoverDir(null);
-    setEdgeHoverProgress(0);
-    const target = dragTarget();
-    const draggedId = activeDragId();
-    if (!draggedId) return;
-    window.api?.viewWake?.(draggedId);
-    setActiveDragId(null);
-    setDragTarget(null);
-    window.dispatchEvent(new CustomEvent("app:dragend"));
-    if (isCancel) {
-      if (draggedNodeSnapshot) {
-        window.api?.moveNodeToTab(draggedId, originalTabId);
-        if (getActiveTabId() !== originalTabId)
-          switchTab(originalTabId, "backward");
-        setLayoutStore("nodes", draggedId, draggedNodeSnapshot);
-        if (!layoutStore.rootId) setLayoutStore("rootId", draggedId);
-        saveLayout(true);
-      }
-      return;
-    }
-    if (isTearing) {
-      window.api?.commitTearWindow(draggedId);
-      handleClose(draggedId, true);
-      return;
-    }
-    if (target && target.direction === "tab") {
-      window.api?.moveNodeToTab(draggedId, target.id);
-      handleClose(draggedId, false);
-      return;
-    }
-    let finalTarget = target;
-    if (!finalTarget && edgeSwitchFired && draggedNodeSnapshot) {
-      finalTarget = {
-        id: layoutStore.rootId,
-        direction: currentEdgeDir === "left" || currentEdgeDir === "right" ? "right" : "bottom"
-      };
-    }
-    if (finalTarget && finalTarget.id !== draggedId) {
-      const paneCount = Object.values(layoutStore.nodes).filter(
-        (n) => n && n.type === "pane"
-      ).length;
-      if (paneCount >= 16 && finalTarget.direction !== "replace") {
-        window.dispatchEvent(
-          new CustomEvent("app:toast", {
-            detail: {
-              message: "Maximum 16 panes allowed per tab",
-              type: "warning"
-            }
-          })
-        );
-        return;
-      }
-      if (draggedNodeSnapshot && !layoutStore.nodes[draggedId]) {
-        setLayoutStore("nodes", draggedId, draggedNodeSnapshot);
-      }
-      const currentTree = {
-        rootId: asPaneId(layoutStore.rootId),
-        nodes: layoutStore.nodes,
-        generation: 1
-      };
-      if (finalTarget.direction === "replace") {
-        const [nextTree, effects] = reduceLayout(currentTree, {
-          type: "SWAP_PANES",
-          sourcePaneId: asPaneId(draggedId),
-          targetPaneId: asPaneId(finalTarget.id)
-        });
-        setLayoutStore("nodes", reconcile(nextTree.nodes));
-        if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
-        EffectRunner.runLayoutEffects(effects, (p) => layoutStore.nodes[p]);
-      } else {
-        const [nextTree, effects] = reduceLayout(currentTree, {
-          type: "MOVE_PANE_SPLIT",
-          sourcePaneId: asPaneId(draggedId),
-          targetPaneId: asPaneId(finalTarget.id),
-          direction: finalTarget.direction
-        });
-        setLayoutStore("nodes", reconcile(nextTree.nodes));
-        if (nextTree.rootId) setLayoutStore("rootId", nextTree.rootId);
-        EffectRunner.runLayoutEffects(effects, (p) => layoutStore.nodes[p]);
-      }
-      if (edgeSwitchFired)
-        window.api?.moveNodeToTab(draggedId, getActiveTabId());
-      saveLayout(true);
-    } else if (draggedNodeSnapshot && !layoutStore.nodes[draggedId]) {
-      setLayoutStore("nodes", draggedId, draggedNodeSnapshot);
-      if (!layoutStore.rootId) setLayoutStore("rootId", draggedId);
-      saveLayout(true);
-    }
-  };
-  window.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", onPointerUp);
-  window.addEventListener("pointercancel", onPointerUp);
-  window.addEventListener("mouseleave", onPointerUp);
-}
-function useDragEngine(saveLayout, handleClose, getParent, getActiveTabId, switchTab, cleanupEmptyTabs) {
   const [activeDragId, setActiveDragId] = createSignal(null);
-  const [dragTarget, setDragTarget] = createSignal(
-    null
-  );
+  const [dragTarget, setDragTarget] = createSignal(null);
   const [dragRect, setDragRect] = createSignal({
     width: 0,
     height: 0,
     offsetX: 0,
     offsetY: 0
   });
-  const [edgeHoverDir, setEdgeHoverDir] = createSignal(
-    null
-  );
+  const [edgeHoverDir, setEdgeHoverDir] = createSignal(null);
   const [edgeHoverProgress, setEdgeHoverProgress] = createSignal(0);
-  const [hasCreatedTab, setHasCreatedTab] = createSignal(false);
   const spring = createDragSpringController();
+  const callbacks = {
+    saveLayout: ws.saveLayout,
+    handleClose: ws.handleClose,
+    getActiveTabId: typeof ws.activeTabId === "function" ? ws.activeTabId : () => ws.activeTabId,
+    getActiveWorkspaceId: typeof ws.activeWorkspace === "function" ? ws.activeWorkspace : () => ws.activeWorkspace,
+    switchTab: ws.switchTab,
+    switchWorkspace: ws.switchWorkspace,
+    handleCreateTab: ws.handleCreateTab,
+    getTabs: typeof ws.tabs === "function" ? ws.tabs : () => ws.tabs || [],
+    getWorkspaces: typeof ws.workspaces === "function" ? ws.workspaces : () => ws.workspaces || [],
+    cleanupEmptyTabs: ws.cleanupEmptyTabs,
+    setTabs: ws.setTabs
+  };
   onMount(() => {
     const onDragStart = (e) => {
       const { id, e: pointerEvent } = e.detail;
@@ -5828,14 +6712,8 @@ function useDragEngine(saveLayout, handleClose, getParent, getActiveTabId, switc
         setDragRect,
         setEdgeHoverDir,
         setEdgeHoverProgress,
-        hasCreatedTab,
-        setHasCreatedTab,
-        saveLayout,
-        handleClose,
-        getActiveTabId,
-        switchTab,
-        dragTarget,
-        activeDragId
+        callbacks,
+        dragTarget
       });
     };
     window.addEventListener("app:pane-drag-start", onDragStart);
@@ -5850,9 +6728,7 @@ function useDragEngine(saveLayout, handleClose, getParent, getActiveTabId, switc
     dragTarget,
     dragRect,
     edgeHoverDir,
-    edgeHoverProgress,
-    hasCreatedTab,
-    setHasCreatedTab
+    edgeHoverProgress
   };
 }
 const DEFAULT_SHORTCUTS = [
@@ -7038,7 +7914,7 @@ function matchAccelerator(acc, isMac) {
     isMac
   );
 }
-var _tmpl$$1t = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$10 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$O = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$C = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0 text-neutral-800 dark:text-neutral-200"><svg xmlns=http://www.w3.org/2000/svg viewBox="0 0 100 100"fill=currentColor class="w-[14px] h-[14px]"><path d="M 26 18 H 50.7 A 1.8 1.8 0 0 1 52.43 20.28 L 35.88 79.95 A 2.8 2.8 0 0 1 33.19 82 H 26 A 8 8 0 0 1 18 74 V 26 A 8 8 0 0 1 26 18 Z"></path><path d="M 74 82 H 49.3 A 1.8 1.8 0 0 1 47.57 79.72 L 64.12 20.05 A 2.8 2.8 0 0 1 66.81 18 H 74 A 8 8 0 0 1 82 26 V 74 A 8 8 0 0 1 74 82 Z"></path></svg></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
+var _tmpl$$1D = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$18 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$P = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$D = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0 text-neutral-800 dark:text-neutral-200"><svg xmlns=http://www.w3.org/2000/svg viewBox="0 0 100 100"fill=currentColor class="w-[14px] h-[14px]"><path d="M 26 18 H 50.7 A 1.8 1.8 0 0 1 52.43 20.28 L 35.88 79.95 A 2.8 2.8 0 0 1 33.19 82 H 26 A 8 8 0 0 1 18 74 V 26 A 8 8 0 0 1 26 18 Z"></path><path d="M 74 82 H 49.3 A 1.8 1.8 0 0 1 47.57 79.72 L 64.12 20.05 A 2.8 2.8 0 0 1 66.81 18 H 74 A 8 8 0 0 1 82 26 V 74 A 8 8 0 0 1 74 82 Z"></path></svg></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
     const current = props.uiMode();
@@ -7062,7 +7938,7 @@ function AppUiHub(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$4$C(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
+    var _el$ = _tmpl$4$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
@@ -7074,21 +7950,21 @@ function AppUiHub(props) {
             return props.uiMode() === "inset";
           },
           get children() {
-            return _tmpl$$1t();
+            return _tmpl$$1D();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "overlap";
           },
           get children() {
-            return _tmpl$2$10();
+            return _tmpl$2$18();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "collapse";
           },
           get children() {
-            return _tmpl$3$O();
+            return _tmpl$3$P();
           }
         })];
       }
@@ -7141,11 +8017,11 @@ const mergeClasses = (...classes) => classes.filter((className2, index, array) =
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-var _tmpl$$1s = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1C = /* @__PURE__ */ template(`<svg>`);
 const Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$1s();
+    var _el$ = _tmpl$$1C();
     spread(_el$, mergeProps(defaultAttributes, {
       get width() {
         return localProps.size ?? defaultAttributes.width;
@@ -10433,7 +11309,7 @@ function getSmartIconId(name = "") {
     return "moon";
   return "folder";
 }
-var _tmpl$$1r = /* @__PURE__ */ template(`<span>`);
+var _tmpl$$1B = /* @__PURE__ */ template(`<span>`);
 function WorkspaceIcon(props) {
   const iconId = () => {
     if (props.icon && props.icon !== "auto") {
@@ -10446,7 +11322,7 @@ function WorkspaceIcon(props) {
     return item ? item.component : Folder;
   };
   return (() => {
-    var _el$ = _tmpl$$1r();
+    var _el$ = _tmpl$$1B();
     insert(_el$, () => {
       const Comp = IconComp();
       return createComponent(Comp, {
@@ -10462,7 +11338,7 @@ function WorkspaceIcon(props) {
     return _el$;
   })();
 }
-var _tmpl$$1q = /* @__PURE__ */ template(`<span><span class=text-neutral-400></span><span>`);
+var _tmpl$$1A = /* @__PURE__ */ template(`<span><span class=text-neutral-400></span><span>`);
 function TabIslandEyebrow(props) {
   const isIconOnly = () => props.mode === "icon-only";
   return createComponent(Show, {
@@ -10470,7 +11346,7 @@ function TabIslandEyebrow(props) {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$1q(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$$1A(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, createComponent(WorkspaceIcon, {
         get icon() {
           return props.workspaceIcon;
@@ -15820,7 +16696,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$1p = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$$ = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$N = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$B = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$p = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$h = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$c = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1z = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$17 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$O = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$i = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$5 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -15845,14 +16721,14 @@ function TabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$1p();
+        var _el$ = _tmpl$$1z();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$7$c(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$7$b(), _el$3 = _el$2.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -15862,7 +16738,7 @@ function TabPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$17 = _tmpl$8$6(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
+              var _el$17 = _tmpl$8$5(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
               insert(_el$22, () => props.cascadePrompt?.profileName);
               _el$24.$$click = (e) => {
                 e.stopPropagation();
@@ -15877,7 +16753,7 @@ function TabPopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$4$B(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$4 = _tmpl$4$C(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
               insert(_el$8, createComponent(Show, {
                 get when() {
                   return props.isSplit;
@@ -15886,7 +16762,7 @@ function TabPopover(props) {
                   return _tmpl$9$1();
                 },
                 get children() {
-                  return _tmpl$2$$();
+                  return _tmpl$2$17();
                 }
               }));
               insert(_el$5, createComponent(Show, {
@@ -15894,7 +16770,7 @@ function TabPopover(props) {
                   return !props.tab.custom_name;
                 },
                 get children() {
-                  return _tmpl$3$N();
+                  return _tmpl$3$O();
                 }
               }), null);
               _el$10.$$keydown = (e) => {
@@ -15910,7 +16786,7 @@ function TabPopover(props) {
               createRenderEffect(() => _el$10.value = getCustomName());
               return _el$4;
             })(), (() => {
-              var _el$11 = _tmpl$5$p(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
+              var _el$11 = _tmpl$5$q(), _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$14) : flipThumbRef = _el$14;
               insert(_el$13, createComponent(For, {
@@ -15966,7 +16842,7 @@ function TabPopover(props) {
               }), null);
               return _el$11;
             })(), (() => {
-              var _el$15 = _tmpl$6$h(), _el$16 = _el$15.firstChild;
+              var _el$15 = _tmpl$6$i(), _el$16 = _el$15.firstChild;
               _el$16.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -15994,7 +16870,7 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$1o = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain pointer-events-none select-none">`, true, false, false), _tmpl$2$_ = /* @__PURE__ */ template(`<div>`), _tmpl$3$M = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+var _tmpl$$1y = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain pointer-events-none select-none">`, true, false, false), _tmpl$2$16 = /* @__PURE__ */ template(`<div>`), _tmpl$3$N = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
 function Favicon(props) {
   const [failed, setFailed] = createSignal(false);
   const size = () => props.size || 16;
@@ -16008,14 +16884,14 @@ function Favicon(props) {
     markFaviconFailed(props.url);
   };
   return (() => {
-    var _el$ = _tmpl$2$_();
+    var _el$ = _tmpl$2$16();
     insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!faviconUrl())() && !hasError();
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$3$M();
+          var _el$3 = _tmpl$3$N();
           createRenderEffect((_p$) => {
             var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
             _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
@@ -16029,7 +16905,7 @@ function Favicon(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$1o();
+        var _el$2 = _tmpl$$1y();
         _el$2.addEventListener("error", handleError2);
         createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
         return _el$2;
@@ -16049,7 +16925,7 @@ function Favicon(props) {
     return _el$;
   })();
 }
-var _tmpl$$1n = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/80 dark:bg-neutral-800 text-[8px] font-mono font-semibold text-neutral-500 dark:text-neutral-400 z-0 shrink-0 ml-0.5">+`), _tmpl$2$Z = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1x = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/80 dark:bg-neutral-800 text-[8px] font-mono font-semibold text-neutral-500 dark:text-neutral-400 z-0 shrink-0 ml-0.5">+`), _tmpl$2$15 = /* @__PURE__ */ template(`<div>`);
 function TabFaviconStack(props) {
   const size = () => props.size || 14;
   const validUrls = createMemo(() => (props.urls || []).filter((u) => u && u.trim().length > 0 && u !== "about:blank"));
@@ -16068,7 +16944,7 @@ function TabFaviconStack(props) {
       return validUrls().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$2$Z();
+      var _el$ = _tmpl$2$15();
       insert(_el$, createComponent(For, {
         get each() {
           return visibleUrls();
@@ -16076,7 +16952,7 @@ function TabFaviconStack(props) {
         children: (url, idx) => {
           const isFocused = createMemo(() => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url))));
           return (() => {
-            var _el$4 = _tmpl$2$Z();
+            var _el$4 = _tmpl$2$15();
             insert(_el$4, createComponent(Favicon, {
               url,
               get size() {
@@ -16104,7 +16980,7 @@ function TabFaviconStack(props) {
           return validUrls().length > 3;
         },
         get children() {
-          var _el$2 = _tmpl$$1n();
+          var _el$2 = _tmpl$$1x();
           _el$2.firstChild;
           insert(_el$2, () => validUrls().length - 3, null);
           createRenderEffect((_p$) => {
@@ -16124,22 +17000,159 @@ function TabFaviconStack(props) {
     }
   });
 }
-var _tmpl$$1m = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`);
+const [audioSources, setAudioSources] = createStore({});
+const [isMasterMuted, setIsMasterMuted] = createSignal(false);
+function updateAudioSources(sourcesList) {
+  const next = {};
+  for (const s of sourcesList) {
+    if (s && s.paneId) {
+      next[s.paneId] = s;
+    }
+  }
+  setAudioSources(next);
+}
+function isPaneAudible(paneId) {
+  if (!paneId) return false;
+  const s = audioSources[paneId];
+  return Boolean(s && s.isAudible && !s.isMuted);
+}
+function isTabAudible(leafPaneIds, activePaneId) {
+  if (activePaneId && isPaneAudible(activePaneId)) return true;
+  return leafPaneIds.some((id) => isPaneAudible(id));
+}
+function isPaneMuted(paneId) {
+  if (!paneId) return false;
+  return Boolean(audioSources[paneId]?.isMuted);
+}
+function getActiveAudioSources() {
+  return Object.values(audioSources).filter((s) => Boolean(s && s.isAudible && !s.isMuted));
+}
+function getAllAudioSources() {
+  return Object.values(audioSources).filter((s) => Boolean(s && (s.isAudible || s.isMuted)));
+}
+function hasBackgroundAudio(activeWorkspaceId) {
+  const activeSources = getActiveAudioSources();
+  if (activeSources.length === 0) return false;
+  if (!activeWorkspaceId) return true;
+  for (const s of activeSources) {
+    if (!s || !s.paneId) continue;
+    const wsId = getPaneWorkspaceId(s.paneId);
+    if (wsId && wsId !== activeWorkspaceId) return true;
+    for (const [tabId, panes] of Object.entries(tabPoolStore.tabPanes)) {
+      if (panes && panes[s.paneId]) {
+        const tabWsId = getTabWorkspaceId(tabId);
+        if (tabWsId && tabWsId !== activeWorkspaceId) return true;
+      }
+    }
+  }
+  return false;
+}
+async function togglePaneMute(paneId) {
+  if (!paneId) return false;
+  const result = await window.api?.audio?.toggleMute(paneId);
+  if (typeof result === "boolean") {
+    setAudioSources(paneId, "isMuted", result);
+    return result;
+  }
+  return false;
+}
+async function toggleMasterMute() {
+  const result = await window.api?.audio?.toggleMasterMute();
+  if (typeof result === "boolean") {
+    setIsMasterMuted(result);
+    return result;
+  }
+  return false;
+}
+function isWorkspaceAudible(workspaceId, ws) {
+  if (!workspaceId) return false;
+  const activeSources = getActiveAudioSources();
+  if (activeSources.length === 0) return false;
+  for (const s of activeSources) {
+    if (!s || !s.paneId) continue;
+    const mappedWs = getPaneWorkspaceId(s.paneId);
+    if (mappedWs) {
+      if (mappedWs === workspaceId) return true;
+      continue;
+    }
+    if (ws?.activeWorkspace?.() === workspaceId && layoutStore.nodes[s.paneId]) {
+      return true;
+    }
+    for (const [tabId, panes] of Object.entries(tabPoolStore.tabPanes)) {
+      if (panes && panes[s.paneId]) {
+        const tabWsId = getTabWorkspaceId(tabId);
+        if (tabWsId === workspaceId) return true;
+      }
+    }
+  }
+  return false;
+}
+function initAudioMatrixListener() {
+  const handleUpdate = (e) => {
+    const list = e.detail;
+    if (Array.isArray(list)) {
+      updateAudioSources(list);
+    }
+  };
+  const handleDynamic = (e) => {
+    const data = e.detail;
+    if (data && data.paneId) {
+      if (data.isPlaying && data.isAudible) {
+        if (audioSources[data.paneId]) {
+          setAudioSources(data.paneId, "isAudible", true);
+        } else {
+          setAudioSources(data.paneId, {
+            paneId: data.paneId,
+            title: data.title || "Audio Stream",
+            url: data.url || "",
+            isAudible: true,
+            isMuted: false,
+            lastAudibleAt: Date.now()
+          });
+        }
+      } else if (!data.isPlaying || !data.isAudible) {
+        if (audioSources[data.paneId]) {
+          setAudioSources(data.paneId, "isAudible", false);
+        }
+      }
+    }
+  };
+  const unsubMediaStatus = window.api?.onMediaStatus?.((arg1, arg2) => {
+    const data = arg2 && arg2.paneId !== void 0 ? arg2 : arg1;
+    handleDynamic({ detail: data });
+  });
+  window.addEventListener("app:audio-sources-changed", handleUpdate);
+  window.addEventListener("app:dynamic-media-status", handleDynamic);
+  window.addEventListener("app:media-status", handleDynamic);
+  window.api?.audio?.getActiveSources().then((sources) => {
+    if (Array.isArray(sources)) updateAudioSources(sources);
+  }).catch(() => {
+  });
+  return () => {
+    unsubMediaStatus?.();
+    window.removeEventListener("app:audio-sources-changed", handleUpdate);
+    window.removeEventListener("app:dynamic-media-status", handleDynamic);
+    window.removeEventListener("app:media-status", handleDynamic);
+  };
+}
+var _tmpl$$1w = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[10px] bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-3">`);
 function TabAudioEqualizer(props) {
-  if (!props.isPlaying) return null;
-  return (() => {
-    var _el$ = _tmpl$$1m();
-    _el$.$$click = (e) => {
-      e.stopPropagation();
-      for (const id of props.leafPaneIds) {
-        window.api?.viewToggleMute?.(id);
-      }
-      if (props.activePaneId) {
-        window.api?.viewToggleMute?.(props.activePaneId);
-      }
-    };
-    return _el$;
-  })();
+  return createComponent(Show, {
+    get when() {
+      return props.isPlaying;
+    },
+    get children() {
+      var _el$ = _tmpl$$1w();
+      _el$.$$click = (e) => {
+        e.stopPropagation();
+        const targetIds = Array.from(/* @__PURE__ */ new Set([...props.leafPaneIds, ...props.activePaneId ? [props.activePaneId] : []]));
+        for (const id of targetIds) {
+          togglePaneMute(id);
+        }
+      };
+      return _el$;
+    }
+  });
 }
 delegateEvents(["click"]);
 const EMPTY_TAB_LEAF_INFO = Object.freeze({
@@ -16317,6 +17330,103 @@ function isMarketingSlogan(candidate, rawUrl) {
   }
   return false;
 }
+const VOWELS = /* @__PURE__ */ new Set(["a", "e", "i", "o", "u", "y"]);
+const COMMON_SLUG_ACRONYMS = /* @__PURE__ */ new Set([
+  "api",
+  "sdk",
+  "cli",
+  "faq",
+  "app",
+  "dev",
+  "doc",
+  "docs",
+  "ui",
+  "ux",
+  "pr",
+  "mr",
+  "rfc",
+  "git",
+  "rss",
+  "url",
+  "uri",
+  "http",
+  "https",
+  "css",
+  "html",
+  "sql",
+  "db",
+  "ssh",
+  "ssl",
+  "auth",
+  "sso",
+  "org"
+]);
+function calculateShannonEntropy(str) {
+  if (!str || str.length === 0) return 0;
+  const frequencies = /* @__PURE__ */ new Map();
+  for (const ch of str) {
+    frequencies.set(ch, (frequencies.get(ch) || 0) + 1);
+  }
+  const len = str.length;
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const p = count / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+function hasConsonantClusterNoise(str) {
+  const lettersOnly = str.toLowerCase().replace(/[^a-z]/g, "");
+  if (lettersOnly.length >= 5) {
+    let vowelCount = 0;
+    for (const ch of lettersOnly) {
+      if (VOWELS.has(ch)) vowelCount++;
+    }
+    if (vowelCount === 0) return true;
+  }
+  let consecutiveConsonants = 0;
+  for (const ch of str.toLowerCase()) {
+    if (ch >= "a" && ch <= "z") {
+      if (!VOWELS.has(ch)) {
+        consecutiveConsonants++;
+        if (consecutiveConsonants >= 5) return true;
+      } else {
+        consecutiveConsonants = 0;
+      }
+    } else {
+      consecutiveConsonants = 0;
+    }
+  }
+  return false;
+}
+function hasMixedAlphanumericNoise(token) {
+  if (/^\d+$/.test(token)) return true;
+  if (/^v\d+$/i.test(token)) return false;
+  if (/^\d+[a-z]$/i.test(token) && token.length <= 3) return false;
+  if (/^[a-z]\d+$/i.test(token) && token.length <= 3) return false;
+  if (/^[a-f0-9-]{7,}$/i.test(token) && /\d/.test(token)) return true;
+  if (/\d/.test(token) && /[a-zA-Z]/.test(token)) {
+    if (/[a-zA-Z]\d+[a-zA-Z]/.test(token)) return true;
+    if (token.length >= 6 && !token.includes("-") && !token.includes("_")) return true;
+  }
+  if (token.length >= 6 && /[a-z0-9][A-Z]$/.test(token)) return true;
+  return false;
+}
+function isEntropyNoise(token) {
+  if (!token) return true;
+  const clean = token.trim();
+  if (clean.length === 0) return true;
+  const lower = clean.toLowerCase();
+  if (COMMON_SLUG_ACRONYMS.has(lower)) return false;
+  if (/^\d+$/.test(clean)) return true;
+  if (hasMixedAlphanumericNoise(clean)) return true;
+  if (hasConsonantClusterNoise(clean)) return true;
+  if (clean.length >= 7 && !clean.includes("-") && !clean.includes("_")) {
+    const entropy = calculateShannonEntropy(clean);
+    if (entropy >= 2.85) return true;
+  }
+  return false;
+}
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DELIMITERS = [" - ", " – ", " — ", " | ", " · ", " • ", " : ", " » "];
 const GENERIC_NOISE_TOKENS = /* @__PURE__ */ new Set([
@@ -16354,8 +17464,19 @@ function capitalizeWord(word) {
   if (!word) return "";
   return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
 }
+function cleanSlugParts(slug) {
+  const parts = slug.split(/[-_]+/).filter(Boolean);
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1];
+    if (isEntropyNoise(last)) {
+      return parts.slice(0, -1);
+    }
+  }
+  return parts;
+}
 function formatSlug(slug) {
-  return slug.split(/[-_]+/).filter(Boolean).map(capitalizeWord).join(" ");
+  const parts = cleanSlugParts(slug);
+  return parts.map(capitalizeWord).join(" ");
 }
 function extractPathFallback(rawUrl) {
   try {
@@ -16365,7 +17486,7 @@ function extractPathFallback(rawUrl) {
       const lower = s.toLowerCase();
       if (ROUTE_NOISE_SLUGS.has(lower)) return false;
       if (/^\d+$/.test(s)) return false;
-      if (/^[a-f0-9-]{8,}$/i.test(s)) return false;
+      if (isEntropyNoise(s)) return false;
       return true;
     });
     if (candidateSlugs.length > 0) {
@@ -16552,6 +17673,7 @@ function getRouteKey(rawUrl) {
 }
 function assessLabelQuality(label, brand) {
   if (!label || label === "New Tab") return 0;
+  if (isEntropyNoise(label)) return -1;
   if (brand && label.toLowerCase() === brand.toLowerCase()) return 1;
   return 2;
 }
@@ -16561,8 +17683,14 @@ function getLatchedPaneLabel(paneId, candidateLabel, rawUrl, brandFallback) {
   const brand = (brandFallback || "").trim();
   const currentQuality = assessLabelQuality(candidateLabel, brand);
   const existing = paneLatchStore.get(paneId);
+  if (currentQuality === -1) {
+    if (existing && existing.quality > 0) {
+      return existing.label;
+    }
+    return brand || "New Tab";
+  }
   if (existing && existing.routeKey === currentRoute && currentRoute !== "") {
-    if (existing.quality === 2 && currentQuality < 2) {
+    if (existing.quality > currentQuality) {
       return existing.label;
     }
   }
@@ -16616,7 +17744,7 @@ function computeSmartTabName(customName, leafPanes, activePaneId) {
   const primaryName = getPaneLabel(orderedPanes[0]);
   return `${primaryName} + ${orderedPanes.length - 1}`;
 }
-var _tmpl$$1l = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$2$Y = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+var _tmpl$$1v = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$2$14 = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
 function TabItem(props) {
   const leafInfo = createMemo(() => {
     const isActive = props.isActive;
@@ -16633,13 +17761,7 @@ function TabItem(props) {
     }
     return void 0;
   });
-  const isPlaying = createMemo(() => {
-    const ids = leafInfo().leafPaneIds;
-    const pMap = props.playingTabIds;
-    if (!pMap) return false;
-    if (pMap[props.tab.id]) return true;
-    return ids.some((id) => Boolean(pMap[id]));
-  });
+  const isPlaying = createMemo(() => isTabAudible(leafInfo().leafPaneIds, props.isActive ? props.activePaneId : void 0));
   const smartName = createMemo(() => {
     const info = leafInfo();
     const panes = info.leafUrls.map((url, i) => ({
@@ -16663,7 +17785,7 @@ function TabItem(props) {
     return props.isActive ? "max-w-[140px] opacity-100 ml-1.5" : "max-w-0 opacity-0 ml-0 group-hover/tab:max-w-[130px] group-hover/tab:opacity-100 group-hover/tab:ml-1.5";
   });
   return (() => {
-    var _el$ = _tmpl$2$Y(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$2$14(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
     addEventListener(_el$3, "click", props.onTabClick, true);
     insert(_el$3, createComponent(TabFaviconStack, {
@@ -16737,7 +17859,7 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$5 = _tmpl$$1l();
+        var _el$5 = _tmpl$$1v();
         _el$5.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
@@ -16775,41 +17897,20 @@ function TabItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$1k = /* @__PURE__ */ template(`<div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$1u = /* @__PURE__ */ template(`<div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIslandAddButton(props) {
   return (() => {
-    var _el$ = _tmpl$$1k(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$1u(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$1j = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$X = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full max-w-full overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink min-w-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden flex-1 min-w-0 shrink [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1">`);
+var _tmpl$$1t = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$13 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full max-w-full overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink min-w-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden flex-1 min-w-0 shrink [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
   const [cascadePrompt, setCascadePrompt] = createSignal(null);
-  const [playingTabIds, setPlayingTabIds] = createSignal({});
-  onMount(() => {
-    const handleMediaUpdate = (data) => {
-      if (data && data.paneId) {
-        setPlayingTabIds((prev) => ({
-          ...prev,
-          [data.paneId]: Boolean(data.isPlaying)
-        }));
-      }
-    };
-    const unsub = window.api?.onMediaStatus?.((arg1, arg2) => {
-      const data = arg2 && arg2.paneId !== void 0 ? arg2 : arg1;
-      handleMediaUpdate(data);
-    });
-    const onDomMedia = (e) => handleMediaUpdate(e.detail);
-    window.addEventListener("app:media-status", onDomMedia);
-    onCleanup(() => {
-      unsub?.();
-      window.removeEventListener("app:media-status", onDomMedia);
-    });
-  });
   let tabCoresRef;
   createEffect(() => {
     const activeId = props.activeTabId;
@@ -16827,7 +17928,7 @@ function TabIsland(props) {
   });
   const tabItemMode = () => props.tabItemMode || "expanded";
   return (() => {
-    var _el$ = _tmpl$2$X(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$13(), _el$2 = _el$.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
@@ -16871,9 +17972,6 @@ function TabIsland(props) {
           },
           get isCompact() {
             return tabItemMode() === "compact" || tabItemMode() === "iconic";
-          },
-          get playingTabIds() {
-            return playingTabIds();
           },
           get configOpen() {
             return configOpenId() === tab.id;
@@ -16957,7 +18055,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$1j();
+        return _tmpl$$1t();
       }
     }), null);
     insert(_el$, createComponent(TabIslandAddButton, {
@@ -16969,7 +18067,7 @@ function TabIsland(props) {
     return _el$;
   })();
 }
-var _tmpl$$1i = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-full max-w-full px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1s = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-full max-w-full px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
   const handleCloseTab = async (tabId) => {
     const currentTabs = props.ws.tabs();
@@ -17030,7 +18128,7 @@ function AppTopbar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$1i(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1s(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -17072,7 +18170,7 @@ function AppTopbar(props) {
     }
   });
 }
-var _tmpl$$1h = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$W = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$L = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$1r = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$12 = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$M = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const query = extractSearchQuery(rawUrl);
@@ -17156,7 +18254,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$1h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$1r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -17170,7 +18268,7 @@ function HistoryDropdown(props) {
           return props.items;
         },
         children: (item, idx) => (() => {
-          var _el$9 = _tmpl$3$L(), _el$0 = _el$9.firstChild;
+          var _el$9 = _tmpl$3$M(), _el$0 = _el$9.firstChild;
           _el$9.$$click = (e) => {
             e.stopPropagation();
             props.onSelect(item.url, item.index);
@@ -17194,7 +18292,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$W();
+              return _tmpl$2$12();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -17207,21 +18305,21 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$1g = /* @__PURE__ */ template(`<kbd>`);
+var _tmpl$$1q = /* @__PURE__ */ template(`<kbd>`);
 function ShortcutBadge(props) {
   return createComponent(Show, {
     get when() {
       return props.shortcut;
     },
     get children() {
-      var _el$ = _tmpl$$1g();
+      var _el$ = _tmpl$$1q();
       insert(_el$, () => props.shortcut);
       createRenderEffect(() => className(_el$, `px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none tracking-normal inline-flex items-center justify-center select-none ${props.class || ""}`));
       return _el$;
     }
   });
 }
-var _tmpl$$1f = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$V = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
+var _tmpl$$1p = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$11 = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -17269,7 +18367,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$2$V();
+    var _el$ = _tmpl$2$11();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -17283,7 +18381,7 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$$1f(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$1p(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
             insert(_el$2, createComponent(ShortcutBadge, {
               get shortcut() {
@@ -17310,7 +18408,7 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$1e = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$U = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$K = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1o = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$10 = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$L = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$B = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
 function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
@@ -17415,7 +18513,7 @@ function ActivePaneNav(props) {
   };
   onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$4$A();
+    var _el$ = _tmpl$4$B();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -17423,7 +18521,7 @@ function ActivePaneNav(props) {
         return !canGoBack();
       },
       get children() {
-        var _el$2 = _tmpl$$1e();
+        var _el$2 = _tmpl$$1o();
         _el$2.$$contextmenu = (e) => {
           e.preventDefault();
           if (backItems().length > 0) openHistory("back");
@@ -17450,7 +18548,7 @@ function ActivePaneNav(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$U();
+        var _el$3 = _tmpl$2$10();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -17477,7 +18575,7 @@ function ActivePaneNav(props) {
         return !props.node;
       },
       get children() {
-        var _el$4 = _tmpl$3$K();
+        var _el$4 = _tmpl$3$L();
         _el$4.$$click = handleReload;
         createRenderEffect((_p$) => {
           var _v$ = `flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0 ${isReloading() ? "animate-spin text-neutral-900" : ""}`, _v$2 = !props.node;
@@ -17904,12 +19002,95 @@ const webAppStore = new WebAppStoreService();
 function isDomainPattern(str) {
   return str.includes(".") && !str.includes(" ") && !str.startsWith("http://localhost") && !str.startsWith("localhost:");
 }
-function buildAppSuggestions(_apps, query) {
+function fuzzyScore(str, query) {
+  str = str.toLowerCase();
+  query = query.toLowerCase();
+  if (str === query) return 100;
+  if (str.startsWith(query)) return 80;
+  const words = str.split(/[\s-.]+/);
+  const acronym = words.map((w) => w[0]).join("");
+  if (acronym.startsWith(query)) return 70;
+  if (str.includes(query)) return 50;
+  let qIdx = 0;
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] === query[qIdx]) {
+      qIdx++;
+      if (qIdx === query.length) return 30 + query.length / str.length * 10;
+    }
+  }
+  return 0;
+}
+const SEARCH_INTENT_MODIFIERS = /* @__PURE__ */ new Set([
+  "tutorial",
+  "tutorials",
+  "guide",
+  "guides",
+  "tip",
+  "tips",
+  "trick",
+  "tricks",
+  "help",
+  "docs",
+  "documentation",
+  "api",
+  "example",
+  "examples",
+  "course",
+  "learn",
+  "how",
+  "what",
+  "why",
+  "where",
+  "who",
+  "when",
+  "vs",
+  "versus",
+  "alternative",
+  "alternatives",
+  "pricing",
+  "free",
+  "download",
+  "review",
+  "reviews",
+  "setup",
+  "error",
+  "fix",
+  "bug",
+  "status",
+  "down",
+  "template",
+  "templates",
+  "login",
+  "signin",
+  "signup"
+]);
+function isAppIntent(query, topScore, isExact) {
+  const trimmed = query.trim();
+  if (!trimmed) return false;
+  const lower = trimmed.toLowerCase();
+  const words = lower.split(/\s+/).filter(Boolean);
+  if (words.some((w) => SEARCH_INTENT_MODIFIERS.has(w))) {
+    return false;
+  }
+  if (words.length > 1) {
+    return isExact;
+  }
+  return isExact || topScore >= 80;
+}
+function buildScoredAppSuggestions(_apps, query) {
+  const cleanQ = query.trim().toLowerCase();
   const list = [];
   const seenDomains = /* @__PURE__ */ new Set();
+  let topScore = 0;
+  let topAppExact = false;
   const frecencyMatches = frecencyEngine.searchApps(query, 3);
   for (const app of frecencyMatches) {
     seenDomains.add(app.domain);
+    const nameLower = app.name.toLowerCase();
+    const domainClean = app.domain.toLowerCase().replace(/^www\./, "").replace(/\.[a-z]+$/, "");
+    const score = Math.max(fuzzyScore(app.name, query), fuzzyScore(app.domain, query));
+    if (score > topScore) topScore = score;
+    if (nameLower === cleanQ || domainClean === cleanQ) topAppExact = true;
     list.push({
       type: "app",
       label: `Launch ${app.name}`,
@@ -17928,6 +19109,11 @@ function buildAppSuggestions(_apps, query) {
   for (const app of storeMatches) {
     if (!seenDomains.has(app.domain)) {
       seenDomains.add(app.domain);
+      const nameLower = app.name.toLowerCase();
+      const domainClean = app.domain.toLowerCase().replace(/^www\./, "").replace(/\.[a-z]+$/, "");
+      const score = Math.max(fuzzyScore(app.name, query), fuzzyScore(app.domain, query));
+      if (score > topScore) topScore = score;
+      if (nameLower === cleanQ || domainClean === cleanQ) topAppExact = true;
       list.push({
         type: "app",
         label: `Launch ${app.name}`,
@@ -17943,7 +19129,7 @@ function buildAppSuggestions(_apps, query) {
       });
     }
   }
-  return list;
+  return { items: list, topScore, topAppExact };
 }
 function buildShortcutSuggestions(query) {
   const list = [];
@@ -18052,21 +19238,36 @@ function useSearchSuggestions(urlInput, profileApps) {
           category: "Tools"
         }
       });
+      return list;
     }
-    list.push(...buildAppSuggestions(profileApps(), query));
-    list.push(...buildShortcutSuggestions(query));
+    const shortcuts = buildShortcutSuggestions(query);
+    if (shortcuts.length > 0) {
+      list.push(...shortcuts);
+    }
+    const { items: appItems, topScore, topAppExact } = buildScoredAppSuggestions(profileApps(), query);
+    const hasAppIntent = isAppIntent(query, topScore, topAppExact);
+    const googleItems = [];
     for (const sug of suggestions().slice(0, 4)) {
-      list.push({
+      googleItems.push({
         type: "google",
         label: sug,
         value: `https://www.google.com/search?q=${encodeURIComponent(sug)}`
       });
     }
-    list.push({
+    const directSearchItem = {
       type: "google",
       label: `Search Google for "${query}"`,
       value: `https://www.google.com/search?q=${encodeURIComponent(query)}`
-    });
+    };
+    if (hasAppIntent && appItems.length > 0) {
+      list.push(...appItems);
+      list.push(...googleItems);
+      list.push(directSearchItem);
+    } else {
+      list.push(directSearchItem);
+      list.push(...googleItems);
+      list.push(...appItems);
+    }
     return list;
   };
   return {
@@ -18079,7 +19280,7 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$1d = /* @__PURE__ */ template(`<img loading=eager style=image-rendering:-webkit-optimize-contrast>`, true, false, false), _tmpl$2$T = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1n = /* @__PURE__ */ template(`<img loading=eager style=image-rendering:-webkit-optimize-contrast>`, true, false, false), _tmpl$2$$ = /* @__PURE__ */ template(`<div>`);
 function getDeterministicGradient(name) {
   const gradients = ["linear-gradient(135deg, #ef4444 0%, #f97316 100%)", "linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%)", "linear-gradient(135deg, #10b981 0%, #059669 100%)", "linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)", "linear-gradient(135deg, #f59e0b 0%, #e11d48 100%)", "linear-gradient(135deg, #6366f1 0%, #a855f7 100%)", "linear-gradient(135deg, #14b8a6 0%, #0ea5e9 100%)"];
   let hash = 0;
@@ -18107,7 +19308,7 @@ function AppIcon(props) {
     },
     get fallback() {
       return (() => {
-        var _el$2 = _tmpl$2$T();
+        var _el$2 = _tmpl$2$$();
         insert(_el$2, () => (props.app.name || domain() || "A").charAt(0));
         createRenderEffect((_p$) => {
           var _v$4 = `${props.class || "w-6 h-6"} rounded-lg flex items-center justify-center text-[10px] font-bold text-white uppercase select-none shrink-0 shadow-xs`, _v$5 = getDeterministicGradient(props.app.name || domain() || "A");
@@ -18122,7 +19323,7 @@ function AppIcon(props) {
       })();
     },
     get children() {
-      var _el$ = _tmpl$$1d();
+      var _el$ = _tmpl$$1n();
       _el$.addEventListener("error", () => setHasError(true));
       createRenderEffect((_p$) => {
         var _v$ = faviconSrc(), _v$2 = `${props.class || "w-6 h-6"} rounded-lg object-contain shrink-0 p-0.5 bg-white shadow-xs border border-neutral-200/50`, _v$3 = props.app.name;
@@ -18243,7 +19444,7 @@ function useProfileApps(_profileId) {
     handleDrop
   };
 }
-var _tmpl$$1c = /* @__PURE__ */ template(`<div>`), _tmpl$2$S = /* @__PURE__ */ template(`<div class="w-5 h-5 flex items-center justify-center shrink-0">`), _tmpl$3$J = /* @__PURE__ */ template(`<span class="text-[10px] text-neutral-500 truncate tracking-tight">`), _tmpl$4$z = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$5$o = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate tracking-tight text-neutral-800 font-medium">`), _tmpl$6$g = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$7$b = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
+var _tmpl$$1m = /* @__PURE__ */ template(`<div>`), _tmpl$2$_ = /* @__PURE__ */ template(`<div class="w-5 h-5 flex items-center justify-center shrink-0">`), _tmpl$3$K = /* @__PURE__ */ template(`<span class="text-[10px] text-neutral-500 truncate tracking-tight">`), _tmpl$4$A = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$5$p = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate tracking-tight text-neutral-800 font-medium">`), _tmpl$6$h = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$7$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
 function CommandBarDropdown(props) {
   let listContainer;
   createEffect(() => {
@@ -18257,7 +19458,7 @@ function CommandBarDropdown(props) {
   });
   const isVisible = () => props.show && props.suggestions.length > 0;
   return (() => {
-    var _el$ = _tmpl$$1c();
+    var _el$ = _tmpl$$1m();
     use((el) => {
       listContainer = el;
       props.containerRef(el);
@@ -18267,7 +19468,7 @@ function CommandBarDropdown(props) {
         return props.suggestions;
       },
       children: (item, idx) => (() => {
-        var _el$2 = _tmpl$5$o(), _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$6 = _el$5.firstChild;
+        var _el$2 = _tmpl$5$p(), _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$6 = _el$5.firstChild;
         _el$2.$$click = () => props.onExecute(item);
         insert(_el$3, createComponent(Show, {
           get when() {
@@ -18275,7 +19476,7 @@ function CommandBarDropdown(props) {
           },
           get fallback() {
             return (() => {
-              var _el$9 = _tmpl$6$g();
+              var _el$9 = _tmpl$6$h();
               insert(_el$9, createComponent(Switch, {
                 get children() {
                   return [createComponent(Match, {
@@ -18310,7 +19511,7 @@ function CommandBarDropdown(props) {
             })();
           },
           get children() {
-            var _el$4 = _tmpl$2$S();
+            var _el$4 = _tmpl$2$_();
             insert(_el$4, createComponent(AppIcon, {
               get app() {
                 return item.appItem;
@@ -18326,7 +19527,7 @@ function CommandBarDropdown(props) {
             return item.subtitle;
           },
           get children() {
-            var _el$7 = _tmpl$3$J();
+            var _el$7 = _tmpl$3$K();
             insert(_el$7, () => item.subtitle);
             return _el$7;
           }
@@ -18341,7 +19542,7 @@ function CommandBarDropdown(props) {
                 return props.activeIdx === idx();
               },
               get children() {
-                var _el$0 = _tmpl$7$b(), _el$1 = _el$0.firstChild;
+                var _el$0 = _tmpl$7$a(), _el$1 = _el$0.firstChild;
                 insert(_el$0, createComponent(CornerDownLeft, {
                   "class": "w-2.5 h-2.5"
                 }), _el$1);
@@ -18350,7 +19551,7 @@ function CommandBarDropdown(props) {
             });
           },
           get children() {
-            return _tmpl$4$z();
+            return _tmpl$4$A();
           }
         }), null);
         createRenderEffect((_$p) => classList(_el$2, {
@@ -18411,16 +19612,16 @@ function cleanUrlString(rawUrl) {
     return rawUrl;
   }
 }
-var _tmpl$$1b = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$R = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$I = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$y = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$n = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$f = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all mr-1 shrink-0 active:scale-95">`), _tmpl$7$a = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+var _tmpl$$1l = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$Z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$J = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$o = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$g = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all shrink-0 active:scale-95">`), _tmpl$7$9 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
 function OmniboxInputIcon(props) {
   return (() => {
-    var _el$ = _tmpl$4$y();
+    var _el$ = _tmpl$4$z();
     insert(_el$, createComponent(Show, {
       get when() {
         return props.type === "search";
       },
       get children() {
-        return _tmpl$$1b();
+        return _tmpl$$1l();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -18428,7 +19629,7 @@ function OmniboxInputIcon(props) {
         return props.type === "localhost";
       },
       get children() {
-        return _tmpl$2$R();
+        return _tmpl$2$Z();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -18436,7 +19637,7 @@ function OmniboxInputIcon(props) {
         return props.type === "url";
       },
       get children() {
-        return _tmpl$3$I();
+        return _tmpl$3$J();
       }
     }), null);
     return _el$;
@@ -18444,17 +19645,17 @@ function OmniboxInputIcon(props) {
 }
 function CopyCleanButton(props) {
   return (() => {
-    var _el$5 = _tmpl$6$f();
+    var _el$5 = _tmpl$6$g();
     addEventListener(_el$5, "click", props.onCopy, true);
     insert(_el$5, createComponent(Show, {
       get when() {
         return props.copied;
       },
       get fallback() {
-        return _tmpl$7$a();
+        return _tmpl$7$9();
       },
       get children() {
-        return _tmpl$5$n();
+        return _tmpl$5$o();
       }
     }));
     createRenderEffect(() => setAttribute(_el$5, "title", props.copied ? "Clean Link Copied!" : "Copy Clean URL (Strips tracking parameters)"));
@@ -18559,14 +19760,15 @@ function useOmniboxEvents(params) {
       e.preventDefault();
       const idx = params.activeSuggestionIdx();
       const list = params.allSuggestions();
-      if (idx >= 0 && idx < list.length) {
-        if (list[idx].shortcutPrefix) {
-          params.setLiveInput(list[idx].shortcutPrefix);
+      const targetItem = idx >= 0 && idx < list.length ? list[idx] : list[0];
+      if (targetItem) {
+        if (targetItem.shortcutPrefix) {
+          params.setLiveInput(targetItem.shortcutPrefix);
           params.setActiveSuggestionIdx(-1);
           params.inputRef()?.focus();
           return;
         }
-        params.onLaunchUrl(list[idx].value);
+        params.onLaunchUrl(targetItem.value);
       } else if (params.liveInput().trim()) {
         params.onLaunchUrl(params.liveInput().trim());
       }
@@ -18578,7 +19780,7 @@ function useOmniboxEvents(params) {
   };
   return { handleKeyDown, dismiss };
 }
-var _tmpl$$1a = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
+var _tmpl$$1k = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
 function ActivePaneProgress(props) {
   const [loading, setLoading] = createSignal(false);
   const [progress, setProgress] = createSignal(0);
@@ -18661,13 +19863,13 @@ function ActivePaneProgress(props) {
       return loading();
     },
     get children() {
-      var _el$ = _tmpl$$1a(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1k(), _el$2 = _el$.firstChild;
       createRenderEffect((_$p) => setStyleProperty(_el$2, "width", `${progress()}%`));
       return _el$;
     }
   });
 }
-var _tmpl$$19 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$Q = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 mr-1 active:scale-95">`), _tmpl$3$H = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$1j = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$Y = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 active:scale-95">`), _tmpl$3$I = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function ActivePaneAudio(props) {
   const [isPlaying, setIsPlaying] = createSignal(false);
   const [isMuted, setIsMuted] = createSignal(false);
@@ -18679,32 +19881,40 @@ function ActivePaneAudio(props) {
     });
     onCleanup(() => unsub?.());
   });
-  const toggleMute = (e) => {
+  const isAudible = () => {
+    if (!props.paneId) return false;
+    return isPlaying();
+  };
+  const muted = () => {
+    if (!props.paneId) return false;
+    return isMuted() || isPaneMuted(props.paneId);
+  };
+  const handleToggleMute = async (e) => {
     e.stopPropagation();
     if (!props.paneId) return;
-    window.api?.viewToggleMute?.(props.paneId);
-    setIsMuted(!isMuted());
+    const next = await togglePaneMute(props.paneId);
+    setIsMuted(next);
   };
   return createComponent(Show, {
     get when() {
-      return isPlaying();
+      return isAudible();
     },
     get children() {
-      var _el$ = _tmpl$2$Q();
-      _el$.$$click = toggleMute;
+      var _el$ = _tmpl$2$Y();
+      _el$.$$click = handleToggleMute;
       insert(_el$, createComponent(Show, {
         get when() {
-          return !isMuted();
+          return !muted();
         },
         get fallback() {
-          return _tmpl$3$H();
+          return _tmpl$3$I();
         },
         get children() {
-          return _tmpl$$19();
+          return _tmpl$$1j();
         }
       }));
       createRenderEffect((_p$) => {
-        var _v$ = isMuted() ? "Unmute Tab" : "Mute Tab (Playing Audio)", _v$2 = isMuted() ? "Unmute Tab" : "Mute Tab";
+        var _v$ = muted() ? "Unmute Tab" : "Mute Tab (Playing Audio)", _v$2 = muted() ? "Unmute Tab" : "Mute Tab";
         _v$ !== _p$.e && setAttribute(_el$, "title", _p$.e = _v$);
         _v$2 !== _p$.t && setAttribute(_el$, "aria-label", _p$.t = _v$2);
         return _p$;
@@ -18717,7 +19927,7 @@ function ActivePaneAudio(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$18 = /* @__PURE__ */ template(`<div class="relative flex items-center flex-1 min-w-0 w-full"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)..."><div><span class=truncate></span></div><div>`);
+var _tmpl$$1i = /* @__PURE__ */ template(`<div class="relative flex items-center flex-1 min-w-0 w-full"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)..."><div><span class=truncate></span></div><div>`);
 function ActivePaneOmnibox(props) {
   let inputRef;
   let omniContainerRef;
@@ -18820,7 +20030,7 @@ function ActivePaneOmnibox(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$18(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
+    var _el$ = _tmpl$$1i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
     use((el) => omniContainerRef = el, _el$);
     _el$2.$$click = startEditing;
     insert(_el$2, createComponent(OmniboxInputIcon, {
@@ -18837,11 +20047,6 @@ function ActivePaneOmnibox(props) {
     use((el) => inputRef = el, _el$3);
     setAttribute(_el$3, "spellcheck", false);
     insert(_el$5, displayLabel);
-    insert(_el$6, createComponent(ActivePaneAudio, {
-      get paneId() {
-        return props.node?.id;
-      }
-    }), null);
     insert(_el$6, createComponent(Show, {
       get when() {
         return currentUrl();
@@ -18853,6 +20058,11 @@ function ActivePaneOmnibox(props) {
           },
           onCopy: handleCopyCleanUrl
         });
+      }
+    }), null);
+    insert(_el$6, createComponent(ActivePaneAudio, {
+      get paneId() {
+        return props.node?.id;
       }
     }), null);
     insert(_el$2, createComponent(ActivePaneProgress, {
@@ -18882,7 +20092,7 @@ function ActivePaneOmnibox(props) {
       }
     }), null);
     createRenderEffect((_p$) => {
-      var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-[background-color,border-color,box-shadow] duration-150 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-1 ring-neutral-900/10 border-neutral-300 shadow-none" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight transition-opacity duration-150 ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`, _v$3 = `flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1 transition-opacity duration-150 ${!isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`, _v$4 = `flex items-center gap-1 transition-opacity duration-150 ${!isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
+      var _v$ = `group/omni relative flex items-center h-[28px] w-full rounded-[10px] bg-neutral-100/80 hover:bg-neutral-100 transition-[background-color,border-color,box-shadow] duration-150 border border-neutral-200/50 overflow-hidden ${isFocused() ? "bg-white ring-1 ring-neutral-900/10 border-neutral-300 shadow-none" : ""}`, _v$2 = `w-full bg-transparent text-[11px] font-medium text-neutral-800 outline-none px-1 pr-2 tracking-tight transition-opacity duration-150 ${isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`, _v$3 = `flex-1 truncate text-[11px] font-medium text-neutral-600 px-1 pr-1 tracking-tight select-none cursor-text flex items-center gap-1 transition-opacity duration-150 ${!isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`, _v$4 = `flex items-center gap-1.5 pr-1 transition-opacity duration-150 ${!isFocused() ? "opacity-100" : "opacity-0 pointer-events-none absolute"}`;
       _v$ !== _p$.e && className(_el$2, _p$.e = _v$);
       _v$2 !== _p$.t && className(_el$3, _p$.t = _v$2);
       _v$3 !== _p$.a && className(_el$4, _p$.a = _v$3);
@@ -18899,7 +20109,7 @@ function ActivePaneOmnibox(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$17 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"><div class="w-full max-w-md bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl overflow-hidden pointer-events-auto"><div class="flex items-center justify-between px-5 py-4 border-b border-neutral-100 dark:border-neutral-800"><div><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Saved Layout Presets</h3><p class="text-[11px] text-neutral-400 font-mono mt-0.5">Your customized multi-pane stacks</p></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button></div><form class="p-4 border-b border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-950/40 flex gap-2"><input type=text placeholder="Save current layout as (e.g. Daily Review)..."class="flex-1 px-3 py-1.5 text-xs bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400"><button type=submit class="px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 rounded-xl text-xs font-medium hover:opacity-90 active:scale-95 disabled:opacity-40 transition-all flex items-center gap-1 shrink-0 cursor-pointer"><span>Save Current</span></button></form><div class="p-4 max-h-72 overflow-y-auto flex flex-col gap-2">`), _tmpl$2$P = /* @__PURE__ */ template(`<div class="py-8 text-center text-xs text-neutral-400 font-mono">No saved presets yet. Arrange your split layout and save it above.`), _tmpl$3$G = /* @__PURE__ */ template(`<div class="group flex items-center justify-between p-3 rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 hover:border-neutral-300 dark:hover:border-neutral-700 bg-white dark:bg-neutral-900/60 transition-all"><div><h4 class="text-xs font-semibold text-neutral-900 dark:text-neutral-100"></h4><p class="text-[10px] text-neutral-400 font-mono mt-0.5"></p></div><div class="flex items-center gap-1.5"><button class="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"><span>Apply</span></button><button class="p-1 text-neutral-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"title="Delete Preset">`);
+var _tmpl$$1h = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"><div class="w-full max-w-md bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl overflow-hidden pointer-events-auto"><div class="flex items-center justify-between px-5 py-4 border-b border-neutral-100 dark:border-neutral-800"><div><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Saved Layout Presets</h3><p class="text-[11px] text-neutral-400 font-mono mt-0.5">Your customized multi-pane stacks</p></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button></div><form class="p-4 border-b border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-950/40 flex gap-2"><input type=text placeholder="Save current layout as (e.g. Daily Review)..."class="flex-1 px-3 py-1.5 text-xs bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400"><button type=submit class="px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 rounded-xl text-xs font-medium hover:opacity-90 active:scale-95 disabled:opacity-40 transition-all flex items-center gap-1 shrink-0 cursor-pointer"><span>Save Current</span></button></form><div class="p-4 max-h-72 overflow-y-auto flex flex-col gap-2">`), _tmpl$2$X = /* @__PURE__ */ template(`<div class="py-8 text-center text-xs text-neutral-400 font-mono">No saved presets yet. Arrange your split layout and save it above.`), _tmpl$3$H = /* @__PURE__ */ template(`<div class="group flex items-center justify-between p-3 rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 hover:border-neutral-300 dark:hover:border-neutral-700 bg-white dark:bg-neutral-900/60 transition-all"><div><h4 class="text-xs font-semibold text-neutral-900 dark:text-neutral-100"></h4><p class="text-[10px] text-neutral-400 font-mono mt-0.5"></p></div><div class="flex items-center gap-1.5"><button class="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"><span>Apply</span></button><button class="p-1 text-neutral-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"title="Delete Preset">`);
 function UserPresetsModal(props) {
   const [presets, setPresets] = createSignal([]);
   const [newPresetName, setNewPresetName] = createSignal("");
@@ -18941,7 +20151,7 @@ function UserPresetsModal(props) {
     get children() {
       return createComponent(Portal, {
         get children() {
-          var _el$ = _tmpl$$17(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$6.nextSibling;
+          var _el$ = _tmpl$$1h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$6.nextSibling;
           addEventListener(_el$, "click", props.onClose, true);
           _el$2.$$click = (e) => e.stopPropagation();
           addEventListener(_el$5, "click", props.onClose, true);
@@ -18958,7 +20168,7 @@ function UserPresetsModal(props) {
               return presets().length > 0;
             },
             get fallback() {
-              return _tmpl$2$P();
+              return _tmpl$2$X();
             },
             get children() {
               return createComponent(For, {
@@ -18966,7 +20176,7 @@ function UserPresetsModal(props) {
                   return presets();
                 },
                 children: (preset) => (() => {
-                  var _el$10 = _tmpl$3$G(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$11.nextSibling, _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$15.nextSibling;
+                  var _el$10 = _tmpl$3$H(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$11.nextSibling, _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$15.nextSibling;
                   insert(_el$12, () => preset.name);
                   insert(_el$13, () => preset.previewApps.map((a) => a.name).join(" + ") || "Layout");
                   _el$15.$$click = () => handleApply(preset);
@@ -18991,7 +20201,7 @@ function UserPresetsModal(props) {
   });
 }
 delegateEvents(["click", "input"]);
-var _tmpl$$16 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$O = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$F = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom</span></button></div><div class="px-2 py-1.5 border-t border-neutral-100 bg-neutral-50/50"><button class="w-full text-left px-2 py-1 hover:bg-neutral-100 text-neutral-600 hover:text-neutral-900 rounded-md text-[10px] font-medium transition-colors flex items-center justify-between"><span>My Presets...</span><span class="text-[9px] text-neutral-400">⌘P`), _tmpl$4$x = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+var _tmpl$$1g = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$W = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$G = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom</span></button></div><div class="px-2 py-1.5 border-t border-neutral-100 bg-neutral-50/50"><button class="w-full text-left px-2 py-1 hover:bg-neutral-100 text-neutral-600 hover:text-neutral-900 rounded-md text-[10px] font-medium transition-colors flex items-center justify-between"><span>My Presets...</span><span class="text-[9px] text-neutral-400">⌘P`), _tmpl$4$y = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
 function SplitMenu(props) {
   let triggerRef;
   const [coords, setCoords] = createSignal({
@@ -19027,7 +20237,7 @@ function SplitMenu(props) {
     props.setShowSplitMenu(false);
   };
   return (() => {
-    var _el$ = _tmpl$4$x(), _el$3 = _el$.firstChild;
+    var _el$ = _tmpl$4$y(), _el$3 = _el$.firstChild;
     var _ref$ = triggerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
     insert(_el$, createComponent(ActionTooltip, {
@@ -19039,7 +20249,7 @@ function SplitMenu(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$16();
+        var _el$2 = _tmpl$$1g();
         _el$2.$$click = (e) => {
           e.stopPropagation();
           PaneFocusManager.focusPane(props.paneId);
@@ -19058,14 +20268,14 @@ function SplitMenu(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$O();
+              var _el$4 = _tmpl$2$W();
               _el$4.$$click = (e) => {
                 e.stopPropagation();
                 props.setShowSplitMenu(false);
               };
               return _el$4;
             })(), (() => {
-              var _el$5 = _tmpl$3$F(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling, _el$12 = _el$9.nextSibling, _el$13 = _el$12.firstChild;
+              var _el$5 = _tmpl$3$G(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling, _el$12 = _el$9.nextSibling, _el$13 = _el$12.firstChild;
               _el$5.$$pointerdown = (e) => e.stopPropagation();
               _el$0.$$click = (e) => handleSplitClick("left", e);
               _el$1.$$click = (e) => handleSplitClick("right", e);
@@ -19218,7 +20428,8 @@ function getSortedIdentities(rawJson) {
     const handle = raw.handle || void 0;
     const displayName = raw.displayName || void 0;
     const avatarUrl = raw.avatarUrl || void 0;
-    const displayLabel = email || handle || displayName || providerId;
+    const isPlaceholder = (str) => !str || str.toLowerCase() === "google account" || str.toLowerCase() === "google user" || str.toLowerCase() === "microsoft 365" || str.toLowerCase() === "@github_user";
+    const displayLabel = (email && !isPlaceholder(email) ? email : void 0) || (handle && !isPlaceholder(handle) ? handle : void 0) || (displayName && !isPlaceholder(displayName) ? displayName : void 0) || email || handle || displayName || providerId;
     if (displayLabel) {
       list.push({
         providerId,
@@ -19240,7 +20451,7 @@ function getPrimaryIdentityDisplay(rawJson) {
   const primary = getPrimaryIdentity(rawJson);
   return primary ? primary.displayLabel : "";
 }
-var _tmpl$$15 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400"> active`), _tmpl$2$N = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 text-xs font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$E = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$w = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="text-xs font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$m = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-xs font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left text-[11px] font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$e = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
+var _tmpl$$1f = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400"> active`), _tmpl$2$V = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 text-xs font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$F = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$x = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="text-xs font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$n = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-xs font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left text-[11px] font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$f = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
 const PINNED_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -19406,7 +20617,7 @@ function ConnectedAccountsList(props) {
     return showAll() ? list : list.slice(0, 4);
   };
   return (() => {
-    var _el$ = _tmpl$4$w(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$4$x(), _el$2 = _el$.firstChild;
     _el$2.firstChild;
     var _el$8 = _el$2.nextSibling;
     insert(_el$2, createComponent(Show, {
@@ -19414,7 +20625,7 @@ function ConnectedAccountsList(props) {
         return connectedProviders().length > 0;
       },
       get children() {
-        var _el$4 = _tmpl$$15(), _el$5 = _el$4.firstChild;
+        var _el$4 = _tmpl$$1f(), _el$5 = _el$4.firstChild;
         insert(_el$4, () => connectedProviders().length, _el$5);
         return _el$4;
       }
@@ -19424,7 +20635,7 @@ function ConnectedAccountsList(props) {
         return ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
       },
       get children() {
-        var _el$6 = _tmpl$2$N(), _el$7 = _el$6.firstChild;
+        var _el$6 = _tmpl$2$V(), _el$7 = _el$6.firstChild;
         _el$7.$$input = (e) => setSearchQuery(e.currentTarget.value);
         createRenderEffect(() => _el$7.value = searchQuery());
         return _el$6;
@@ -19439,7 +20650,7 @@ function ConnectedAccountsList(props) {
         const isLoading = () => loadingProvider() === provider.id;
         const accountText = () => identity()?.email || identity()?.handle || "";
         return (() => {
-          var _el$0 = _tmpl$5$m(), _el$1 = _el$0.firstChild, _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild, _el$15 = _el$13.nextSibling, _el$16 = _el$1.nextSibling;
+          var _el$0 = _tmpl$5$n(), _el$1 = _el$0.firstChild, _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild, _el$15 = _el$13.nextSibling, _el$16 = _el$1.nextSibling;
           _el$11.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
@@ -19473,7 +20684,7 @@ function ConnectedAccountsList(props) {
       children: (provider) => {
         const isLoading = () => loadingProvider() === provider.id;
         return (() => {
-          var _el$17 = _tmpl$6$e(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild, _el$21 = _el$19.nextSibling, _el$22 = _el$21.firstChild, _el$23 = _el$18.nextSibling;
+          var _el$17 = _tmpl$6$f(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild, _el$21 = _el$19.nextSibling, _el$22 = _el$21.firstChild, _el$23 = _el$18.nextSibling;
           _el$20.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
@@ -19500,7 +20711,7 @@ function ConnectedAccountsList(props) {
         return memo(() => !!!searchQuery())() && ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
       },
       get children() {
-        var _el$9 = _tmpl$3$E();
+        var _el$9 = _tmpl$3$F();
         _el$9.$$click = () => setShowAll(!showAll());
         insert(_el$9, (() => {
           var _c$ = memo(() => !!showAll());
@@ -19513,7 +20724,7 @@ function ConnectedAccountsList(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$14 = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs font-normal text-neutral-600">Incognito mode (clears browsing data on exit)</span></label><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Proxy server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700"></div><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700">`), _tmpl$2$M = /* @__PURE__ */ template(`<div class="flex flex-col gap-4 p-1"><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200/90 rounded-xl px-3 py-2 text-xs font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2 pt-0.5"></div></div><div class=pt-0.5><button type=button class="flex items-center gap-1.5 text-xs font-normal text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"><span></span><span>Advanced settings</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$D = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$v = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+var _tmpl$$1e = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs font-normal text-neutral-600">Incognito mode (clears browsing data on exit)</span></label><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Proxy server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700"></div><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700">`), _tmpl$2$U = /* @__PURE__ */ template(`<div class="flex flex-col gap-4 p-1"><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200/90 rounded-xl px-3 py-2 text-xs font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2 pt-0.5"></div></div><div class=pt-0.5><button type=button class="flex items-center gap-1.5 text-xs font-normal text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"><span></span><span>Advanced settings</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$E = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$w = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
 const COLORS = [
   "#e11d48",
   // Rose Red
@@ -19555,7 +20766,7 @@ function ProfileForm(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$2$M(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    var _el$ = _tmpl$2$U(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
     _el$4.$$input = (e) => setName(e.currentTarget.value);
     insert(_el$, createComponent(ConnectedAccountsList, {
       get profileId() {
@@ -19566,7 +20777,7 @@ function ProfileForm(props) {
       }
     }), _el$5);
     insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$23 = _tmpl$3$D();
+      var _el$23 = _tmpl$3$E();
       _el$23.$$click = () => setColor(c);
       setStyleProperty(_el$23, "background-color", c);
       createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] ${color() === c ? "ring-2 ring-offset-2 ring-neutral-900 scale-105" : "border border-black/10"}`));
@@ -19579,7 +20790,7 @@ function ProfileForm(props) {
         return showAdvanced();
       },
       get children() {
-        var _el$1 = _tmpl$$14(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+        var _el$1 = _tmpl$$1e(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
         _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
         _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
         _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
@@ -19592,7 +20803,7 @@ function ProfileForm(props) {
     insert(_el$19, (() => {
       var _c$ = memo(() => !!props.onDelete);
       return () => _c$() && (() => {
-        var _el$24 = _tmpl$4$v();
+        var _el$24 = _tmpl$4$w();
         addEventListener(_el$24, "click", props.onDelete, true);
         return _el$24;
       })();
@@ -19605,7 +20816,103 @@ function ProfileForm(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$13 = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`), _tmpl$2$L = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$3$C = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$4$u = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$5$l = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$6$d = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono text-neutral-600 truncate mt-0.5 tracking-tight flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$7$9 = /* @__PURE__ */ template(`<span class="text-[8.5px] text-neutral-400 font-sans shrink-0">+`), _tmpl$8$5 = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate mt-0.5">`);
+var _tmpl$$1d = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$2$T = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$3$D = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$4$v = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$5$m = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono text-neutral-600 truncate mt-0.5 tracking-tight flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$6$e = /* @__PURE__ */ template(`<span class="text-[8.5px] text-neutral-400 font-sans shrink-0 hover:text-neutral-600">+`), _tmpl$7$8 = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate mt-0.5">`);
+function ProfileMenuItem(props) {
+  const sortedIdentities = () => getSortedIdentities(props.profile?.identities_json);
+  return (() => {
+    var _el$ = _tmpl$4$v(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$8 = _el$2.nextSibling, _el$0 = _el$8.firstChild;
+    _el$.$$click = (e) => {
+      e.stopPropagation();
+      props.onSelect(props.profile.id);
+    };
+    addEventListener(_el$, "mouseenter", props.onMouseEnter);
+    insert(_el$3, () => props.profile.name.charAt(0).toUpperCase());
+    insert(_el$5, () => props.profile.name);
+    insert(_el$4, () => {
+      const sorted = sortedIdentities();
+      if (sorted.length > 0) {
+        const primary = sorted[0];
+        const othersCount = sorted.length - 1;
+        const allAccountsTooltip = sorted.map((s) => s.displayLabel).join(", ");
+        return (() => {
+          var _el$1 = _tmpl$5$m(), _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling;
+          setAttribute(_el$1, "title", allAccountsTooltip);
+          _el$10.addEventListener("error", (e) => {
+            e.currentTarget.style.display = "none";
+          });
+          insert(_el$11, () => primary.displayLabel);
+          insert(_el$1, othersCount > 0 ? (() => {
+            var _el$12 = _tmpl$6$e();
+            _el$12.firstChild;
+            insert(_el$12, othersCount, null);
+            createRenderEffect(() => setAttribute(_el$12, "title", `${othersCount} more connected: ${sorted.slice(1).map((s) => s.displayLabel).join(", ")}`));
+            return _el$12;
+          })() : null, null);
+          createRenderEffect((_p$) => {
+            var _v$3 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(primary.providerId)}&sz=64`, _v$4 = primary.providerId;
+            _v$3 !== _p$.e && setAttribute(_el$10, "src", _p$.e = _v$3);
+            _v$4 !== _p$.t && setAttribute(_el$10, "alt", _p$.t = _v$4);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
+          return _el$1;
+        })();
+      }
+      return (() => {
+        var _el$14 = _tmpl$7$8();
+        insert(_el$14, () => props.profile.is_ephemeral ? "Temporary Session" : "Independent Profile");
+        return _el$14;
+      })();
+    }, null);
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return props.profile.is_ephemeral;
+      },
+      get children() {
+        return _tmpl$$1d();
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.isSelected;
+      },
+      get children() {
+        return _tmpl$2$T();
+      }
+    }), _el$8);
+    insert(_el$8, createComponent(Show, {
+      get when() {
+        return props.onSplitWithProfile;
+      },
+      get children() {
+        var _el$9 = _tmpl$3$D();
+        _el$9.$$click = (e) => {
+          e.stopPropagation();
+          props.onSplitWithProfile?.(props.profile.id);
+        };
+        return _el$9;
+      }
+    }), _el$0);
+    _el$0.$$click = (e) => {
+      e.stopPropagation();
+      props.onEdit(props.profile.id);
+    };
+    createRenderEffect((_p$) => {
+      var _v$ = `group/prow relative flex items-center justify-between px-2.5 py-1.5 rounded-[8px] transition-all w-full cursor-pointer select-none outline-none ${props.isHighlighted ? "bg-neutral-100 text-neutral-900 font-medium shadow-2xs" : props.isSelected ? "bg-neutral-50/80 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50/80 hover:text-neutral-900"}`, _v$2 = props.profile.color || "#3b82f6";
+      _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$3, "background-color", _p$.t = _v$2);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$1c = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`);
 function ProfileMenuList(props) {
   let listRef;
   const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
@@ -19634,7 +20941,7 @@ function ProfileMenuList(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$13(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$$1c(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
     _el$.$$keydown = handleKeyDown;
     var _ref$ = listRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
@@ -19642,111 +20949,42 @@ function ProfileMenuList(props) {
       get each() {
         return layoutStore.profiles;
       },
-      children: (profile, idx) => (() => {
-        var _el$6 = _tmpl$5$l(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$11 = _el$7.nextSibling, _el$13 = _el$11.firstChild;
-        _el$6.$$click = (e) => {
-          e.stopPropagation();
-          props.onSelect(profile.id);
-        };
-        _el$6.addEventListener("mouseenter", () => setHighlightedIndex(idx()));
-        insert(_el$8, () => profile.name.charAt(0).toUpperCase());
-        insert(_el$0, () => profile.name);
-        insert(_el$9, () => {
-          const sorted = getSortedIdentities(profile?.identities_json);
-          if (sorted.length > 0) {
-            const primary = sorted[0];
-            const othersCount = sorted.length - 1;
-            return (() => {
-              var _el$14 = _tmpl$6$d(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
-              _el$15.addEventListener("error", (e) => {
-                e.currentTarget.style.display = "none";
-              });
-              insert(_el$16, () => primary.displayLabel);
-              insert(_el$14, othersCount > 0 ? (() => {
-                var _el$17 = _tmpl$7$9();
-                _el$17.firstChild;
-                insert(_el$17, othersCount, null);
-                return _el$17;
-              })() : null, null);
-              createRenderEffect((_p$) => {
-                var _v$3 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(primary.providerId)}&sz=64`, _v$4 = primary.providerId;
-                _v$3 !== _p$.e && setAttribute(_el$15, "src", _p$.e = _v$3);
-                _v$4 !== _p$.t && setAttribute(_el$15, "alt", _p$.t = _v$4);
-                return _p$;
-              }, {
-                e: void 0,
-                t: void 0
-              });
-              return _el$14;
-            })();
-          }
-          return (() => {
-            var _el$19 = _tmpl$8$5();
-            insert(_el$19, () => profile.is_ephemeral ? "Temporary Session" : "Dedicated Partition");
-            return _el$19;
-          })();
-        }, null);
-        insert(_el$7, createComponent(Show, {
-          get when() {
-            return profile.is_ephemeral;
-          },
-          get children() {
-            return _tmpl$2$L();
-          }
-        }), null);
-        insert(_el$6, createComponent(Show, {
-          get when() {
-            return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
-          },
-          get children() {
-            return _tmpl$3$C();
-          }
-        }), _el$11);
-        insert(_el$11, createComponent(Show, {
-          get when() {
-            return props.onSplitWithProfile;
-          },
-          get children() {
-            var _el$12 = _tmpl$4$u();
-            _el$12.$$click = (e) => {
-              e.stopPropagation();
-              props.onSplitWithProfile?.(profile.id);
-            };
-            return _el$12;
-          }
-        }), _el$13);
-        _el$13.$$click = (e) => {
-          e.stopPropagation();
-          props.onEdit(profile.id);
-        };
-        createRenderEffect((_p$) => {
-          var _v$ = `group/prow relative flex items-center justify-between px-2.5 py-1.5 rounded-[8px] transition-all w-full cursor-pointer select-none outline-none ${highlightedIndex() === idx() ? "bg-neutral-100 text-neutral-900 font-medium shadow-sm" : props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId ? "bg-neutral-50/80 text-neutral-900 font-medium" : "text-neutral-600 hover:bg-neutral-50/80 hover:text-neutral-900"}`, _v$2 = profile.color || "#3b82f6";
-          _v$ !== _p$.e && className(_el$6, _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$8, "background-color", _p$.t = _v$2);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0
-        });
-        return _el$6;
-      })()
+      children: (profile, idx) => createComponent(ProfileMenuItem, {
+        profile,
+        get isHighlighted() {
+          return highlightedIndex() === idx();
+        },
+        get isSelected() {
+          return props.currentProfileId === profile.id || profile.id === "main" && !props.currentProfileId;
+        },
+        onMouseEnter: () => setHighlightedIndex(idx()),
+        get onSelect() {
+          return props.onSelect;
+        },
+        get onSplitWithProfile() {
+          return props.onSplitWithProfile;
+        },
+        get onEdit() {
+          return props.onEdit;
+        }
+      })
     }));
     addEventListener(_el$5, "click", props.onCreateNew, true);
     return _el$;
   })();
 }
 delegateEvents(["keydown", "click"]);
-var _tmpl$$12 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$K = /* @__PURE__ */ template(`<div class=p-3>`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$S = /* @__PURE__ */ template(`<div class=p-3>`);
 function ProfilePopoverContent(props) {
   return (() => {
-    var _el$ = _tmpl$$12(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$1b(), _el$2 = _el$.firstChild;
     insert(_el$2, createComponent(Show, {
       get when() {
         return !props.isFormMode;
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$K();
+          var _el$3 = _tmpl$2$S();
           insert(_el$3, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((item) => item.id === props.ctrl.editingProfileId());
@@ -19807,7 +21045,7 @@ function ProfilePopoverContent(props) {
     return _el$;
   })();
 }
-var _tmpl$$11 = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$2$J = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$3$B = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$4$t = /* @__PURE__ */ template(`<div data-overlay-chrome=true>`), _tmpl$5$k = /* @__PURE__ */ template(`<div>`), _tmpl$6$c = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$3$C = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$4$u = /* @__PURE__ */ template(`<div data-overlay-chrome=true>`), _tmpl$5$l = /* @__PURE__ */ template(`<div>`), _tmpl$6$d = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
 function ProfileMenu$1(props) {
   let btnRef;
   const [anchorPos, setAnchorPos] = createSignal(null);
@@ -19877,7 +21115,7 @@ function ProfileMenu$1(props) {
     ctrl.setIsCreatingProfile(true);
   };
   return (() => {
-    var _el$ = _tmpl$5$k();
+    var _el$ = _tmpl$5$l();
     insert(_el$, createComponent(Show, {
       get when() {
         return isCluster();
@@ -19892,7 +21130,7 @@ function ProfileMenu$1(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$1 = _tmpl$6$c(), _el$10 = _el$1.firstChild;
+            var _el$1 = _tmpl$6$d(), _el$10 = _el$1.firstChild;
             _el$1.$$click = (e) => {
               e.stopPropagation();
               toggleMenu();
@@ -19907,7 +21145,7 @@ function ProfileMenu$1(props) {
       },
       get children() {
         return [(() => {
-          var _el$2 = _tmpl$$11(), _el$3 = _el$2.firstChild;
+          var _el$2 = _tmpl$$1a(), _el$3 = _el$2.firstChild;
           _el$2.$$click = (e) => {
             e.stopPropagation();
             toggleMenu(e.currentTarget.getBoundingClientRect());
@@ -19924,7 +21162,7 @@ function ProfileMenu$1(props) {
           });
           return _el$2;
         })(), (() => {
-          var _el$4 = _tmpl$2$J(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling;
+          var _el$4 = _tmpl$2$R(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling;
           _el$8.nextSibling;
           insert(_el$5, () => currentProfile().name, _el$8);
           insert(_el$5, (() => {
@@ -19943,7 +21181,7 @@ function ProfileMenu$1(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$9 = _tmpl$3$B();
+              var _el$9 = _tmpl$3$C();
               _el$9.$$pointerdown = (e) => {
                 e.stopPropagation();
                 setFrozenTargetId("");
@@ -19952,7 +21190,7 @@ function ProfileMenu$1(props) {
               };
               return _el$9;
             })(), (() => {
-              var _el$0 = _tmpl$4$t();
+              var _el$0 = _tmpl$4$u();
               insert(_el$0, createComponent(ProfilePopoverContent, {
                 get targetId() {
                   return targetId();
@@ -20008,7 +21246,7 @@ function ProfileMenu$1(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$10 = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$19 = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActivePaneActions(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -20018,7 +21256,7 @@ function ActivePaneActions(props) {
   });
   const stableNode = createMemo((prev) => props.node || prev || null);
   return (() => {
-    var _el$ = _tmpl$$10();
+    var _el$ = _tmpl$$19();
     insert(_el$, createComponent(Show, {
       get when() {
         return stableNode();
@@ -20052,18 +21290,21 @@ function ActivePaneActions(props) {
     return _el$;
   })();
 }
-var _tmpl$$$ = /* @__PURE__ */ template(`<div id=active-pane-bar role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
+var _tmpl$$18 = /* @__PURE__ */ template(`<div id=active-pane-bar role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
 function ActivePaneBar(props) {
   const activeNode = createMemo((prev) => {
     const id = props.ws.activePaneId();
     if (id) {
-      const node = layoutStore.nodes[id];
+      const node = layoutStore.nodes[id] || getInFlightPane(id);
       if (node && node.type === "pane") {
         return node;
       }
     }
-    if (prev && layoutStore.nodes[prev.id] && layoutStore.nodes[prev.id].type === "pane") {
-      return layoutStore.nodes[prev.id];
+    if (prev) {
+      const prevNode = layoutStore.nodes[prev.id] || getInFlightPane(prev.id);
+      if (prevNode && prevNode.type === "pane") {
+        return prevNode;
+      }
     }
     if (layoutStore.rootId) {
       const findPane = (currId) => {
@@ -20086,7 +21327,7 @@ function ActivePaneBar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$$();
+      var _el$ = _tmpl$$18();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("top"));
       var _ref$ = props.activeBarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.activeBarRef = _el$;
@@ -20128,12 +21369,12 @@ function ActivePaneBar(props) {
     }
   });
 }
-var _tmpl$$_ = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
 function WorkspaceTooltip(props) {
   const profile = () => layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id);
   return createComponent(Portal, {
     get children() {
-      var _el$ = _tmpl$$_(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+      var _el$ = _tmpl$$17(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
       insert(_el$3, createComponent(WorkspaceIcon, {
         get icon() {
           return props.ws.icon;
@@ -20165,7 +21406,7 @@ function WorkspaceTooltip(props) {
     }
   });
 }
-var _tmpl$$Z = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
+var _tmpl$$16 = /* @__PURE__ */ template(`<span class="absolute -bottom-1 -right-1 flex items-end gap-[1.5px] h-3 px-1 py-[1.5px] rounded-[4px] bg-neutral-900 text-white border border-neutral-700/60 shadow-[0_1px_3px_rgba(0,0,0,0.25)] pointer-events-none z-10 transition-transform animate-in fade-in zoom-in-95 duration-200"title="Playing audio in background"><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[8px] bg-white rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-3">`), _tmpl$2$Q = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
 function WorkspaceItem(props) {
   const [isHovered, setIsHovered] = createSignal(false);
   const [hoveredRect, setHoveredRect] = createSignal(null);
@@ -20184,8 +21425,12 @@ function WorkspaceItem(props) {
       props.onCloseConfig();
     }
   };
+  const isAudible = () => {
+    if (props.isActive) return false;
+    return isWorkspaceAudible(props.ws.id, props.appWs);
+  };
   return (() => {
-    var _el$ = _tmpl$$Z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$2$Q(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     _el$.addEventListener("mouseleave", () => setIsHovered(false));
     _el$.addEventListener("mouseenter", (e) => {
       setIsHovered(true);
@@ -20207,6 +21452,14 @@ function WorkspaceItem(props) {
       size: 14,
       strokeWidth: 1.75
     }));
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return isAudible();
+      },
+      get children() {
+        return _tmpl$$16();
+      }
+    }), null);
     insert(_el$, createComponent(WorkspaceTooltip, {
       get ws() {
         return props.ws;
@@ -20238,7 +21491,7 @@ function WorkspaceItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$Y = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$I = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$A = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$s = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$j = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$b = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$8 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$4 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+var _tmpl$$15 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$P = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$t = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$k = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$c = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$4 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
 const RECENT_KEY = "apposition:recent_workspace_icons";
 function IconPickerPopover(props) {
   let popoverRef;
@@ -20321,14 +21574,14 @@ function IconPickerPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$Y();
+        var _el$ = _tmpl$$15();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        var _el$2 = _tmpl$4$t(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -20346,7 +21599,7 @@ function IconPickerPopover(props) {
             return search();
           },
           get children() {
-            var _el$7 = _tmpl$2$I();
+            var _el$7 = _tmpl$2$P();
             _el$7.$$click = () => setSearch("");
             insert(_el$7, createComponent(X, {
               size: 12
@@ -20363,7 +21616,7 @@ function IconPickerPopover(props) {
             return memo(() => recentIcons().length > 0)() && !search();
           },
           get children() {
-            var _el$0 = _tmpl$3$A();
+            var _el$0 = _tmpl$3$B();
             insert(_el$0, createComponent(Clock, {
               size: 11,
               "class": "text-neutral-400 ml-1 mr-0.5 shrink-0"
@@ -20377,7 +21630,7 @@ function IconPickerPopover(props) {
                 if (!item) return null;
                 const Comp = item.component;
                 return (() => {
-                  var _el$11 = _tmpl$5$j();
+                  var _el$11 = _tmpl$5$k();
                   _el$11.$$click = () => handlePickIcon(id);
                   insert(_el$11, createComponent(Comp, {
                     size: 12,
@@ -20394,7 +21647,7 @@ function IconPickerPopover(props) {
         insert(_el$1, createComponent(For, {
           each: ICON_CATEGORIES,
           children: (cat) => (() => {
-            var _el$12 = _tmpl$6$b();
+            var _el$12 = _tmpl$6$c();
             _el$12.$$click = () => {
               setSelectedCategory(cat);
               setFocusedIdx(-1);
@@ -20413,7 +21666,7 @@ function IconPickerPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$7$8(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+              var _el$13 = _tmpl$7$7(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
               _el$16.nextSibling;
               insert(_el$13, search, _el$16);
               return _el$13;
@@ -20472,7 +21725,7 @@ function IconPickerPopover(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$X = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$H = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$r = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$i = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$a = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$7 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$14 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$O = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$s = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$j = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$b = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$6 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function WorkspacePopover(props) {
   let popoverRef;
@@ -20498,14 +21751,14 @@ function WorkspacePopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$X();
+        var _el$ = _tmpl$$14();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$5$i(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$5$j(), _el$3 = _el$2.firstChild;
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
         insert(_el$3, createComponent(Show, {
@@ -20514,7 +21767,7 @@ function WorkspacePopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$6$a(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
+              var _el$13 = _tmpl$6$b(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
               insert(_el$18, () => props.cascadePrompt?.profileName);
               _el$20.$$click = (e) => {
                 e.stopPropagation();
@@ -20529,7 +21782,7 @@ function WorkspacePopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$H(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+              var _el$4 = _tmpl$2$O(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
               _el$7.$$click = (e) => {
                 e.stopPropagation();
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -20559,7 +21812,7 @@ function WorkspacePopover(props) {
               createRenderEffect(() => _el$8.value = props.ws.name);
               return _el$4;
             })(), (() => {
-              var _el$9 = _tmpl$3$z(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$9 = _tmpl$3$A(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$10) : flipThumbRef = _el$10;
               insert(_el$1, createComponent(For, {
@@ -20581,7 +21834,7 @@ function WorkspacePopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$22 = _tmpl$7$7(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
+                    var _el$22 = _tmpl$7$6(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
                     _el$22.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -20615,7 +21868,7 @@ function WorkspacePopover(props) {
               }), null);
               return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$4$r(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$4$s(), _el$12 = _el$11.firstChild;
               _el$12.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -20659,7 +21912,7 @@ function WorkspacePopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$W = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$G = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+var _tmpl$$13 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$N = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
 function WorkspaceCreateFlyout(props) {
   const [name, setName] = createSignal("");
   const [selectedIcon, setSelectedIcon] = createSignal(null);
@@ -20687,14 +21940,14 @@ function WorkspaceCreateFlyout(props) {
       return createComponent(Portal, {
         get children() {
           return [(() => {
-            var _el$ = _tmpl$$W();
+            var _el$ = _tmpl$$13();
             _el$.$$click = (e) => {
               e.stopPropagation();
               handleClose();
             };
             return _el$;
           })(), (() => {
-            var _el$2 = _tmpl$2$G(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+            var _el$2 = _tmpl$2$N(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
             _el$2.$$click = (e) => e.stopPropagation();
             _el$4.$$click = (e) => {
               e.stopPropagation();
@@ -20758,7 +22011,7 @@ function WorkspaceCreateFlyout(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$V = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$F = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$q = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$12 = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$M = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$r = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function WorkspaceDock(props) {
   const [isCreatingHover, setIsCreatingHover] = createSignal(false);
   const [configOpenId, setConfigOpenId] = createSignal(null);
@@ -20769,7 +22022,7 @@ function WorkspaceDock(props) {
   onMount(() => {
   });
   return (() => {
-    var _el$ = _tmpl$3$y(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
+    var _el$ = _tmpl$3$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
     insert(_el$4, createComponent(For, {
       get each() {
         return props.workspaces;
@@ -20798,6 +22051,9 @@ function WorkspaceDock(props) {
         onCloseConfig: () => setConfigOpenId(null),
         get onWorkspaceSelect() {
           return props.onWorkspaceSelect;
+        },
+        get appWs() {
+          return props.ws;
         }
       })
     }));
@@ -20809,7 +22065,7 @@ function WorkspaceDock(props) {
       },
       get fallback() {
         return (() => {
-          var _el$0 = _tmpl$4$q();
+          var _el$0 = _tmpl$4$r();
           _el$0.$$click = (e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setCreatePos({
@@ -20822,7 +22078,7 @@ function WorkspaceDock(props) {
         })();
       },
       get children() {
-        return _tmpl$$V();
+        return _tmpl$$12();
       }
     }));
     insert(_el$6, createComponent(Show, {
@@ -20830,7 +22086,7 @@ function WorkspaceDock(props) {
         return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
       },
       get children() {
-        return _tmpl$2$F();
+        return _tmpl$2$M();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -20906,18 +22162,21 @@ function WorkspaceDock(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$U = /* @__PURE__ */ template(`<div id=workspace-dock data-overlay-chrome class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
+var _tmpl$$11 = /* @__PURE__ */ template(`<div id=workspace-dock data-overlay-chrome class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
 function AppDock(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$U(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$11(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.dockRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
       insert(_el$2, createComponent(WorkspaceDock, {
+        get ws() {
+          return props.ws;
+        },
         get workspaces() {
           return props.ws.workspaces();
         },
@@ -20997,19 +22256,19 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$T = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$E = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$x = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$p = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-0.5 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$10 = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$L = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$y = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$q = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-1 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$4$p();
+      var _el$ = _tmpl$4$q();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
       insert(_el$, createComponent(ActionTooltip, {
         label: "Minimize",
         get children() {
-          var _el$2 = _tmpl$$T();
+          var _el$2 = _tmpl$$10();
           _el$2.$$click = () => window.api?.minimizeWindow();
           return _el$2;
         }
@@ -21017,7 +22276,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Maximize",
         get children() {
-          var _el$3 = _tmpl$2$E();
+          var _el$3 = _tmpl$2$L();
           _el$3.$$click = () => window.api?.maximizeWindow();
           return _el$3;
         }
@@ -21025,7 +22284,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Close",
         get children() {
-          var _el$4 = _tmpl$3$x();
+          var _el$4 = _tmpl$3$y();
           _el$4.$$click = () => window.api?.closeWindow();
           return _el$4;
         }
@@ -21035,7 +22294,7 @@ function AppWindowControls(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$o = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$h = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$9 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$6 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+var _tmpl$$$ = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$K = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$a = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
 function AppEdgeZones(props) {
   return createComponent(Show, {
     get when() {
@@ -21043,31 +22302,31 @@ function AppEdgeZones(props) {
     },
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$S();
+        var _el$ = _tmpl$$$();
         _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$D();
+        var _el$2 = _tmpl$2$K();
         _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
         return _el$2;
       })(), (() => {
-        var _el$3 = _tmpl$3$w();
+        var _el$3 = _tmpl$3$x();
         _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
         return _el$3;
       })(), (() => {
-        var _el$4 = _tmpl$4$o();
+        var _el$4 = _tmpl$4$p();
         _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
         return _el$4;
       })(), (() => {
-        var _el$5 = _tmpl$5$h();
+        var _el$5 = _tmpl$5$i();
         _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
         return _el$5;
       })(), (() => {
-        var _el$6 = _tmpl$6$9();
+        var _el$6 = _tmpl$6$a();
         _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
         return _el$6;
       })(), (() => {
-        var _el$7 = _tmpl$7$6();
+        var _el$7 = _tmpl$7$5();
         _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
         return _el$7;
       })(), (() => {
@@ -21144,7 +22403,243 @@ function useFeaturebase() {
   };
   return { openFeedback, openUpdates, hasUnread };
 }
-var _tmpl$$R = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$C = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$n = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$g = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$8 = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+var _tmpl$$_ = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99998] pointer-events-auto bg-transparent">`), _tmpl$2$J = /* @__PURE__ */ template(`<div data-overlay-chrome role=dialog aria-modal=true class="fixed z-[99999] w-80 bg-white border border-neutral-200/80 rounded-2xl shadow-[0_24px_64px_-16px_rgba(0,0,0,0.22)] p-3 flex flex-col gap-2.5 pointer-events-auto select-none animate-in zoom-in-95 duration-200"style=-webkit-app-region:no-drag><div class="flex items-center justify-between border-b border-neutral-100 pb-2"><div class="flex items-center gap-2"><span class="flex items-end gap-[1.5px] h-3 pb-0.5 text-neutral-800"><span class="w-[1.5px] h-2 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-3 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-1.5 bg-current rounded-full animate-eq-soft-3"></span></span><h3 class="text-xs font-semibold text-neutral-900 tracking-tight">Audio</h3><span class="text-[10px] font-mono font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.5 rounded-md border border-neutral-200/50"></span></div><button class="text-[11px] font-medium px-2.5 py-1 rounded-lg bg-neutral-100 hover:bg-neutral-200/80 text-neutral-700 transition-colors border border-neutral-200/50 active:scale-95 flex items-center gap-1 shadow-sm"></button></div><div class="flex flex-col gap-1.5 max-h-60 overflow-y-auto pr-0.5">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="py-4 text-center text-xs font-medium text-neutral-400 italic">No active audio streams`), _tmpl$4$o = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$5$h = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl bg-neutral-50/80 hover:bg-neutral-100/80 border border-neutral-200/40 transition-all"><div class="flex flex-col min-w-0 flex-1 mr-2 cursor-pointer"title="Click to jump to stream"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-400 truncate"></span></div><div class="flex items-center gap-1 shrink-0"><button>`), _tmpl$6$9 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+function OmniSoundPopover(props) {
+  const sources = () => getAllAudioSources();
+  const safeHost = (url) => {
+    if (!url) return "Active Stream";
+    try {
+      return new URL(url).hostname || url;
+    } catch {
+      return url.length > 28 ? url.substring(0, 28) + "..." : url;
+    }
+  };
+  const handleJumpToStream = async (source) => {
+    const paneId = source.paneId;
+    if (!paneId) return;
+    if (layoutStore.nodes[paneId]) {
+      props.ws?.setActivePaneId?.(paneId);
+      PaneFocusManager.focusPane(paneId, props.ws?.setActivePaneId);
+      props.onClose();
+      return;
+    }
+    for (const [tabId, panes] of Object.entries(tabPoolStore.tabPanes)) {
+      if (panes && panes[paneId]) {
+        const inCurrentWs = props.ws?.tabs?.().some((t) => t.id === tabId);
+        if (inCurrentWs) {
+          props.ws?.switchTab?.(tabId, "forward");
+          props.ws?.setActivePaneId?.(paneId);
+          PaneFocusManager.focusPane(paneId, props.ws?.setActivePaneId);
+          props.onClose();
+          return;
+        }
+      }
+    }
+    const workspaces = props.ws?.workspaces?.() || [];
+    for (const w of workspaces) {
+      if (w.id !== props.ws?.activeWorkspace?.()) {
+        const tabs = await window.api?.getTabs?.(w.id) || [];
+        for (const t of tabs) {
+          try {
+            const layout = t.layout_state ? JSON.parse(t.layout_state) : null;
+            if (layout?.nodes?.[paneId]) {
+              props.ws?.switchWorkspace?.(w.id, "forward");
+              props.ws?.switchTab?.(t.id, "forward");
+              props.ws?.setActivePaneId?.(paneId);
+              PaneFocusManager.focusPane(paneId, props.ws?.setActivePaneId);
+              props.onClose();
+              return;
+            }
+          } catch {
+          }
+        }
+      }
+    }
+    props.onClose();
+  };
+  const popoverPosition = () => {
+    if (props.placement === "topRight") {
+      return {
+        top: "48px",
+        right: "8px"
+      };
+    }
+    const r = props.anchorRect;
+    if (r) {
+      const btm = Math.max(12, window.innerHeight - r.bottom - 8);
+      return {
+        left: `${Math.round(r.right + 12)}px`,
+        bottom: `${Math.round(btm)}px`
+      };
+    }
+    return {
+      left: "54px",
+      bottom: "12px"
+    };
+  };
+  return createComponent(Show, {
+    get when() {
+      return props.isOpen;
+    },
+    get children() {
+      return [(() => {
+        var _el$ = _tmpl$$_();
+        _el$.$$mousedown = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          props.onClose();
+        };
+        return _el$;
+      })(), (() => {
+        var _el$2 = _tmpl$2$J(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$3.nextSibling;
+        _el$2.$$mousedown = (e) => e.stopPropagation();
+        insert(_el$7, () => sources().length);
+        _el$8.$$click = () => toggleMasterMute();
+        insert(_el$8, () => isMasterMuted() ? "Unmute All" : "Mute All");
+        insert(_el$9, createComponent(For, {
+          get each() {
+            return sources();
+          },
+          get fallback() {
+            return _tmpl$3$w();
+          },
+          children: (source) => (() => {
+            var _el$1 = _tmpl$5$h(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$10.nextSibling, _el$14 = _el$13.firstChild;
+            _el$10.$$click = () => handleJumpToStream(source);
+            insert(_el$11, () => source.title || "Audio Stream");
+            insert(_el$12, () => safeHost(source.url));
+            _el$14.$$click = () => togglePaneMute(source.paneId);
+            insert(_el$14, createComponent(Show, {
+              get when() {
+                return !source.isMuted;
+              },
+              get fallback() {
+                return _tmpl$6$9();
+              },
+              get children() {
+                return _tmpl$4$o();
+              }
+            }));
+            createRenderEffect((_p$) => {
+              var _v$ = source.isMuted ? "Unmute stream" : "Mute stream", _v$2 = `w-7 h-7 rounded-lg flex items-center justify-center transition-colors border active:scale-95 ${source.isMuted ? "bg-neutral-100 text-neutral-500 border-neutral-200/60 hover:bg-neutral-200/60" : "bg-neutral-900 text-white border-neutral-800 hover:bg-neutral-800 shadow-sm"}`;
+              _v$ !== _p$.e && setAttribute(_el$14, "title", _p$.e = _v$);
+              _v$2 !== _p$.t && className(_el$14, _p$.t = _v$2);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$1;
+          })()
+        }));
+        createRenderEffect((_$p) => style(_el$2, {
+          ...popoverPosition()
+        }, _$p));
+        return _el$2;
+      })()];
+    }
+  });
+}
+delegateEvents(["mousedown", "click"]);
+var _tmpl$$Z = /* @__PURE__ */ template(`<span class="flex items-end gap-[2px] h-4 pb-0.5"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-4 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$I = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded-full bg-neutral-900 text-white font-mono text-[8px] font-bold shadow-[0_1px_3px_rgba(0,0,0,0.3)]">`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">`), _tmpl$4$n = /* @__PURE__ */ template(`<div data-overlay-chrome class="relative flex items-center justify-center shrink-0"><button>`), _tmpl$5$g = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`), _tmpl$6$8 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`);
+function GlobalAudioMasterPill(props) {
+  const [isOpen, setIsOpen] = createSignal(false);
+  const [isHovered, setIsHovered] = createSignal(false);
+  const [anchorRect, setAnchorRect] = createSignal(null);
+  onMount(() => {
+    const unsub = initAudioMatrixListener();
+    onCleanup(() => unsub());
+  });
+  const shouldShow = () => isMasterMuted() || hasBackgroundAudio(props.activeWorkspaceId) || getAllAudioSources().length > 0;
+  const sourceCount = () => getActiveAudioSources().length;
+  return createComponent(Show, {
+    get when() {
+      return shouldShow();
+    },
+    get children() {
+      var _el$ = _tmpl$4$n(), _el$2 = _el$.firstChild;
+      _el$.addEventListener("mouseleave", () => setIsHovered(false));
+      _el$.addEventListener("mouseenter", () => setIsHovered(true));
+      _el$2.$$contextmenu = (e) => {
+        e.preventDefault();
+        toggleMasterMute();
+      };
+      _el$2.$$click = (e) => {
+        const rect = e.currentTarget.getBoundingClientRect();
+        setAnchorRect(rect);
+        setIsOpen(!isOpen());
+      };
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return !isMasterMuted();
+        },
+        get fallback() {
+          return _tmpl$5$g();
+        },
+        get children() {
+          return createComponent(Show, {
+            get when() {
+              return getActiveAudioSources().length > 0;
+            },
+            get fallback() {
+              return _tmpl$6$8();
+            },
+            get children() {
+              return _tmpl$$Z();
+            }
+          });
+        }
+      }), null);
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return sourceCount() > 1;
+        },
+        get children() {
+          var _el$4 = _tmpl$2$I();
+          insert(_el$4, sourceCount);
+          return _el$4;
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return memo(() => !!isHovered())() && !isOpen();
+        },
+        get children() {
+          var _el$5 = _tmpl$3$v(), _el$6 = _el$5.firstChild;
+          insert(_el$6, (() => {
+            var _c$ = memo(() => !!isMasterMuted());
+            return () => _c$() ? "Audio Muted" : `Audio (${sourceCount()} active)`;
+          })());
+          return _el$5;
+        }
+      }), null);
+      insert(_el$, createComponent(OmniSoundPopover, {
+        get isOpen() {
+          return isOpen();
+        },
+        onClose: () => setIsOpen(false),
+        get ws() {
+          return props.ws;
+        },
+        get anchorRect() {
+          return anchorRect();
+        }
+      }), null);
+      createRenderEffect((_p$) => {
+        var _v$ = isMasterMuted() ? "Audio muted - Click for mixer, Right-click to unmute" : `Audio (${sourceCount()} active) - Click for mixer, Right-click to mute all`, _v$2 = `relative flex items-center justify-center w-[40px] h-[40px] rounded-2xl transition-all duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40 cursor-pointer ${isMasterMuted() ? "bg-rose-50 text-rose-600 border border-rose-200/80 shadow-sm hover:bg-rose-100" : "bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] text-neutral-700 hover:bg-neutral-100"}`;
+        _v$ !== _p$.e && setAttribute(_el$2, "title", _p$.e = _v$);
+        _v$2 !== _p$.t && className(_el$2, _p$.t = _v$2);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0
+      });
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click", "contextmenu"]);
+var _tmpl$$Y = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$H = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$u = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$f = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="relative z-30 mb-2"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportCluster(props) {
   const {
     hasUnread
@@ -21220,7 +22715,7 @@ function SupportCluster(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$6$8(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling, _el$10 = _el$8.nextSibling;
+      var _el$ = _tmpl$6$7(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$11 = _el$9.nextSibling;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
       insert(_el$2, createComponent(ActionTooltip, {
         get label() {
@@ -21231,50 +22726,58 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$3 = _tmpl$$R(), _el$4 = _el$3.firstChild;
+          var _el$3 = _tmpl$$Y(), _el$4 = _el$3.firstChild;
           _el$3.$$click = handleOpenProfiles;
           insert(_el$4, () => (activeProfile().name || "M").charAt(0).toUpperCase());
           createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", activeProfile().color || "#4a4a49"));
           return _el$3;
         }
       }));
-      insert(_el$6, createComponent(ActionTooltip, {
+      insert(_el$5, createComponent(GlobalAudioMasterPill, {
+        get ws() {
+          return props.ws;
+        },
+        get activeWorkspaceId() {
+          return props.ws?.activeWorkspace?.();
+        }
+      }));
+      insert(_el$7, createComponent(ActionTooltip, {
         label: "Settings",
         get shortcut() {
           return getShortcutDisplay("settings") || "Ctrl+,";
         },
         placement: "right",
         get children() {
-          var _el$7 = _tmpl$2$C();
-          _el$7.$$click = handleOpenSettings;
-          return _el$7;
+          var _el$8 = _tmpl$2$H();
+          _el$8.$$click = handleOpenSettings;
+          return _el$8;
         }
       }));
-      insert(_el$8, createComponent(ActionTooltip, {
+      insert(_el$9, createComponent(ActionTooltip, {
         label: "Release Notes",
         placement: "right",
         get children() {
-          var _el$9 = _tmpl$4$n();
-          _el$9.firstChild;
-          _el$9.$$click = handleOpenUpdates;
-          insert(_el$9, createComponent(Show, {
+          var _el$0 = _tmpl$4$m();
+          _el$0.firstChild;
+          _el$0.$$click = handleOpenUpdates;
+          insert(_el$0, createComponent(Show, {
             get when() {
               return layoutStore.hasUnreadRelease || hasUnread();
             },
             get children() {
-              return _tmpl$3$v();
+              return _tmpl$3$u();
             }
           }), null);
-          return _el$9;
+          return _el$0;
         }
       }));
-      insert(_el$10, createComponent(ActionTooltip, {
+      insert(_el$11, createComponent(ActionTooltip, {
         label: "Feedback & Roadmap",
         placement: "right",
         get children() {
-          var _el$11 = _tmpl$5$g();
-          _el$11.$$click = handleOpenFeedback;
-          return _el$11;
+          var _el$12 = _tmpl$5$f();
+          _el$12.$$click = handleOpenFeedback;
+          return _el$12;
         }
       }));
       return _el$;
@@ -21282,10 +22785,10 @@ function SupportCluster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$Q = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$f = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$X = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$G = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$l = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$e = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActionClusterSplitBar(props) {
   return (() => {
-    var _el$ = _tmpl$5$f();
+    var _el$ = _tmpl$5$e();
     _el$.addEventListener("mouseleave", () => props.onSplitLeave?.());
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.splitBarRef;
@@ -21297,7 +22800,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$2 = _tmpl$$Q();
+        var _el$2 = _tmpl$$X();
         _el$2.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$2.addEventListener("mouseenter", () => props.onSplitHover?.("left"));
         _el$2.$$click = (e) => props.onSplit("left", e);
@@ -21311,7 +22814,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$3 = _tmpl$2$B();
+        var _el$3 = _tmpl$2$G();
         _el$3.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$3.addEventListener("mouseenter", () => props.onSplitHover?.("right"));
         _el$3.$$click = (e) => props.onSplit("right", e);
@@ -21325,7 +22828,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$3$u();
+        var _el$4 = _tmpl$3$t();
         _el$4.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$4.addEventListener("mouseenter", () => props.onSplitHover?.("top"));
         _el$4.$$click = (e) => props.onSplit("top", e);
@@ -21339,7 +22842,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$5 = _tmpl$4$m();
+        var _el$5 = _tmpl$4$l();
         _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
         _el$5.$$click = (e) => props.onSplit("bottom", e);
@@ -21350,11 +22853,11 @@ function ActionClusterSplitBar(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$P = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$A = /* @__PURE__ */ template(`<button>`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$l = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$e = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$W = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$F = /* @__PURE__ */ template(`<button>`), _tmpl$3$s = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$k = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$d = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function ActionClusterVerticalDock(props) {
   const isMaximized = () => !!layoutStore.maximizedPaneId;
   return (() => {
-    var _el$ = _tmpl$4$l(), _el$5 = _el$.firstChild;
+    var _el$ = _tmpl$4$k(), _el$5 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.dockRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -21367,17 +22870,17 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$2 = _tmpl$2$A();
+        var _el$2 = _tmpl$2$F();
         addEventListener(_el$2, "click", props.onToggleMaximize, true);
         insert(_el$2, createComponent(Show, {
           get when() {
             return isMaximized();
           },
           get fallback() {
-            return _tmpl$5$e();
+            return _tmpl$5$d();
           },
           get children() {
-            return _tmpl$$P();
+            return _tmpl$$W();
           }
         }));
         createRenderEffect(() => className(_el$2, `w-[28px] h-[28px] rounded-lg flex items-center justify-center transition-all active:scale-95 active:shadow-double-bezel-active ${isMaximized() ? "bg-neutral-100 text-neutral-900 shadow-inner ring-1 ring-neutral-300/40" : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -21391,7 +22894,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$4 = _tmpl$3$t();
+        var _el$4 = _tmpl$3$s();
         addEventListener(_el$4, "click", props.onCreateTab, true);
         return _el$4;
       }
@@ -21419,7 +22922,7 @@ function ActionClusterVerticalDock(props) {
   })();
 }
 delegateEvents(["click"]);
-const DEFAULT_STACKS = [
+const DEFAULT_COMMUNICATOR_STACKS = [
   {
     id: "main_stack",
     name: "Primary",
@@ -21435,12 +22938,13 @@ const [commStore, setCommStore] = createStore({
   isPinned: false,
   isFloating: false,
   isExpanded: false,
+  activePopoverCount: 0,
   position: null,
   lens: "stack",
   activeStackId: "main_stack",
   activeProfileId: "main",
   activeTab: "gmail_main",
-  stacks: DEFAULT_STACKS,
+  stacks: DEFAULT_COMMUNICATOR_STACKS,
   providers: [],
   notifications: []
 });
@@ -21454,6 +22958,13 @@ const commActions = {
       }
     }
     if (data.providers) setCommStore("providers", data.providers);
+  },
+  openPopover: () => setCommStore("activePopoverCount", (c) => c + 1),
+  closePopover: () => setCommStore("activePopoverCount", (c) => Math.max(0, c - 1)),
+  reloadActiveApp: () => {
+    if (commStore.activeTab && commStore.activeTab !== "all") {
+      window.api?.communicator?.reloadApp?.(commStore.activeTab);
+    }
   },
   open: (pinned = false, floating = false, tab) => {
     if (closeTimer) {
@@ -21487,9 +22998,11 @@ const commActions = {
   },
   scheduleClose: (delay = 200) => {
     if (closeTimer) clearTimeout(closeTimer);
-    if (!commStore.isPinned && !commStore.isFloating) {
+    if (!commStore.isPinned && !commStore.isFloating && commStore.activePopoverCount === 0) {
       closeTimer = setTimeout(() => {
-        if (!commStore.isPinned && !commStore.isFloating) setCommStore({ isOpen: false, isPinned: false, isFloating: false });
+        if (!commStore.isPinned && !commStore.isFloating && commStore.activePopoverCount === 0) {
+          setCommStore({ isOpen: false, isPinned: false, isFloating: false });
+        }
       }, delay);
     }
   },
@@ -21625,7 +23138,7 @@ const commActions = {
     setCommStore("notifications", (prev) => [item, ...prev].slice(0, 50));
   }
 };
-var _tmpl$$O = /* @__PURE__ */ template(`<span>`), _tmpl$2$z = /* @__PURE__ */ template(`<button id=communicator-trigger data-overlay-chrome=true title="Communicator (Ctrl+Shift+C)"style=-webkit-app-region:no-drag>`);
+var _tmpl$$V = /* @__PURE__ */ template(`<span>`), _tmpl$2$E = /* @__PURE__ */ template(`<button id=communicator-trigger data-overlay-chrome=true title="Communicator (Ctrl+Shift+C)"style=-webkit-app-region:no-drag>`);
 function CommunicatorTrigger(props) {
   const totalUnread = () => commStore.stacks.flatMap((s) => s.apps).reduce((sum, a) => sum + a.unreadCount, 0);
   const handleMouseEnter = () => {
@@ -21670,7 +23183,7 @@ function CommunicatorTrigger(props) {
   const isPinnedActive = () => commStore.isOpen && commStore.isPinned && !commStore.isFloating;
   const isPeekActive = () => commStore.isOpen && !commStore.isPinned && !commStore.isFloating;
   return (() => {
-    var _el$ = _tmpl$2$z();
+    var _el$ = _tmpl$2$E();
     _el$.addEventListener("mouseenter", handleMouseEnter);
     _el$.$$click = handleClick;
     var _ref$ = props.hubRef;
@@ -21683,7 +23196,7 @@ function CommunicatorTrigger(props) {
         return totalUnread() > 0;
       },
       get children() {
-        var _el$2 = _tmpl$$O();
+        var _el$2 = _tmpl$$V();
         insert(_el$2, (() => {
           var _c$ = memo(() => totalUnread() > 99);
           return () => _c$() ? "99+" : totalUnread();
@@ -21697,13 +23210,38 @@ function CommunicatorTrigger(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$N = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$y = /* @__PURE__ */ template(`<button><span>`), _tmpl$3$s = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[240px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">Stack Preset</span></div><div class="flex gap-2"><div class="w-12 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Icon</span><input type=text maxlength=2 class="text-xs font-bold text-center px-1 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex-1 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900">`);
+var _tmpl$$U = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$D = /* @__PURE__ */ template(`<button><span>`), _tmpl$3$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[240px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">Stack Preset</span></div><div class="flex gap-2"><div class="w-12 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Icon</span><input type=text maxlength=2 class="text-xs font-bold text-center px-1 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex-1 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900">`);
 function CommunicatorStackPopover(props) {
   let popoverRef;
   const [name, setName] = createSignal(props.stack.name);
   const [icon, setIcon] = createSignal(props.stack.icon);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const handleSave = () => {
+    const trimmedName = name().trim();
+    const trimmedIcon = icon().trim() || trimmedName.slice(0, 1).toUpperCase();
+    if (trimmedName && (trimmedName !== props.stack.name || trimmedIcon !== props.stack.icon)) {
+      commActions.updateStack(props.stack.id, trimmedName, trimmedIcon);
+    }
+  };
   onMount(() => {
+    commActions.openPopover();
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        handleSave();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, {
+      capture: true
+    });
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown, {
+        capture: true
+      });
+      commActions.closePopover();
+    });
     if (popoverRef) {
       gsapWithCSS.from(popoverRef, {
         x: -6,
@@ -21714,13 +23252,6 @@ function CommunicatorStackPopover(props) {
       });
     }
   });
-  const handleSave = () => {
-    const trimmedName = name().trim();
-    const trimmedIcon = icon().trim() || trimmedName.slice(0, 1).toUpperCase();
-    if (trimmedName && (trimmedName !== props.stack.name || trimmedIcon !== props.stack.icon)) {
-      commActions.updateStack(props.stack.id, trimmedName, trimmedIcon);
-    }
-  };
   const handleDelete = () => {
     if (confirmDelete()) {
       commActions.deleteStack(props.stack.id);
@@ -21732,7 +23263,7 @@ function CommunicatorStackPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$N();
+        var _el$ = _tmpl$$U();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -21744,10 +23275,16 @@ function CommunicatorStackPopover(props) {
           handleSave();
           props.onClose();
         };
+        _el$.$$pointerdown = (e) => {
+          e.stopPropagation();
+          handleSave();
+          props.onClose();
+        };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$3$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+        var _el$2 = _tmpl$3$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
+        _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : popoverRef = _el$2;
         _el$7.$$keydown = (e) => e.key === "Enter" && e.currentTarget.blur();
@@ -21761,7 +23298,7 @@ function CommunicatorStackPopover(props) {
             return commStore.stacks.length > 1;
           },
           get children() {
-            var _el$1 = _tmpl$2$y(), _el$10 = _el$1.firstChild;
+            var _el$1 = _tmpl$2$D(), _el$10 = _el$1.firstChild;
             _el$1.$$click = handleDelete;
             insert(_el$1, createComponent(Trash2, {
               "class": "w-3.5 h-3.5"
@@ -21787,12 +23324,29 @@ function CommunicatorStackPopover(props) {
     }
   });
 }
-delegateEvents(["click", "contextmenu", "input", "keydown"]);
-var _tmpl$$M = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$x = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 max-h-[160px] overflow-y-auto no-scrollbar pr-0.5">`), _tmpl$3$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[260px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="w-3 h-3 rounded-full"></span><span class="text-xs font-bold text-neutral-800 dark:text-neutral-200 truncate"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)</span></div><p class="text-[11px] text-neutral-500 dark:text-neutral-400">Session partition: <span class="font-mono font-medium text-neutral-800 dark:text-neutral-200">persist:</span></p><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Assigned Apps</span></div><button class="w-full py-1.5 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-semibold flex items-center justify-center gap-1.5 hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5"><span>Add App to Profile`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="py-2 px-1 text-center text-[11px] text-neutral-400 dark:text-neutral-500 rounded-xl bg-neutral-100/60 dark:bg-neutral-800/60 border border-dashed border-neutral-200 dark:border-neutral-800">No apps in this profile`), _tmpl$5$d = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white shrink-0">`), _tmpl$6$7 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-left group/item cursor-pointer border border-transparent hover:border-neutral-200/60 dark:hover:border-neutral-700/60"><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate flex-1"></span><span class="text-[10px] font-mono text-neutral-400 group-hover/item:text-neutral-600 dark:group-hover/item:text-neutral-300 shrink-0">`);
+delegateEvents(["pointerdown", "click", "contextmenu", "input", "keydown"]);
+var _tmpl$$T = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 max-h-[160px] overflow-y-auto no-scrollbar pr-0.5">`), _tmpl$3$q = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[260px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="w-3 h-3 rounded-full"></span><span class="text-xs font-bold text-neutral-800 dark:text-neutral-200 truncate"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)</span></div><p class="text-[11px] text-neutral-500 dark:text-neutral-400">Session partition: <span class="font-mono font-medium text-neutral-800 dark:text-neutral-200">persist:</span></p><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Assigned Apps</span></div><button class="w-full py-1.5 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-semibold flex items-center justify-center gap-1.5 hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5"><span>Add App to Profile`), _tmpl$4$j = /* @__PURE__ */ template(`<div class="py-2 px-1 text-center text-[11px] text-neutral-400 dark:text-neutral-500 rounded-xl bg-neutral-100/60 dark:bg-neutral-800/60 border border-dashed border-neutral-200 dark:border-neutral-800">No apps in this profile`), _tmpl$5$c = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white shrink-0">`), _tmpl$6$6 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-left group/item cursor-pointer border border-transparent hover:border-neutral-200/60 dark:hover:border-neutral-700/60"><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate flex-1"></span><span class="text-[10px] font-mono text-neutral-400 group-hover/item:text-neutral-600 dark:group-hover/item:text-neutral-300 shrink-0">`);
 function CommunicatorProfilePopover(props) {
   let popoverRef;
   const profileApps = () => commStore.stacks.flatMap((s) => s.apps).filter((a) => a.profileId === props.profile.id);
   onMount(() => {
+    commActions.openPopover();
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, {
+      capture: true
+    });
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown, {
+        capture: true
+      });
+      commActions.closePopover();
+    });
     if (popoverRef) {
       gsapWithCSS.from(popoverRef, {
         x: -6,
@@ -21806,7 +23360,7 @@ function CommunicatorProfilePopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$M();
+        var _el$ = _tmpl$$T();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -21816,9 +23370,13 @@ function CommunicatorProfilePopover(props) {
           e.stopPropagation();
           props.onClose();
         };
+        _el$.$$pointerdown = (e) => {
+          e.stopPropagation();
+          props.onClose();
+        };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$3$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+        var _el$2 = _tmpl$3$q(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
         _el$9.nextSibling;
         var _el$0 = _el$3.nextSibling, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling;
         _el$10.firstChild;
@@ -21826,6 +23384,7 @@ function CommunicatorProfilePopover(props) {
         _el$12.firstChild;
         var _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
+        _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : popoverRef = _el$2;
         insert(_el$5, () => props.profile.name);
@@ -21836,10 +23395,10 @@ function CommunicatorProfilePopover(props) {
             return profileApps().length > 0;
           },
           get fallback() {
-            return _tmpl$4$k();
+            return _tmpl$4$j();
           },
           get children() {
-            var _el$14 = _tmpl$2$x();
+            var _el$14 = _tmpl$2$C();
             insert(_el$14, createComponent(For, {
               get each() {
                 return profileApps();
@@ -21847,7 +23406,7 @@ function CommunicatorProfilePopover(props) {
               children: (app) => {
                 const stackName = () => commStore.stacks.find((s) => s.id === app.stackId)?.name || "Stack";
                 return (() => {
-                  var _el$18 = _tmpl$6$7(), _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
+                  var _el$18 = _tmpl$6$6(), _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
                   _el$18.$$click = () => {
                     commActions.setProfile(props.profile.id);
                     commActions.setTab(app.id);
@@ -21867,7 +23426,7 @@ function CommunicatorProfilePopover(props) {
                       return app.unreadCount > 0;
                     },
                     get children() {
-                      return _tmpl$5$d();
+                      return _tmpl$5$c();
                     }
                   }), null);
                   return _el$18;
@@ -21904,8 +23463,8 @@ function CommunicatorProfilePopover(props) {
     }
   });
 }
-delegateEvents(["click", "contextmenu"]);
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$w = /* @__PURE__ */ template(`<button>`), _tmpl$3$q = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$j = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$c = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$6 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$5 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$2 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
+delegateEvents(["pointerdown", "click", "contextmenu"]);
+var _tmpl$$S = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$B = /* @__PURE__ */ template(`<button>`), _tmpl$3$p = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$i = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$5 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$2 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
 function CommunicatorStackRail(props) {
   const [isAddingStack, setIsAddingStack] = createSignal(false);
   const [newStackName, setNewStackName] = createSignal("");
@@ -21929,12 +23488,12 @@ function CommunicatorStackRail(props) {
   const currentStack = () => commStore.stacks.find((s) => s.id === activeStackPopover()?.id);
   const currentProfile = () => profiles().find((p) => p.id === activeProfilePopover()?.id);
   return (() => {
-    var _el$ = _tmpl$5$c(), _el$3 = _el$.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.nextSibling;
+    var _el$ = _tmpl$5$b(), _el$3 = _el$.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.nextSibling;
     insert(_el$, createComponent(ActionTooltip, {
       label: "Drag to float (Double-click to dock)",
       placement: "right",
       get children() {
-        var _el$2 = _tmpl$$L();
+        var _el$2 = _tmpl$$S();
         addEventListener(_el$2, "dblclick", props.onResetPosition, true);
         addEventListener(_el$2, "mousedown", props.onDragStart, true);
         insert(_el$2, createComponent(GripHorizontal, {
@@ -21947,7 +23506,7 @@ function CommunicatorStackRail(props) {
       label: "Stack Lens",
       placement: "right",
       get children() {
-        var _el$4 = _tmpl$2$w();
+        var _el$4 = _tmpl$2$B();
         _el$4.$$click = () => commActions.setLens("stack");
         insert(_el$4, createComponent(Layers, {
           "class": "w-3.5 h-3.5"
@@ -21960,7 +23519,7 @@ function CommunicatorStackRail(props) {
       label: "Profile Lens",
       placement: "right",
       get children() {
-        var _el$5 = _tmpl$2$w();
+        var _el$5 = _tmpl$2$B();
         _el$5.$$click = () => commActions.setLens("profile");
         insert(_el$5, createComponent(User, {
           "class": "w-3.5 h-3.5"
@@ -21987,7 +23546,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$0 = _tmpl$7$5(), _el$1 = _el$0.firstChild;
+                var _el$0 = _tmpl$7$4(), _el$1 = _el$0.firstChild;
                 _el$0.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveStackPopover({
@@ -22019,7 +23578,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$10 = _tmpl$6$6();
+                    var _el$10 = _tmpl$6$5();
                     insert(_el$10, (() => {
                       var _c$ = memo(() => unread() > 9);
                       return () => _c$() ? "9+" : unread();
@@ -22051,7 +23610,7 @@ function CommunicatorStackRail(props) {
               label: "New Stack Preset",
               placement: "right",
               get children() {
-                var _el$8 = _tmpl$3$q();
+                var _el$8 = _tmpl$3$p();
                 _el$8.$$click = () => setIsAddingStack(true);
                 insert(_el$8, createComponent(Plus, {
                   "class": "w-3.5 h-3.5"
@@ -22081,7 +23640,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$13 = _tmpl$7$5(), _el$14 = _el$13.firstChild;
+                var _el$13 = _tmpl$7$4(), _el$14 = _el$13.firstChild;
                 _el$13.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveProfilePopover({
@@ -22113,7 +23672,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$15 = _tmpl$6$6();
+                    var _el$15 = _tmpl$6$5();
                     insert(_el$15, (() => {
                       var _c$2 = memo(() => unread() > 9);
                       return () => _c$2() ? "9+" : unread();
@@ -22133,7 +23692,7 @@ function CommunicatorStackRail(props) {
       label: "Configure Communicator",
       placement: "right",
       get children() {
-        var _el$9 = _tmpl$4$j();
+        var _el$9 = _tmpl$4$i();
         _el$9.$$click = (e) => props.onOpenConfig(e);
         insert(_el$9, createComponent(Settings, {
           "class": "w-3.5 h-3.5"
@@ -22180,7 +23739,7 @@ function CommunicatorStackRail(props) {
   })();
 }
 delegateEvents(["mousedown", "dblclick", "click", "contextmenu", "input", "keydown"]);
-var _tmpl$$K = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$v = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[280px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">App Settings</span></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">URL</span><input type=text class="text-xs px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Session Profile</span><div class="flex flex-wrap gap-1 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-xl"></div></div><button><span>`), _tmpl$3$p = /* @__PURE__ */ template(`<button><span class="w-2 h-2 rounded-full"></span><span class="truncate max-w-[60px]">`);
+var _tmpl$$R = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[280px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">App Settings</span></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">URL</span><input type=text class="text-xs px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Session Profile</span><div class="flex flex-wrap gap-1 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-xl"></div></div><button><span>`), _tmpl$3$o = /* @__PURE__ */ template(`<button><span class="w-2 h-2 rounded-full"></span><span class="truncate max-w-[60px]">`);
 function CommunicatorTabPopover(props) {
   let popoverRef;
   const [name, setName] = createSignal(props.app.name);
@@ -22192,6 +23751,23 @@ function CommunicatorTabPopover(props) {
     name: "Main"
   }, ...layoutStore.profiles.filter((p) => p.id !== "main")];
   onMount(() => {
+    commActions.openPopover();
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, {
+      capture: true
+    });
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown, {
+        capture: true
+      });
+      commActions.closePopover();
+    });
     if (popoverRef) {
       gsapWithCSS.from(popoverRef, {
         y: 6,
@@ -22235,7 +23811,7 @@ function CommunicatorTabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$K();
+        var _el$ = _tmpl$$R();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -22245,10 +23821,15 @@ function CommunicatorTabPopover(props) {
           e.stopPropagation();
           props.onClose();
         };
+        _el$.$$pointerdown = (e) => {
+          e.stopPropagation();
+          props.onClose();
+        };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$v(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$8.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling, _el$12 = _el$1.nextSibling, _el$13 = _el$12.firstChild;
+        var _el$2 = _tmpl$2$A(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$8.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling, _el$12 = _el$1.nextSibling, _el$13 = _el$12.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
+        _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : popoverRef = _el$2;
         insert(_el$3, createComponent(Favicon, {
@@ -22271,7 +23852,7 @@ function CommunicatorTabPopover(props) {
           children: (p) => {
             const isSelected = () => (props.app.profileId || "main") === p.id;
             return (() => {
-              var _el$14 = _tmpl$3$p(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+              var _el$14 = _tmpl$3$o(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
               _el$14.$$click = () => handleSelectProfile(p.id);
               insert(_el$16, () => p.name);
               createRenderEffect((_p$) => {
@@ -22310,12 +23891,13 @@ function CommunicatorTabPopover(props) {
     }
   });
 }
-delegateEvents(["click", "contextmenu", "input", "keydown"]);
-var _tmpl$$J = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$u = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$o = /* @__PURE__ */ template(`<button>`), _tmpl$4$i = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$5 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$4 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
+delegateEvents(["pointerdown", "click", "contextmenu", "input", "keydown"]);
+var _tmpl$$Q = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$z = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$n = /* @__PURE__ */ template(`<button>`), _tmpl$4$h = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$a = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$4 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
 function CommunicatorHeader(props) {
+  const [isReloading, setIsReloading] = createSignal(false);
   const [activeTabPopover, setActiveTabPopover] = createSignal(null);
   return (() => {
-    var _el$ = _tmpl$5$b(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$7 = _el$2.nextSibling, _el$8 = _el$7.nextSibling;
+    var _el$ = _tmpl$5$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$7 = _el$2.nextSibling, _el$8 = _el$7.nextSibling;
     addEventListener(_el$, "mousedown", props.onDragStart, true);
     _el$3.$$click = () => {
       commActions.setTab("all");
@@ -22329,7 +23911,7 @@ function CommunicatorHeader(props) {
         return props.totalUnread() > 0;
       },
       get children() {
-        var _el$5 = _tmpl$$J();
+        var _el$5 = _tmpl$$Q();
         insert(_el$5, () => props.totalUnread());
         return _el$5;
       }
@@ -22341,8 +23923,8 @@ function CommunicatorHeader(props) {
       children: (app) => {
         const isActive = () => commStore.activeTab === app.id;
         return (() => {
-          var _el$11 = _tmpl$7$4(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild;
-          _el$12.$$contextmenu = (e) => {
+          var _el$12 = _tmpl$7$3(), _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild;
+          _el$13.$$contextmenu = (e) => {
             e.preventDefault();
             const rect = e.currentTarget.getBoundingClientRect();
             setActiveTabPopover({
@@ -22353,7 +23935,7 @@ function CommunicatorHeader(props) {
               }
             });
           };
-          _el$12.$$click = (e) => {
+          _el$13.$$click = (e) => {
             if (isActive()) {
               if (activeTabPopover()?.app.id === app.id) setActiveTabPopover(null);
               else {
@@ -22371,24 +23953,24 @@ function CommunicatorHeader(props) {
               setActiveTabPopover(null);
             }
           };
-          insert(_el$12, createComponent(Favicon, {
+          insert(_el$13, createComponent(Favicon, {
             get url() {
               return app.url;
             },
             size: 15,
             "class": "rounded-[3px]"
-          }), _el$13);
-          insert(_el$13, () => app.name);
-          insert(_el$12, createComponent(Show, {
+          }), _el$14);
+          insert(_el$14, () => app.name);
+          insert(_el$13, createComponent(Show, {
             get when() {
               return app.unreadCount > 0;
             },
             get children() {
-              return _tmpl$6$5();
+              return _tmpl$6$4();
             }
           }), null);
-          createRenderEffect(() => className(_el$12, `p-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${isActive() ? "bg-neutral-200/90 dark:bg-neutral-700 shadow-sm text-neutral-900 dark:text-white" : "hover:bg-neutral-200/50 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"}`));
-          return _el$11;
+          createRenderEffect(() => className(_el$13, `p-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${isActive() ? "bg-neutral-200/90 dark:bg-neutral-700 shadow-sm text-neutral-900 dark:text-white" : "hover:bg-neutral-200/50 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"}`));
+          return _el$12;
         })();
       }
     }), null);
@@ -22396,7 +23978,7 @@ function CommunicatorHeader(props) {
       label: "Add App",
       placement: "bottom",
       get children() {
-        var _el$6 = _tmpl$2$u();
+        var _el$6 = _tmpl$2$z();
         _el$6.$$click = (e) => props.onAddApp(e);
         insert(_el$6, createComponent(Plus, {
           "class": "w-3.5 h-3.5"
@@ -22410,7 +23992,7 @@ function CommunicatorHeader(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$9 = _tmpl$3$o();
+        var _el$9 = _tmpl$3$n();
         _el$9.$$click = () => commActions.togglePin();
         insert(_el$9, createComponent(Pin, {
           get ["class"]() {
@@ -22427,7 +24009,7 @@ function CommunicatorHeader(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$0 = _tmpl$3$o();
+        var _el$0 = _tmpl$3$n();
         _el$0.$$click = () => commActions.toggleExpand();
         insert(_el$0, createComponent(Show, {
           get when() {
@@ -22453,33 +24035,50 @@ function CommunicatorHeader(props) {
         return commStore.activeTab !== "all";
       },
       get children() {
-        return createComponent(ActionTooltip, {
-          label: "Expand to Workspace Split",
+        return [createComponent(ActionTooltip, {
+          label: "Reload App",
           placement: "bottom",
           get children() {
-            var _el$1 = _tmpl$4$i();
+            var _el$1 = _tmpl$4$h();
             _el$1.$$click = () => {
-              const current = props.currentApps().find((a) => a.id === commStore.activeTab);
-              if (current) props.onExpandToSplit(current.url, current.name);
+              setIsReloading(true);
+              commActions.reloadActiveApp();
+              setTimeout(() => setIsReloading(false), 600);
             };
-            insert(_el$1, createComponent(ExternalLink, {
-              "class": "w-3.5 h-3.5"
+            insert(_el$1, createComponent(RefreshCw, {
+              get ["class"]() {
+                return `w-3.5 h-3.5 ${isReloading() ? "animate-spin text-neutral-900 dark:text-white" : ""}`;
+              }
             }));
             return _el$1;
           }
-        });
+        }), createComponent(ActionTooltip, {
+          label: "Expand to Workspace Split",
+          placement: "bottom",
+          get children() {
+            var _el$10 = _tmpl$4$h();
+            _el$10.$$click = () => {
+              const current = props.currentApps().find((a) => a.id === commStore.activeTab);
+              if (current) props.onExpandToSplit(current.url, current.name);
+            };
+            insert(_el$10, createComponent(ExternalLink, {
+              "class": "w-3.5 h-3.5"
+            }));
+            return _el$10;
+          }
+        })];
       }
     }), null);
     insert(_el$8, createComponent(ActionTooltip, {
       label: "Dismiss (Esc)",
       placement: "bottom",
       get children() {
-        var _el$10 = _tmpl$4$i();
-        addEventListener(_el$10, "click", commActions.close, true);
-        insert(_el$10, createComponent(X, {
+        var _el$11 = _tmpl$4$h();
+        addEventListener(_el$11, "click", commActions.close, true);
+        insert(_el$11, createComponent(X, {
           "class": "w-3.5 h-3.5"
         }));
-        return _el$10;
+        return _el$11;
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -22503,17 +24102,17 @@ function CommunicatorHeader(props) {
   })();
 }
 delegateEvents(["mousedown", "click", "contextmenu"]);
-var _tmpl$$I = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$t = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$n = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
+var _tmpl$$P = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$m = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
 function CommunicatorFeed() {
   return (() => {
-    var _el$ = _tmpl$2$t();
+    var _el$ = _tmpl$2$y();
     insert(_el$, createComponent(Show, {
       get when() {
         return commStore.notifications.length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$3$n(), _el$4 = _el$3.firstChild;
+          var _el$3 = _tmpl$3$m(), _el$4 = _el$3.firstChild;
           insert(_el$4, createComponent(Inbox, {
             "class": "w-5 h-5 text-neutral-400 dark:text-neutral-500"
           }));
@@ -22521,13 +24120,13 @@ function CommunicatorFeed() {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$I();
+        var _el$2 = _tmpl$$P();
         insert(_el$2, createComponent(For, {
           get each() {
             return commStore.notifications;
           },
           children: (item) => (() => {
-            var _el$5 = _tmpl$4$h(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
+            var _el$5 = _tmpl$4$g(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
             _el$5.$$click = () => commActions.setTab(item.appId);
             insert(_el$7, () => item.appName);
             insert(_el$8, () => new Date(item.timestamp).toLocaleTimeString([], {
@@ -22546,10 +24145,36 @@ function CommunicatorFeed() {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$H = /* @__PURE__ */ template(`<div class="flex flex-col gap-3"><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Drawer Size</span><div class="grid grid-cols-2 gap-2 mt-1"><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Standard</span></div><span>660 × 680 px</span></button><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Expanded</span></div><span>920 × Full Height</span></button></div></div><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Stacks</span><div class="flex flex-col gap-1.5 mt-1 max-h-[160px] overflow-y-auto pr-0.5">`), _tmpl$2$s = /* @__PURE__ */ template(`<button class="p-1 rounded-lg text-neutral-400 hover:text-red-500 transition-colors cursor-pointer"title="Delete Stack">`), _tmpl$3$m = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900"><div class="flex items-center gap-2"><span class="w-6 h-6 rounded-lg bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center text-xs font-semibold"></span><span class="text-xs font-medium"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)`);
+var _tmpl$$O = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$2$x = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left cursor-pointer"><span class="text-[11px] font-medium truncate">`);
+function PopularProvidersGrid(props) {
+  return (() => {
+    var _el$ = _tmpl$$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    insert(_el$3, createComponent(For, {
+      get each() {
+        return commStore.providers;
+      },
+      children: (prov) => (() => {
+        var _el$4 = _tmpl$2$x(), _el$5 = _el$4.firstChild;
+        _el$4.$$click = () => props.onSelect(prov);
+        insert(_el$4, createComponent(Favicon, {
+          get url() {
+            return prov.default_url;
+          },
+          size: 13,
+          "class": "rounded-[2px] shrink-0"
+        }), _el$5);
+        insert(_el$5, () => prov.name);
+        return _el$4;
+      })()
+    }));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$N = /* @__PURE__ */ template(`<div class="flex flex-col gap-3"><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Drawer Size</span><div class="grid grid-cols-2 gap-2 mt-1"><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Standard</span></div><span>660 × 680 px</span></button><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Expanded</span></div><span>920 × Full Height</span></button></div></div><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Stacks</span><div class="flex flex-col gap-1.5 mt-1 max-h-[160px] overflow-y-auto pr-0.5">`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="p-1 rounded-lg text-neutral-400 hover:text-red-500 transition-colors cursor-pointer"title="Delete Stack">`), _tmpl$3$l = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900"><div class="flex items-center gap-2"><span class="w-6 h-6 rounded-lg bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center text-xs font-semibold"></span><span class="text-xs font-medium"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)`);
 function CommunicatorManageStacks() {
   return (() => {
-    var _el$ = _tmpl$$H(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
+    var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
     _el$6.firstChild;
     var _el$8 = _el$6.nextSibling, _el$9 = _el$5.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
@@ -22567,7 +24192,7 @@ function CommunicatorManageStacks() {
         return commStore.stacks;
       },
       children: (st) => (() => {
-        var _el$14 = _tmpl$3$m(), _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$18 = _el$17.nextSibling, _el$19 = _el$18.firstChild, _el$21 = _el$19.nextSibling;
+        var _el$14 = _tmpl$3$l(), _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$18 = _el$17.nextSibling, _el$19 = _el$18.firstChild, _el$21 = _el$19.nextSibling;
         _el$21.nextSibling;
         insert(_el$16, () => st.icon);
         insert(_el$17, () => st.name);
@@ -22577,7 +24202,7 @@ function CommunicatorManageStacks() {
             return commStore.stacks.length > 1;
           },
           get children() {
-            var _el$22 = _tmpl$2$s();
+            var _el$22 = _tmpl$2$w();
             _el$22.$$click = () => commActions.deleteStack(st.id);
             insert(_el$22, createComponent(Trash2, {
               "class": "w-3.5 h-3.5"
@@ -22605,7 +24230,7 @@ function CommunicatorManageStacks() {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] bg-transparent pointer-events-auto">`), _tmpl$2$r = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$3$l = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$4$g = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5"><div class="flex flex-col gap-1.5"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5">`), _tmpl$5$a = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[390px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.25)] p-3.5 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Settings</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$6$4 = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left"><span class="text-[11px] font-medium truncate">`), _tmpl$7$3 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$$M = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] bg-transparent pointer-events-auto">`), _tmpl$2$v = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$3$k = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5"><div class="flex flex-col gap-1.5"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5">`), _tmpl$4$f = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[390px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.25)] p-3.5 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Settings</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$5$9 = /* @__PURE__ */ template(`<option>`);
 function AppConfigModal(props) {
   let popoverRef;
   const [activeTab, setActiveTab] = createSignal(props.initialTab || "addApp");
@@ -22616,15 +24241,30 @@ function AppConfigModal(props) {
   const [saveAsTemplate, setSaveAsTemplate] = createSignal(false);
   const [profiles, setProfiles] = createSignal(layoutStore.profiles || []);
   onMount(async () => {
-    if (popoverRef) {
-      gsapWithCSS.from(popoverRef, {
-        y: 6,
-        opacity: 0,
-        scale: 0.96,
-        duration: 0.2,
-        ease: "expo.out"
+    commActions.openPopover();
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        e.preventDefault();
+        props.onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown, {
+      capture: true
+    });
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown, {
+        capture: true
       });
-    }
+      commActions.closePopover();
+    });
+    if (popoverRef) gsapWithCSS.from(popoverRef, {
+      y: 6,
+      opacity: 0,
+      scale: 0.96,
+      duration: 0.2,
+      ease: "expo.out"
+    });
     try {
       const p = await window.api?.getProfiles?.();
       if (Array.isArray(p) && p.length > 0) setProfiles(p);
@@ -22674,7 +24314,7 @@ function AppConfigModal(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$G();
+        var _el$ = _tmpl$$M();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -22684,10 +24324,15 @@ function AppConfigModal(props) {
           e.stopPropagation();
           props.onClose();
         };
+        _el$.$$pointerdown = (e) => {
+          e.stopPropagation();
+          props.onClose();
+        };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$5$a(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
+        var _el$2 = _tmpl$4$f(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
+        _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : popoverRef = _el$2;
         _el$5.$$click = () => setActiveTab("addApp");
@@ -22702,61 +24347,44 @@ function AppConfigModal(props) {
             return activeTab() === "addApp";
           },
           get children() {
-            var _el$8 = _tmpl$4$g(), _el$10 = _el$8.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$10.nextSibling, _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
-            _el$16.firstChild;
-            var _el$18 = _el$14.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$23 = _el$13.nextSibling;
+            var _el$8 = _tmpl$3$k(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$9.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
+            _el$13.firstChild;
+            var _el$15 = _el$11.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$20 = _el$10.nextSibling;
             _el$8.addEventListener("submit", handleSaveApp);
             insert(_el$8, createComponent(Show, {
               get when() {
                 return !props.editApp;
               },
               get children() {
-                var _el$9 = _tmpl$2$r(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
-                insert(_el$1, createComponent(For, {
-                  get each() {
-                    return commStore.providers;
-                  },
-                  children: (prov) => (() => {
-                    var _el$24 = _tmpl$6$4(), _el$25 = _el$24.firstChild;
-                    _el$24.$$click = () => handleSelectProvider(prov);
-                    insert(_el$24, createComponent(Favicon, {
-                      get url() {
-                        return prov.default_url;
-                      },
-                      size: 13,
-                      "class": "rounded-[2px] shrink-0"
-                    }), _el$25);
-                    insert(_el$25, () => prov.name);
-                    return _el$24;
-                  })()
-                }));
-                return _el$9;
+                return createComponent(PopularProvidersGrid, {
+                  onSelect: handleSelectProvider
+                });
               }
-            }), _el$10);
-            _el$11.$$input = (e) => setAppName(e.currentTarget.value);
-            _el$12.$$input = (e) => setAppUrl(e.currentTarget.value);
-            _el$16.addEventListener("change", (e) => setProfileId(e.currentTarget.value));
-            insert(_el$16, createComponent(For, {
+            }), _el$9);
+            _el$0.$$input = (e) => setAppName(e.currentTarget.value);
+            _el$1.$$input = (e) => setAppUrl(e.currentTarget.value);
+            _el$13.addEventListener("change", (e) => setProfileId(e.currentTarget.value));
+            insert(_el$13, createComponent(For, {
               get each() {
                 return profiles().filter((p) => p.id !== "main");
               },
               children: (p) => (() => {
-                var _el$26 = _tmpl$7$3();
-                insert(_el$26, () => p.name);
-                createRenderEffect(() => _el$26.value = p.id);
-                return _el$26;
+                var _el$21 = _tmpl$5$9();
+                insert(_el$21, () => p.name);
+                createRenderEffect(() => _el$21.value = p.id);
+                return _el$21;
               })()
             }), null);
-            _el$20.addEventListener("change", (e) => setStackId(e.currentTarget.value));
-            insert(_el$20, createComponent(For, {
+            _el$17.addEventListener("change", (e) => setStackId(e.currentTarget.value));
+            insert(_el$17, createComponent(For, {
               get each() {
                 return commStore.stacks;
               },
               children: (s) => (() => {
-                var _el$27 = _tmpl$7$3();
-                insert(_el$27, () => s.name);
-                createRenderEffect(() => _el$27.value = s.id);
-                return _el$27;
+                var _el$22 = _tmpl$5$9();
+                insert(_el$22, () => s.name);
+                createRenderEffect(() => _el$22.value = s.id);
+                return _el$22;
               })()
             }));
             insert(_el$8, createComponent(Show, {
@@ -22764,17 +24392,17 @@ function AppConfigModal(props) {
                 return !props.editApp;
               },
               get children() {
-                var _el$21 = _tmpl$3$l(), _el$22 = _el$21.firstChild;
-                _el$22.addEventListener("change", (e) => setSaveAsTemplate(e.currentTarget.checked));
-                createRenderEffect(() => _el$22.checked = saveAsTemplate());
-                return _el$21;
+                var _el$18 = _tmpl$2$v(), _el$19 = _el$18.firstChild;
+                _el$19.addEventListener("change", (e) => setSaveAsTemplate(e.currentTarget.checked));
+                createRenderEffect(() => _el$19.checked = saveAsTemplate());
+                return _el$18;
               }
-            }), _el$23);
-            insert(_el$23, () => props.editApp ? "Save Changes" : "Add to Communicator");
-            createRenderEffect(() => _el$11.value = appName());
-            createRenderEffect(() => _el$12.value = appUrl());
-            createRenderEffect(() => _el$16.value = profileId());
-            createRenderEffect(() => _el$20.value = stackId());
+            }), _el$20);
+            insert(_el$20, () => props.editApp ? "Save Changes" : "Add to Communicator");
+            createRenderEffect(() => _el$0.value = appName());
+            createRenderEffect(() => _el$1.value = appUrl());
+            createRenderEffect(() => _el$13.value = profileId());
+            createRenderEffect(() => _el$17.value = stackId());
             return _el$8;
           }
         }), null);
@@ -22804,7 +24432,7 @@ function AppConfigModal(props) {
     }
   });
 }
-delegateEvents(["click", "contextmenu", "input"]);
+delegateEvents(["pointerdown", "click", "contextmenu", "input"]);
 function useCommunicatorDrag(getDrawerEl) {
   const [isDragging, setIsDragging] = createSignal(false);
   const [dragSnapshot, setDragSnapshot] = createSignal(null);
@@ -22955,7 +24583,7 @@ function useCommunicatorBounds(getContainerRef, isDragging) {
   });
   return { syncBounds: scheduleSync };
 }
-var _tmpl$$F = /* @__PURE__ */ template(`<div class="w-full h-full pointer-events-auto"data-overlay-chrome=true>`), _tmpl$2$q = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-[#fafaf9] dark:bg-[#141415] select-none pointer-events-auto"><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">No apps in this stack</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Click "+" above to add an app.`), _tmpl$3$k = /* @__PURE__ */ template(`<img alt="App Snapshot"class="absolute inset-0 w-full h-full object-cover object-top pointer-events-none rounded-br-2xl select-none z-10">`), _tmpl$4$f = /* @__PURE__ */ template(`<div id=communicator-drawer><div class="flex-1 flex flex-col min-w-0 h-full pointer-events-none"><div class="flex-1 w-full h-full relative overflow-hidden bg-transparent pointer-events-none rounded-br-2xl"><div class="absolute bottom-0 right-0 w-3.5 h-3.5 pointer-events-none z-20 overflow-hidden"><svg class="w-full h-full fill-[#f4f4f2] dark:fill-[#121212]"viewBox="0 0 16 16"><path d="M16,0 L16,16 L0,16 C8.836,16 16,8.836 16,0 Z">`);
+var _tmpl$$L = /* @__PURE__ */ template(`<div class="w-full h-full pointer-events-auto"data-overlay-chrome=true>`), _tmpl$2$u = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-[#fafaf9] dark:bg-[#141415] select-none pointer-events-auto"><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">No apps in this stack</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Click "+" above to add an app.`), _tmpl$3$j = /* @__PURE__ */ template(`<img alt="App Snapshot"class="absolute inset-0 w-full h-full object-cover object-top pointer-events-none rounded-br-2xl select-none z-10">`), _tmpl$4$e = /* @__PURE__ */ template(`<div id=communicator-drawer data-communicator=true><div class="flex-1 flex flex-col min-w-0 h-full pointer-events-none"><div class="flex-1 w-full h-full relative overflow-hidden bg-transparent pointer-events-none rounded-br-2xl"><div class="absolute bottom-0 right-0 w-3.5 h-3.5 pointer-events-none z-20 overflow-hidden"><svg class="w-full h-full fill-[#f4f4f2] dark:fill-[#121212]"viewBox="0 0 16 16"><path d="M16,0 L16,16 L0,16 C8.836,16 16,8.836 16,0 Z">`);
 function CommunicatorDrawer(props) {
   let drawerRef;
   let containerRef;
@@ -22964,6 +24592,13 @@ function CommunicatorDrawer(props) {
   const [initialConfigTab, setInitialConfigTab] = createSignal("addApp");
   const [editAppItem, setEditAppItem] = createSignal(null);
   const [preselectedProfileId, setPreselectedProfileId] = createSignal(null);
+  const openConfig = (tab, pos, profileId = null) => {
+    setEditAppItem(null);
+    setPreselectedProfileId(profileId);
+    setInitialConfigTab(tab);
+    setConfigPopoverPos(pos);
+    setShowConfigModal(true);
+  };
   const {
     handleMouseDown: handleDragStart,
     handleDoubleClick: handleResetPosition,
@@ -22984,18 +24619,16 @@ function CommunicatorDrawer(props) {
         e.preventDefault();
         commActions.toggleOpen(true);
       } else if (e.key === "Escape" && commStore.isOpen) {
+        if (showConfigModal() || commStore.activePopoverCount > 0) return;
         e.preventDefault();
         commActions.close();
       }
     };
     const handleOutsidePointerDown = (e) => {
-      if (!commStore.isOpen || showConfigModal()) return;
+      if (!commStore.isOpen || showConfigModal() || commStore.activePopoverCount > 0) return;
       const target = e.target;
-      if (drawerRef && target && drawerRef.contains(target)) return;
-      const triggerEl = document.getElementById("communicator-trigger");
-      if (triggerEl && target && triggerEl.contains(target)) return;
-      const inPortal = target?.closest?.("[data-overlay-chrome]");
-      if (inPortal && (inPortal.id?.startsWith("communicator") || inPortal.getAttribute("data-communicator"))) return;
+      const el = target instanceof Element ? target : target?.parentElement;
+      if (el?.closest?.("[data-communicator], #communicator-drawer, #communicator-trigger, [id^='communicator-']")) return;
       commActions.close();
     };
     window.addEventListener("keydown", handleGlobalShortcuts);
@@ -23033,7 +24666,7 @@ function CommunicatorDrawer(props) {
       return commStore.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$4$f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.firstChild;
+      var _el$ = _tmpl$4$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.firstChild;
       addEventListener(_el$, "mouseenter", commActions.keepOpen);
       addEventListener(_el$, "transitionend", syncBounds);
       var _ref$ = drawerRef;
@@ -23041,22 +24674,12 @@ function CommunicatorDrawer(props) {
       insert(_el$, createComponent(CommunicatorStackRail, {
         onOpenConfig: (e) => {
           const rect = e.currentTarget.getBoundingClientRect();
-          setEditAppItem(null);
-          setPreselectedProfileId(commStore.lens === "profile" ? commStore.activeProfileId : null);
-          setInitialConfigTab("manageStacks");
-          setConfigPopoverPos({
+          openConfig("manageStacks", {
             top: rect.top,
             left: rect.right + 10
-          });
-          setShowConfigModal(true);
+          }, commStore.lens === "profile" ? commStore.activeProfileId : null);
         },
-        onAddAppToProfile: (profileId, pos) => {
-          setEditAppItem(null);
-          setPreselectedProfileId(profileId);
-          setInitialConfigTab("addApp");
-          setConfigPopoverPos(pos || null);
-          setShowConfigModal(true);
-        },
+        onAddAppToProfile: (profileId, pos) => openConfig("addApp", pos || null, profileId),
         onDragStart: handleDragStart,
         onResetPosition: handleResetPosition
       }), _el$2);
@@ -23066,14 +24689,10 @@ function CommunicatorDrawer(props) {
         onDragStart: handleDragStart,
         onAddApp: (e) => {
           const rect = e.currentTarget.getBoundingClientRect();
-          setEditAppItem(null);
-          setPreselectedProfileId(commStore.lens === "profile" ? commStore.activeProfileId : null);
-          setInitialConfigTab("addApp");
-          setConfigPopoverPos({
+          openConfig("addApp", {
             top: rect.bottom + 6,
             left: Math.max(12, rect.left - 120)
-          });
-          setShowConfigModal(true);
+          }, commStore.lens === "profile" ? commStore.activeProfileId : null);
         },
         onExpandToSplit: handleExpandToSplit
       }), _el$3);
@@ -23084,7 +24703,7 @@ function CommunicatorDrawer(props) {
           return commStore.activeTab === "all";
         },
         get children() {
-          var _el$4 = _tmpl$$F();
+          var _el$4 = _tmpl$$L();
           insert(_el$4, createComponent(CommunicatorFeed, {}));
           return _el$4;
         }
@@ -23094,7 +24713,7 @@ function CommunicatorDrawer(props) {
           return memo(() => commStore.activeTab !== "all")() && currentApps().length === 0;
         },
         get children() {
-          return _tmpl$2$q();
+          return _tmpl$2$u();
         }
       }), _el$7);
       insert(_el$3, createComponent(Show, {
@@ -23102,7 +24721,7 @@ function CommunicatorDrawer(props) {
           return memo(() => !!isDragging())() && dragSnapshot();
         },
         get children() {
-          var _el$6 = _tmpl$3$k();
+          var _el$6 = _tmpl$3$j();
           createRenderEffect(() => setAttribute(_el$6, "src", dragSnapshot()));
           return _el$6;
         }
@@ -23153,7 +24772,7 @@ function CommunicatorDrawer(props) {
     }
   });
 }
-var _tmpl$$E = /* @__PURE__ */ template(`<svg id=communicator-safe-bridge class="fixed inset-0 w-full h-full pointer-events-none z-[125]"style=fill:transparent><polygon class=pointer-events-auto data-overlay-chrome=true>`);
+var _tmpl$$K = /* @__PURE__ */ template(`<svg id=communicator-safe-bridge class="fixed inset-0 w-full h-full pointer-events-none z-[125]"style=fill:transparent><polygon class=pointer-events-auto data-overlay-chrome=true>`);
 function SafeBridgeOverlay(props) {
   const pointsString = () => props.polygon().map((p) => `${p.x},${p.y}`).join(" ");
   return createComponent(Show, {
@@ -23161,7 +24780,7 @@ function SafeBridgeOverlay(props) {
       return memo(() => !!(commStore.isOpen && !commStore.isFloating))() && props.polygon().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$E(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$K(), _el$2 = _el$.firstChild;
       addEventListener(_el$, "mousemove", commActions.keepOpen, true);
       addEventListener(_el$, "mouseenter", commActions.keepOpen);
       createRenderEffect(() => setAttribute(_el$2, "points", pointsString()));
@@ -23216,7 +24835,7 @@ function useCommunicatorIntent() {
     }
   };
   const handleMouseMove = (e) => {
-    if (commStore.isFloating || commStore.isPinned) return;
+    if (commStore.isFloating || commStore.isPinned || commStore.activePopoverCount > 0) return;
     if (commStore.isOpen) {
       const hull = getCombinedHull();
       const pt = { x: e.clientX, y: e.clientY };
@@ -23249,7 +24868,7 @@ function useCommunicatorIntent() {
     handleTriggerEnter
   };
 }
-var _tmpl$$D = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
+var _tmpl$$J = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
 function ActionCluster(props) {
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
   const [isSpinning, setIsSpinning] = createSignal(false);
@@ -23302,7 +24921,7 @@ function ActionCluster(props) {
           return showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$D();
+          var _el$ = _tmpl$$J();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             setShowProfileMenu(false);
@@ -23358,7 +24977,7 @@ function ActionCluster(props) {
   });
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$C = /* @__PURE__ */ template(`<div><div>`);
+var _tmpl$$I = /* @__PURE__ */ template(`<div><div>`);
 const STYLE_MAP = {
   md: {
     outer: "rounded-xl p-[3px]",
@@ -23408,7 +25027,7 @@ function DoubleBezel(rawProps) {
   const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
   const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
   return (() => {
-    var _el$ = _tmpl$$C(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$I(), _el$2 = _el$.firstChild;
     spread(_el$, mergeProps({
       get ["class"]() {
         return `${outerBg} ${outerBorder} overflow-hidden flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
@@ -23427,7 +25046,7 @@ function DoubleBezel(rawProps) {
     return _el$;
   })();
 }
-var _tmpl$$B = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$p = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$j = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+var _tmpl$$H = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$t = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$i = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
 function CommandBar(props) {
   const [isFocused, setIsFocused] = createSignal(false);
   let inputEl;
@@ -23464,7 +25083,7 @@ function CommandBar(props) {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$4$e(), _el$5 = _el$4.firstChild;
+            var _el$4 = _tmpl$4$d(), _el$5 = _el$4.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = !!isFocused(), _v$5 = !isFocused();
               _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
@@ -23478,12 +25097,12 @@ function CommandBar(props) {
           })();
         },
         get children() {
-          var _el$ = _tmpl$$B();
+          var _el$ = _tmpl$$H();
           insert(_el$, () => props.icon);
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$2$p();
+        var _el$2 = _tmpl$2$t();
         _el$2.addEventListener("blur", handleBlur);
         _el$2.addEventListener("focus", handleFocus);
         addEventListener(_el$2, "keydown", props.onKeyDown, true);
@@ -23515,7 +25134,7 @@ function CommandBar(props) {
           return props.rightElement;
         },
         get children() {
-          var _el$3 = _tmpl$3$j();
+          var _el$3 = _tmpl$3$i();
           insert(_el$3, () => props.rightElement);
           return _el$3;
         }
@@ -23524,7 +25143,7 @@ function CommandBar(props) {
   });
 }
 delegateEvents(["input", "keydown"]);
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"><div>`);
+var _tmpl$$G = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"><div>`);
 function ModalShell$1(props) {
   onMount(() => {
     const onKeyDown = (e) => {
@@ -23542,7 +25161,7 @@ function ModalShell$1(props) {
     get children() {
       return createComponent(Portal, {
         get children() {
-          var _el$ = _tmpl$$A(), _el$2 = _el$.firstChild;
+          var _el$ = _tmpl$$G(), _el$2 = _el$.firstChild;
           _el$.$$click = (e) => {
             if (e.target === e.currentTarget) props.onClose();
           };
@@ -23805,11 +25424,11 @@ class CatalogSearchEngine {
   }
 }
 const catalogSearch = new CatalogSearchEngine();
-var _tmpl$$z = /* @__PURE__ */ template(`<img class="w-4 h-4 object-contain rounded"alt loading=lazy>`, true, false, false), _tmpl$2$o = /* @__PURE__ */ template(`<div class="flex items-center gap-1">`), _tmpl$3$i = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded flex items-center justify-center shrink-0"></div><span class=font-medium></span><span class="text-[10px] font-mono opacity-60 uppercase">[<!>]`), _tmpl$4$d = /* @__PURE__ */ template(`<span class="text-xs font-bold uppercase">`), _tmpl$5$9 = /* @__PURE__ */ template(`<button class="px-1.5 py-0.5 text-[9px] font-mono rounded bg-white/20 hover:bg-white/30 text-current">`);
+var _tmpl$$F = /* @__PURE__ */ template(`<img class="w-4 h-4 object-contain rounded"alt loading=lazy>`, true, false, false), _tmpl$2$s = /* @__PURE__ */ template(`<div class="flex items-center gap-1">`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded flex items-center justify-center shrink-0"></div><span class=font-medium></span><span class="text-[10px] font-mono opacity-60 uppercase">[<!>]`), _tmpl$4$c = /* @__PURE__ */ template(`<span class="text-xs font-bold uppercase">`), _tmpl$5$8 = /* @__PURE__ */ template(`<button class="px-1.5 py-0.5 text-[9px] font-mono rounded bg-white/20 hover:bg-white/30 text-current">`);
 function CommandPaletteAppItem(props) {
   const favicon = () => getFaviconUrl(props.app.domain || props.app.url, 32);
   return (() => {
-    var _el$ = _tmpl$3$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+    var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
     _el$9.nextSibling;
     addEventListener(_el$, "mouseenter", props.onHover);
     _el$.$$click = () => props.onSelect(props.app);
@@ -23819,13 +25438,13 @@ function CommandPaletteAppItem(props) {
       },
       get fallback() {
         return (() => {
-          var _el$1 = _tmpl$4$d();
+          var _el$1 = _tmpl$4$c();
           insert(_el$1, () => props.app.name.charAt(0));
           return _el$1;
         })();
       },
       get children() {
-        var _el$4 = _tmpl$$z();
+        var _el$4 = _tmpl$$F();
         createRenderEffect(() => setAttribute(_el$4, "src", favicon()));
         return _el$4;
       }
@@ -23837,13 +25456,13 @@ function CommandPaletteAppItem(props) {
         return memo(() => !!props.app.actions)() && props.app.actions.length > 0;
       },
       get children() {
-        var _el$0 = _tmpl$2$o();
+        var _el$0 = _tmpl$2$s();
         insert(_el$0, createComponent(For, {
           get each() {
             return props.app.actions?.slice(0, 2);
           },
           children: (act) => (() => {
-            var _el$10 = _tmpl$5$9();
+            var _el$10 = _tmpl$5$8();
             _el$10.$$click = (e) => {
               e.stopPropagation();
               props.onSelect(props.app, act.path);
@@ -23860,7 +25479,7 @@ function CommandPaletteAppItem(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$y = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 dark:border-neutral-800 cursor-text"><svg class="w-5 h-5 text-neutral-400 mr-3 shrink-0"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg><input type=text placeholder="Search apps, saved presets, sub-routes, or workspaces…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-500 outline-none border-none focus:ring-0">`), _tmpl$2$n = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">My Presets`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Web Applications`), _tmpl$4$c = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Workspaces`), _tmpl$5$8 = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto no-scrollbar">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-200 select-none">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2"><span class=text-xs>◫</span><span class=font-medium></span><span class="text-[10px] font-mono opacity-60">(<!>)</span></div><span class="text-[10px] font-mono opacity-60">Layout`), _tmpl$8$1 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+var _tmpl$$E = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 dark:border-neutral-800 cursor-text"><svg class="w-5 h-5 text-neutral-400 mr-3 shrink-0"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg><input type=text placeholder="Search apps, saved presets, sub-routes, or workspaces…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-500 outline-none border-none focus:ring-0">`), _tmpl$2$r = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">My Presets`), _tmpl$3$g = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Web Applications`), _tmpl$4$b = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Workspaces`), _tmpl$5$7 = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto no-scrollbar">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-200 select-none">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2"><span class=text-xs>◫</span><span class=font-medium></span><span class="text-[10px] font-mono opacity-60">(<!>)</span></div><span class="text-[10px] font-mono opacity-60">Layout`), _tmpl$8$1 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
 function CommandPalette(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -23974,7 +25593,7 @@ function CommandPalette(props) {
         onClick: (e) => e.stopPropagation(),
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$y(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$E(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$4.$$keydown = handleKeyDown;
             _el$4.$$input = (e) => {
               setQuery(e.currentTarget.value);
@@ -23985,13 +25604,13 @@ function CommandPalette(props) {
             createRenderEffect(() => _el$4.value = query());
             return _el$2;
           })(), (() => {
-            var _el$5 = _tmpl$5$8();
+            var _el$5 = _tmpl$5$7();
             insert(_el$5, createComponent(Show, {
               get when() {
                 return matchingPresets().length > 0;
               },
               get children() {
-                var _el$6 = _tmpl$2$n();
+                var _el$6 = _tmpl$2$r();
                 _el$6.firstChild;
                 insert(_el$6, createComponent(For, {
                   get each() {
@@ -24016,7 +25635,7 @@ function CommandPalette(props) {
                 return matchingApps().length > 0;
               },
               get children() {
-                var _el$8 = _tmpl$3$h();
+                var _el$8 = _tmpl$3$g();
                 _el$8.firstChild;
                 insert(_el$8, createComponent(For, {
                   get each() {
@@ -24039,7 +25658,7 @@ function CommandPalette(props) {
                 return matchingWorkspaces().length > 0;
               },
               get children() {
-                var _el$0 = _tmpl$4$c();
+                var _el$0 = _tmpl$4$b();
                 _el$0.firstChild;
                 insert(_el$0, createComponent(For, {
                   get each() {
@@ -24076,7 +25695,7 @@ function CommandPalette(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$x = /* @__PURE__ */ template(`<div><div></div><div>`);
+var _tmpl$$D = /* @__PURE__ */ template(`<div><div></div><div>`);
 function Resizer(props) {
   const onPointerDown = (e) => {
     e.preventDefault();
@@ -24152,7 +25771,7 @@ function Resizer(props) {
     window.addEventListener("mouseleave", onPointerUp);
   };
   return (() => {
-    var _el$ = _tmpl$$x(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$.$$pointerdown = onPointerDown;
     createRenderEffect((_p$) => {
       var _v$ = `relative flex items-center justify-center bg-transparent z-20 group pointer-events-auto shrink-0 ${props.isHorizontal ? "w-3 cursor-col-resize -mx-1.5" : "h-3 cursor-row-resize -my-1.5"}`, _v$2 = `bg-transparent group-hover:bg-neutral-400/60 group-active:bg-neutral-800 transition-colors duration-150 ${props.isHorizontal ? "w-[1px] h-full" : "h-[1px] w-full"}`, _v$3 = `absolute rounded-full bg-neutral-200 border border-neutral-400/50 shadow-sm opacity-0 group-hover:opacity-100 group-active:scale-95 transition-all duration-150 ${props.isHorizontal ? "w-1 h-6" : "h-1 w-6"}`;
@@ -24290,7 +25909,7 @@ function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximized
   traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
   return result;
 }
-var _tmpl$$w = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$m = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$g = /* @__PURE__ */ template(`<button>`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$7 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div data-overlay-chrome=true><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$1 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$C = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$q = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$f = /* @__PURE__ */ template(`<button>`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div data-overlay-chrome=true><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$1 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function PaneIsland(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -24306,7 +25925,7 @@ function PaneIsland(props) {
           return showSplitMenu() || showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$w();
+          var _el$ = _tmpl$$C();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             props.onActive?.();
@@ -24353,7 +25972,7 @@ function PaneIsland(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$7 = _tmpl$3$g();
+            var _el$7 = _tmpl$3$f();
             _el$7.$$click = (e) => {
               e.stopPropagation();
               props.onActive?.();
@@ -24373,7 +25992,7 @@ function PaneIsland(props) {
                 return _tmpl$7$1();
               },
               get children() {
-                return _tmpl$2$m();
+                return _tmpl$2$q();
               }
             }));
             createRenderEffect(() => className(_el$7, `w-7 h-7 rounded-[10px] flex items-center justify-center transition-all active:scale-95 shrink-0 ${isMaximized() ? "bg-neutral-900 text-white shadow-sm" : "text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -24384,7 +26003,7 @@ function PaneIsland(props) {
           label: "Drag to Move",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$b();
+            var _el$0 = _tmpl$4$a();
             _el$0.$$pointerdown = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -24405,7 +26024,7 @@ function PaneIsland(props) {
           shortcut: "Ctrl+W",
           placement: "bottom",
           get children() {
-            var _el$10 = _tmpl$5$7();
+            var _el$10 = _tmpl$5$6();
             _el$10.$$click = (e) => {
               e.stopPropagation();
               props.onActive?.();
@@ -24438,11 +26057,70 @@ function PaneIsland(props) {
   });
 }
 delegateEvents(["pointerdown", "click"]);
-var _tmpl$$v = /* @__PURE__ */ template(`<div class="flex-1 bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in zoom-in-[0.98] duration-150 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-black/[0.04] dark:bg-white/[0.06] border-2 border-dashed border-neutral-400/50 rounded-xl pointer-events-none flex items-center justify-center text-[11px] font-semibold text-neutral-500 dark:text-neutral-400 animate-in fade-in duration-150 z-[60]">Swap Panes`), _tmpl$3$f = /* @__PURE__ */ template(`<div><div><div><div class="flex-1 relative w-full h-full bg-transparent group/pane pointer-events-none transition-all duration-200 z-10"></div></div><div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$B = /* @__PURE__ */ template(`<div class="flex-1 min-w-0 min-h-0 relative p-1 pointer-events-none z-20 animate-in fade-in duration-150"><div class="w-full h-full border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`), _tmpl$2$p = /* @__PURE__ */ template(`<div class="absolute inset-1 z-30 pointer-events-none border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 animate-in fade-in duration-150 backdrop-blur-[0.5px] shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`);
+function PaneDropGhost(props) {
+  const label = () => {
+    switch (props.direction) {
+      case "left":
+        return "Split Left";
+      case "right":
+        return "Split Right";
+      case "top":
+        return "Split Top";
+      case "bottom":
+        return "Split Bottom";
+      case "replace":
+        return "Swap Panes";
+      default:
+        return "Drop Pane";
+    }
+  };
+  return createComponent(Show, {
+    get when() {
+      return !props.isAbsolute;
+    },
+    get fallback() {
+      return (() => {
+        var _el$4 = _tmpl$2$p(), _el$5 = _el$4.firstChild;
+        insert(_el$5, label);
+        return _el$4;
+      })();
+    },
+    get children() {
+      var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      insert(_el$3, label);
+      return _el$;
+    }
+  });
+}
+var _tmpl$$A = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`);
+function PaneSplitEdgeButtons(props) {
+  return (() => {
+    var _el$ = _tmpl$$A(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling, _el$7 = _el$6.firstChild;
+    _el$3.$$click = (e) => {
+      e.stopPropagation();
+      props.onSplit(props.paneId, "bottom");
+    };
+    _el$5.$$click = (e) => {
+      e.stopPropagation();
+      props.onSplit(props.paneId, "left");
+    };
+    _el$7.$$click = (e) => {
+      e.stopPropagation();
+      props.onSplit(props.paneId, "right");
+    };
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$z = /* @__PURE__ */ template(`<div><div><div class="flex-1 min-w-0 min-h-0 relative w-full h-full bg-transparent group/pane pointer-events-none rounded-[14px] transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-10">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function PaneNode(props) {
   const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
-  const isTarget = () => props.dragTarget?.id === props.node.id;
+  const isTarget = () => Boolean(props.dragTarget && props.dragTarget.tier === "leaf" && props.dragTarget.id === props.node.id);
+  const targetDir = () => isTarget() ? props.dragTarget?.direction : null;
+  const isHorizontalSplit = () => targetDir() === "left" || targetDir() === "right";
   const isDraggingThis = () => props.activeDragId === props.node.id;
+  const isTransitionLocked = () => props.activeDragId !== null || activePaneAuthority.isQuarantined();
   const profileColor = () => layoutStore.profiles.find((p) => p.id === (props.node.profileId || "main"))?.color || "#3b82f6";
   const padding = createMemo(() => {
     const padMap = computeSpatialPadding({
@@ -24482,61 +26160,58 @@ function PaneNode(props) {
     },
     get fallback() {
       return (() => {
-        var _el$13 = _tmpl$4$a(), _el$14 = _el$13.firstChild, _el$15 = _el$14.firstChild;
-        insert(_el$15, () => props.node.title || "Split Preview");
-        return _el$13;
+        var _el$4 = _tmpl$2$o(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
+        insert(_el$6, () => props.node.title || "Split Preview");
+        return _el$4;
       })();
     },
     get children() {
-      var _el$ = _tmpl$3$f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$9.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$1.nextSibling, _el$12 = _el$11.firstChild;
-      _el$.$$click = () => {
-        props.onActivePaneChange(props.node.id);
-        PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
-      };
-      _el$.$$mousedown = () => {
-        props.onActivePaneChange(props.node.id);
-        PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
-      };
-      insert(_el$3, createComponent(Show, {
+      var _el$ = _tmpl$$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      _el$.$$click = () => PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
+      _el$.$$mousedown = () => PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
+      insert(_el$2, createComponent(Show, {
         get when() {
-          return memo(() => !!isTarget())() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "top");
+          return targetDir() === "left" || targetDir() === "top";
         },
         get children() {
-          var _el$4 = _tmpl$$v();
-          insert(_el$4, () => props.dragTarget?.direction === "left" ? "Drop Left" : "Drop Top");
-          return _el$4;
+          return createComponent(PaneDropGhost, {
+            get direction() {
+              return targetDir();
+            }
+          });
         }
-      }), _el$5);
-      insert(_el$3, createComponent(Show, {
+      }), _el$3);
+      insert(_el$2, createComponent(Show, {
         get when() {
-          return memo(() => !!isTarget())() && props.dragTarget?.direction === "replace";
+          return targetDir() === "right" || targetDir() === "bottom";
         },
         get children() {
-          return _tmpl$2$l();
-        }
-      }), null);
-      insert(_el$3, createComponent(Show, {
-        get when() {
-          return memo(() => !!isTarget())() && (props.dragTarget?.direction === "right" || props.dragTarget?.direction === "bottom");
-        },
-        get children() {
-          var _el$7 = _tmpl$$v();
-          insert(_el$7, () => props.dragTarget?.direction === "right" ? "Drop Right" : "Drop Bottom");
-          return _el$7;
+          return createComponent(PaneDropGhost, {
+            get direction() {
+              return targetDir();
+            }
+          });
         }
       }), null);
-      _el$0.$$click = (e) => {
-        e.stopPropagation();
-        props.onSplit(props.node.id, "bottom");
-      };
-      _el$10.$$click = (e) => {
-        e.stopPropagation();
-        props.onSplit(props.node.id, "left");
-      };
-      _el$12.$$click = (e) => {
-        e.stopPropagation();
-        props.onSplit(props.node.id, "right");
-      };
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return targetDir() === "replace";
+        },
+        get children() {
+          return createComponent(PaneDropGhost, {
+            direction: "replace",
+            isAbsolute: true
+          });
+        }
+      }), null);
+      insert(_el$2, createComponent(PaneSplitEdgeButtons, {
+        get paneId() {
+          return props.node.id;
+        },
+        get onSplit() {
+          return props.onSplit;
+        }
+      }), null);
       insert(_el$2, createComponent(PaneIsland, {
         get node() {
           return props.node;
@@ -24560,7 +26235,7 @@ function PaneNode(props) {
         }
       }), null);
       createRenderEffect((_p$) => {
-        var _v$ = `w-full h-full relative group/pane-container pointer-events-none ${props.activePaneId === props.node.id ? "z-20" : "z-10"}`, _v$2 = `${padding().pt}px`, _v$3 = `${padding().pr}px`, _v$4 = `${padding().pb}px`, _v$5 = `${padding().pl}px`, _v$6 = props.node.id, _v$7 = `w-full h-full relative overflow-visible flex flex-col pointer-events-none rounded-[14px] transition-shadow duration-200 ease-out ${isDraggingThis() || layoutStore.maximizedPaneId ? "opacity-0" : ""}`, _v$8 = focusStyle(), _v$9 = `flex-1 w-full h-full flex transition-all duration-200 gap-1.5 relative ${isTarget() && (props.dragTarget?.direction === "left" || props.dragTarget?.direction === "right") ? "flex-row" : "flex-col"}`, _v$0 = `pane-container-${props.node.id}`;
+        var _v$ = `w-full h-full relative group/pane-container pointer-events-none ${props.activePaneId === props.node.id ? "z-20" : "z-10"}`, _v$2 = `${padding().pt}px`, _v$3 = `${padding().pr}px`, _v$4 = `${padding().pb}px`, _v$5 = `${padding().pl}px`, _v$6 = props.node.id, _v$7 = `w-full h-full relative overflow-visible flex pointer-events-none rounded-[14px] ${isTransitionLocked() ? "transition-none duration-0" : "transition-shadow duration-200 ease-out"} ${isDraggingThis() || layoutStore.maximizedPaneId ? "opacity-0" : ""} ${isHorizontalSplit() ? "flex-row gap-2" : targetDir() ? "flex-col gap-2" : "flex-col"}`, _v$8 = `pane-container-${props.node.id}`, _v$9 = focusStyle();
         _v$ !== _p$.e && className(_el$, _p$.e = _v$);
         _v$2 !== _p$.t && setStyleProperty(_el$, "padding-top", _p$.t = _v$2);
         _v$3 !== _p$.a && setStyleProperty(_el$, "padding-right", _p$.a = _v$3);
@@ -24568,9 +26243,8 @@ function PaneNode(props) {
         _v$5 !== _p$.i && setStyleProperty(_el$, "padding-left", _p$.i = _v$5);
         _v$6 !== _p$.n && setAttribute(_el$, "data-pane-id", _p$.n = _v$6);
         _v$7 !== _p$.s && className(_el$2, _p$.s = _v$7);
-        _p$.h = style(_el$2, _v$8, _p$.h);
-        _v$9 !== _p$.r && className(_el$3, _p$.r = _v$9);
-        _v$0 !== _p$.d && setAttribute(_el$5, "id", _p$.d = _v$0);
+        _v$8 !== _p$.h && setAttribute(_el$3, "id", _p$.h = _v$8);
+        _p$.r = style(_el$3, _v$9, _p$.r);
         return _p$;
       }, {
         e: void 0,
@@ -24581,15 +26255,14 @@ function PaneNode(props) {
         n: void 0,
         s: void 0,
         h: void 0,
-        r: void 0,
-        d: void 0
+        r: void 0
       });
       return _el$;
     }
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$u = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$k = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$y = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div>`);
 function LayoutNode(props) {
   const node = () => (props.nodes || layoutStore.nodes)[props.nodeId];
   return createComponent(Show, {
@@ -24638,13 +26311,13 @@ function LayoutNode(props) {
       });
     },
     get children() {
-      var _el$ = _tmpl$2$k();
+      var _el$ = _tmpl$2$n();
       insert(_el$, createComponent(Show, {
         get when() {
           return props.activeDragId !== node().a;
         },
         get children() {
-          var _el$2 = _tmpl$$u();
+          var _el$2 = _tmpl$$y();
           insert(_el$2, createComponent(LayoutNode, {
             get nodeId() {
               return node().a;
@@ -24705,7 +26378,7 @@ function LayoutNode(props) {
           return props.activeDragId !== node().b;
         },
         get children() {
-          var _el$3 = _tmpl$$u();
+          var _el$3 = _tmpl$$y();
           insert(_el$3, createComponent(LayoutNode, {
             get nodeId() {
               return node().b;
@@ -24750,7 +26423,381 @@ function LayoutNode(props) {
     }
   });
 }
-var _tmpl$$t = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
+var _tmpl$$x = /* @__PURE__ */ template(`<div class="absolute inset-2 z-[99] pointer-events-none transition-all duration-300 border-2 border-dashed border-neutral-400/50 bg-black/[0.02] dark:bg-white/[0.04] rounded-xl flex items-center justify-center animate-in fade-in duration-200 backdrop-blur-[0.5px]"><div class="px-4 py-2 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight">Release to place pane in this tab`), _tmpl$2$m = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-200 ease-out backdrop-blur-[0.5px]"><div class="px-3.5 py-1.5 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight"><span>`);
+function DropSnapPreview(props) {
+  const isEmptyTabTarget = () => {
+    return !layoutStore.rootId || Object.keys(layoutStore.nodes).length === 0;
+  };
+  const isRootTarget = () => {
+    if (!props.target) return false;
+    return props.target.tier === "root" || props.target.id === layoutStore.rootId || layoutStore.nodes[props.target.id]?.type === "split";
+  };
+  const getBoundsStyle = () => {
+    const dir = props.target?.direction;
+    const m = SPATIAL_TOKENS.outerBezel;
+    const h = SPATIAL_TOKENS.halfSplitGap;
+    switch (dir) {
+      case "left":
+        return {
+          top: `${m}px`,
+          bottom: `${m}px`,
+          left: `${m}px`,
+          width: `calc(50% - ${m + h}px)`
+        };
+      case "right":
+        return {
+          top: `${m}px`,
+          bottom: `${m}px`,
+          right: `${m}px`,
+          width: `calc(50% - ${m + h}px)`
+        };
+      case "top":
+        return {
+          left: `${m}px`,
+          right: `${m}px`,
+          top: `${m}px`,
+          height: `calc(50% - ${m + h}px)`
+        };
+      case "bottom":
+        return {
+          left: `${m}px`,
+          right: `${m}px`,
+          bottom: `${m}px`,
+          height: `calc(50% - ${m + h}px)`
+        };
+      default:
+        return {};
+    }
+  };
+  return [createComponent(Show, {
+    get when() {
+      return isEmptyTabTarget();
+    },
+    get children() {
+      return _tmpl$$x();
+    }
+  }), createComponent(Show, {
+    get when() {
+      return memo(() => !!(!isEmptyTabTarget() && isRootTarget()))() && props.target;
+    },
+    get children() {
+      var _el$2 = _tmpl$2$m(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+      insert(_el$4, () => props.target?.label || `Dock Layout ${props.target.direction}`);
+      createRenderEffect((_$p) => style(_el$2, getBoundsStyle(), _$p));
+      return _el$2;
+    }
+  })];
+}
+var _tmpl$$w = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$l = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$5 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$1 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
+function FindInPageBar(props) {
+  let inputRef;
+  const [query, setQuery] = createSignal("");
+  const [scope, setScope] = createSignal("active");
+  const [matchCase, setMatchCase] = createSignal(false);
+  const [matchInfo, setMatchInfo] = createSignal({
+    current: 0,
+    total: 0
+  });
+  const [splitCount, setSplitCount] = createSignal(0);
+  let debounceTimer;
+  const triggerFind = (q, forward = true, findNext = false) => {
+    const trimmed = q.trim();
+    if (!trimmed || scope() === "global") {
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      setMatchInfo({
+        current: 0,
+        total: 0
+      });
+      return;
+    }
+    const opts = {
+      forward,
+      findNext,
+      matchCase: matchCase(),
+      targetPaneId: scope() === "active" ? props.activePaneId : void 0
+    };
+    if (findNext) {
+      clearTimeout(debounceTimer);
+      window.api?.findInAllPanes?.(trimmed, opts);
+    } else {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        window.api?.findInAllPanes?.(trimmed, opts);
+      }, 100);
+    }
+  };
+  const handleSearch = (q, forward = true, findNext = false) => {
+    setQuery(q);
+    triggerFind(q, forward, findNext);
+  };
+  const handleKeyDown = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      props.onClose();
+      if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
+    } else if (e.key === "Enter" && scope() !== "global") {
+      e.preventDefault();
+      triggerFind(query(), !e.shiftKey, true);
+    }
+  };
+  const matchingGlobal = createMemo(() => {
+    if (scope() !== "global") return [];
+    const q = query().trim().toLowerCase();
+    if (!q) return [];
+    const list = [];
+    const wss = props.ws?.workspaces?.() || [];
+    for (const w of wss) {
+      if (w.name.toLowerCase().includes(q)) list.push({
+        id: w.id,
+        name: w.name
+      });
+    }
+    return list.slice(0, 5);
+  });
+  createEffect(() => {
+    if (props.isOpen) {
+      setTimeout(() => {
+        inputRef?.focus();
+        inputRef?.select();
+      }, 30);
+    } else {
+      clearTimeout(debounceTimer);
+      window.api?.stopFind?.("clearSelection");
+      setQuery("");
+      setMatchInfo({
+        current: 0,
+        total: 0
+      });
+    }
+  });
+  onMount(() => {
+    const handleResult = (e) => {
+      const {
+        activeMatchOrdinal,
+        numberOfMatches,
+        matches,
+        activePaneId,
+        paneBreakdown
+      } = e.detail || {};
+      const total = typeof matches === "number" ? matches : typeof numberOfMatches === "number" ? numberOfMatches : 0;
+      setMatchInfo({
+        current: activeMatchOrdinal || 0,
+        total
+      });
+      if (paneBreakdown) setSplitCount(Object.keys(paneBreakdown).filter((k) => paneBreakdown[k].total > 0).length);
+      if (activePaneId) window.dispatchEvent(new CustomEvent("pane.focused", {
+        detail: activePaneId
+      }));
+    };
+    window.addEventListener("pane.found-in-page", handleResult);
+    onCleanup(() => {
+      window.removeEventListener("pane.found-in-page", handleResult);
+      window.api?.stopFind?.("clearSelection");
+    });
+  });
+  return createComponent(Show, {
+    get when() {
+      return props.isOpen;
+    },
+    get children() {
+      var _el$ = _tmpl$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$9 = _el$3.nextSibling;
+      _el$.$$click = (e) => e.stopPropagation();
+      insert(_el$3, createComponent(Search, {
+        "class": "w-3.5 h-3.5 text-neutral-400 shrink-0 mr-1"
+      }), _el$4);
+      _el$4.$$keydown = handleKeyDown;
+      _el$4.$$input = (e) => handleSearch(e.currentTarget.value, true, false);
+      var _ref$ = inputRef;
+      typeof _ref$ === "function" ? use(_ref$, _el$4) : inputRef = _el$4;
+      insert(_el$3, createComponent(Show, {
+        get when() {
+          return query().length > 0;
+        },
+        get children() {
+          var _el$5 = _tmpl$$w();
+          _el$5.$$click = () => {
+            setQuery("");
+            triggerFind("", true, false);
+            inputRef?.focus();
+          };
+          insert(_el$5, createComponent(X, {
+            "class": "w-3 h-3"
+          }));
+          return _el$5;
+        }
+      }), null);
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return memo(() => query().length > 0)() && scope() !== "global";
+        },
+        get children() {
+          var _el$6 = _tmpl$3$e();
+          insert(_el$6, (() => {
+            var _c$ = memo(() => matchInfo().total > 0);
+            return () => _c$() ? `${matchInfo().current} / ${matchInfo().total}` : "No matches";
+          })(), null);
+          insert(_el$6, createComponent(Show, {
+            get when() {
+              return memo(() => splitCount() > 1)() && scope() === "all";
+            },
+            get children() {
+              var _el$7 = _tmpl$2$l(), _el$8 = _el$7.firstChild;
+              insert(_el$7, splitCount, _el$8);
+              return _el$7;
+            }
+          }), null);
+          return _el$6;
+        }
+      }), _el$9);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "Active Split",
+        placement: "bottom",
+        get children() {
+          var _el$0 = _tmpl$4$9();
+          _el$0.$$click = () => {
+            setScope("active");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$0, createComponent(Square, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$0, `p-1 rounded-md text-xs cursor-pointer ${scope() === "active" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$0;
+        }
+      }), null);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "All Splits",
+        placement: "bottom",
+        get children() {
+          var _el$1 = _tmpl$4$9();
+          _el$1.$$click = () => {
+            setScope("all");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$1, createComponent(Layers, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$1, `p-1 rounded-md text-xs cursor-pointer ${scope() === "all" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$1;
+        }
+      }), null);
+      insert(_el$9, createComponent(ActionTooltip, {
+        label: "All Workspaces",
+        placement: "bottom",
+        get children() {
+          var _el$10 = _tmpl$4$9();
+          _el$10.$$click = () => {
+            setScope("global");
+            triggerFind(query(), true, false);
+          };
+          insert(_el$10, createComponent(Globe, {
+            "class": "w-3 h-3"
+          }));
+          createRenderEffect(() => className(_el$10, `p-1 rounded-md text-xs cursor-pointer ${scope() === "global" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$10;
+        }
+      }), null);
+      insert(_el$2, createComponent(ActionTooltip, {
+        get label() {
+          return matchCase() ? "Match Case (Active)" : "Match Case (Inactive)";
+        },
+        placement: "bottom",
+        get children() {
+          var _el$11 = _tmpl$5$5();
+          _el$11.$$click = () => {
+            setMatchCase(!matchCase());
+            triggerFind(query(), true, false);
+          };
+          createRenderEffect(() => className(_el$11, `px-1.5 py-0.5 rounded-lg text-[10px] font-mono font-semibold transition-colors cursor-pointer ${matchCase() ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
+          return _el$11;
+        }
+      }), null);
+      insert(_el$2, createComponent(Show, {
+        get when() {
+          return scope() !== "global";
+        },
+        get children() {
+          return [createComponent(ActionTooltip, {
+            label: "Previous Match",
+            shortcut: "Shift+Enter",
+            placement: "bottom",
+            get children() {
+              var _el$12 = _tmpl$6$1();
+              _el$12.$$click = () => triggerFind(query(), false, true);
+              insert(_el$12, createComponent(ChevronUp, {
+                "class": "w-3.5 h-3.5"
+              }));
+              return _el$12;
+            }
+          }), createComponent(ActionTooltip, {
+            label: "Next Match",
+            shortcut: "Enter",
+            placement: "bottom",
+            get children() {
+              var _el$13 = _tmpl$6$1();
+              _el$13.$$click = () => triggerFind(query(), true, true);
+              insert(_el$13, createComponent(ChevronDown, {
+                "class": "w-3.5 h-3.5"
+              }));
+              return _el$13;
+            }
+          })];
+        }
+      }), null);
+      insert(_el$2, createComponent(ActionTooltip, {
+        label: "Close Search",
+        shortcut: "Esc",
+        placement: "bottom",
+        get children() {
+          var _el$14 = _tmpl$7();
+          _el$14.$$click = () => {
+            window.api?.stopFind?.("clearSelection");
+            props.onClose();
+            if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
+          };
+          insert(_el$14, createComponent(X, {
+            "class": "w-3.5 h-3.5"
+          }));
+          return _el$14;
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return memo(() => scope() === "global")() && matchingGlobal().length > 0;
+        },
+        get children() {
+          var _el$15 = _tmpl$8();
+          insert(_el$15, createComponent(For, {
+            get each() {
+              return matchingGlobal();
+            },
+            children: (w) => (() => {
+              var _el$16 = _tmpl$0(), _el$17 = _el$16.firstChild;
+              _el$16.$$click = () => {
+                props.ws?.switchWorkspace?.(w.id, "forward");
+                props.onClose();
+              };
+              insert(_el$16, createComponent(Globe, {
+                "class": "w-3.5 h-3.5 text-neutral-400 shrink-0"
+              }), _el$17);
+              insert(_el$17, () => w.name);
+              return _el$16;
+            })()
+          }));
+          return _el$15;
+        }
+      }), null);
+      createRenderEffect(() => setAttribute(_el$4, "placeholder", scope() === "active" ? "Find in active split..." : scope() === "all" ? "Find across all splits..." : "Search all workspaces..."));
+      createRenderEffect(() => _el$4.value = query());
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click", "input", "keydown"]);
+var _tmpl$$v = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
 function AbsolutePane(props) {
   let paneRef;
   const [style$1, setStyle] = createSignal({
@@ -24777,6 +26824,7 @@ function AbsolutePane(props) {
     }
     if (!target || !container) {
       currentObservedTarget = null;
+      setHasPosition(false);
       setStyle({
         top: "-99999px",
         left: "-99999px",
@@ -24814,7 +26862,7 @@ function AbsolutePane(props) {
       opacity: "1"
     });
     if (!hasPosition()) {
-      setHasPosition(true);
+      requestAnimationFrame(() => setHasPosition(true));
       if (props.isActive) {
         setIsFlashing(true);
         setTimeout(() => setIsFlashing(false), 350);
@@ -24877,7 +26925,7 @@ function AbsolutePane(props) {
     });
   });
   return (() => {
-    var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$v(), _el$2 = _el$.firstChild;
     var _ref$ = paneRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
     insert(_el$2, () => props.children);
@@ -24893,7 +26941,7 @@ function AbsolutePane(props) {
         "box-shadow": props.isDragging ? "0 25px 50px -12px rgba(0, 0, 0, 0.45)" : "",
         opacity: props.isReplaceTarget ? "0.4" : props.isDragging ? "0.92" : "1",
         filter: props.isDragging ? "blur(0.2px)" : "none"
-      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border ${props.isActive ? "border-neutral-300/90 dark:border-neutral-700/90 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_0_0_8px_#F7F7F5,0_2px_12px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.85)] dark:shadow-[0_0_0_8px_#121212,0_2px_12px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)]" : "border-neutral-200/80 dark:border-neutral-800/80 shadow-[0_0_0_8px_#F7F7F5,0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.5)] dark:shadow-[0_0_0_8px_#121212,0_2px_8px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.04)]"} overflow-hidden relative z-50 transition-all ${isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
+      }, _v$3 = props.targetId, _v$4 = `w-full h-full bg-transparent rounded-[12px] border overflow-hidden relative z-50 transition-all ${props.isActive ? "border-neutral-300/90 dark:border-neutral-700/90 ring-1 ring-neutral-400/30 dark:ring-neutral-500/30 shadow-[0_0_0_8px_#F7F7F5,0_2px_12px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.85)] dark:shadow-[0_0_0_8px_#121212,0_2px_12px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.08)]" : "border-neutral-200/80 dark:border-neutral-800/80 shadow-[0_0_0_8px_#F7F7F5,0_2px_8px_rgba(0,0,0,0.04),inset_0_1px_0_rgba(255,255,255,0.5)] dark:shadow-[0_0_0_8px_#121212,0_2px_8px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.04)]"} ${props.isGlobalDragging || props.isDragging ? "transition-none duration-0" : isFlashing() ? "ring-2 ring-neutral-400/40 border-neutral-400/50 dark:ring-neutral-500/40 dark:border-neutral-500/50 duration-75" : "duration-300"} ${layoutStore.maximizedPaneId === props.paneId ? "shadow-[0_0_0_100vw_#E5E5E5] dark:shadow-[0_0_0_100vw_#121212]" : ""} ${layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== props.paneId ? "opacity-0 pointer-events-none" : ""}`;
       _v$ !== _p$.e && className(_el$, _p$.e = _v$);
       _p$.t = style(_el$, _v$2, _p$.t);
       _v$3 !== _p$.a && setAttribute(_el$, "data-target-id", _p$.a = _v$3);
@@ -24951,6 +26999,8 @@ function useDefaultPanelKeyEvents(params) {
       const suggestionsList = params.allSuggestions();
       if (idx >= 0 && idx < suggestionsList.length) {
         params.executeSearchSuggestion(suggestionsList[idx]);
+      } else if (suggestionsList.length > 0) {
+        params.executeSearchSuggestion(suggestionsList[0]);
       } else if (params.urlInput().trim()) {
         const targetUrl = resolveInputUrl(params.urlInput().trim());
         params.handleLaunchUrl(targetUrl);
@@ -25089,7 +27139,7 @@ function useDefaultPanelController(props) {
     isDomainPattern: isDomainPattern2
   };
 }
-var _tmpl$$s = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
+var _tmpl$$u = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
 function WorkspaceNotes(props) {
   const [notes, setNotes] = createSignal("");
   let textareaRef;
@@ -25117,7 +27167,7 @@ function WorkspaceNotes(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$s(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
     _el$.$$click = () => {
       if (textareaRef) {
         textareaRef.focus();
@@ -25302,7 +27352,7 @@ function useInteractiveTilt(options = {}) {
     onMouseLeave
   };
 }
-var _tmpl$$r = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none"><img class="w-5 h-5 rounded-md object-contain p-0.5 bg-white dark:bg-neutral-800 border border-neutral-200/50 dark:border-neutral-700/60">`), _tmpl$2$j = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer relative overflow-hidden shrink-0 transition-colors"><div class="flex items-center justify-center -space-x-1.5 pointer-events-none">`), _tmpl$3$e = /* @__PURE__ */ template(`<div class="flex items-center shrink-0 overflow-visible"><div class="overflow-hidden flex items-center shrink-0"style=width:0px;opacity:0><div class="flex items-center gap-2 pl-2 sm:gap-2.5 sm:pl-2.5 shrink-0 py-1">`), _tmpl$4$9 = /* @__PURE__ */ template(`<div><img class="w-4 h-4 rounded-xs object-contain">`);
+var _tmpl$$t = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none"><img class="w-5 h-5 rounded-md object-contain p-0.5 bg-white dark:bg-neutral-800 border border-neutral-200/50 dark:border-neutral-700/60">`), _tmpl$2$k = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer relative overflow-hidden shrink-0 transition-colors"><div class="flex items-center justify-center -space-x-1.5 pointer-events-none">`), _tmpl$3$d = /* @__PURE__ */ template(`<div class="flex items-center shrink-0 overflow-visible"><div class="overflow-hidden flex items-center shrink-0"style=width:0px;opacity:0><div class="flex items-center gap-2 pl-2 sm:gap-2.5 sm:pl-2.5 shrink-0 py-1">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div><img class="w-4 h-4 rounded-xs object-contain">`);
 function SpawnedAppTile(props) {
   const tilt = useInteractiveTilt({
     maxTilt: 10,
@@ -25315,7 +27365,7 @@ function SpawnedAppTile(props) {
     },
     placement: "bottom",
     get children() {
-      var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       _el$.$$click = (e) => {
         e.stopPropagation();
         props.onLaunch();
@@ -25415,7 +27465,7 @@ function StackedSplitTile(props) {
     if (leaveTimer) clearTimeout(leaveTimer);
   });
   return (() => {
-    var _el$4 = _tmpl$3$e(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild;
+    var _el$4 = _tmpl$3$d(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild;
     _el$4.addEventListener("mouseleave", closeDrawer);
     _el$4.addEventListener("mouseenter", openDrawer);
     insert(_el$4, createComponent(ActionTooltip, {
@@ -25424,7 +27474,7 @@ function StackedSplitTile(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$5 = _tmpl$2$j(), _el$6 = _el$5.firstChild;
+        var _el$5 = _tmpl$2$k(), _el$6 = _el$5.firstChild;
         _el$5.$$click = (e) => {
           e.stopPropagation();
           props.onRestoreSplit(props.split);
@@ -25440,7 +27490,7 @@ function StackedSplitTile(props) {
             return props.split.apps.slice(0, 2);
           },
           children: (app, idx) => (() => {
-            var _el$9 = _tmpl$4$9(), _el$0 = _el$9.firstChild;
+            var _el$9 = _tmpl$4$8(), _el$0 = _el$9.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = `relative rounded-lg p-0.5 bg-white dark:bg-neutral-800 shadow-xs border border-neutral-200/80 dark:border-neutral-700 ring-2 ring-white dark:ring-neutral-900 shrink-0 transition-transform duration-250 ease-out ${idx() === 0 ? compoundTilt.isHovered() ? "translate-x-1 z-10" : "translate-x-0 z-10" : compoundTilt.isHovered() ? "-translate-x-1 z-20" : "translate-x-0 z-20"}`, _v$5 = getFaviconUrl(app.url || app.domain, 64), _v$6 = app.title || app.domain;
               _v$4 !== _p$.e && className(_el$9, _p$.e = _v$4);
@@ -25477,7 +27527,7 @@ function StackedSplitTile(props) {
   })();
 }
 delegateEvents(["mousemove", "click"]);
-var _tmpl$$q = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$i = /* @__PURE__ */ template(`<button class="absolute -top-1 -right-1 p-0.5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer z-50">`), _tmpl$3$d = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center shrink-0 overflow-visible">`), _tmpl$4$8 = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-dashed border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shadow-xs shrink-0 transition-colors relative overflow-hidden group/store"><div class="flex items-center justify-center pointer-events-none text-neutral-400 group-hover/store:text-neutral-700 dark:group-hover/store:text-neutral-200">`), _tmpl$5$6 = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-4 sm:pt-5 mt-4 sm:mt-5 w-full border-t border-neutral-100 dark:border-neutral-800/60 overflow-visible"><div class="flex items-center justify-center flex-nowrap gap-2 sm:gap-2.5 py-1 max-w-full overflow-visible min-h-[52px] h-[52px] will-change-transform">`);
+var _tmpl$$s = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$j = /* @__PURE__ */ template(`<button class="absolute -top-1 -right-1 p-0.5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer z-50">`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center shrink-0 overflow-visible">`), _tmpl$4$7 = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-dashed border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shadow-xs shrink-0 transition-colors relative overflow-hidden group/store"><div class="flex items-center justify-center pointer-events-none text-neutral-400 group-hover/store:text-neutral-700 dark:group-hover/store:text-neutral-200">`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-4 sm:pt-5 mt-4 sm:mt-5 w-full border-t border-neutral-100 dark:border-neutral-800/60 overflow-visible"><div class="flex items-center justify-center flex-nowrap gap-2 sm:gap-2.5 py-1 max-w-full overflow-visible min-h-[52px] h-[52px] will-change-transform">`);
 function StandaloneAppShortcut(props) {
   const tilt = useInteractiveTilt({
     maxTilt: 10,
@@ -25485,7 +27535,7 @@ function StandaloneAppShortcut(props) {
     scale: 1.15
   });
   return (() => {
-    var _el$ = _tmpl$3$d();
+    var _el$ = _tmpl$3$c();
     _el$.addEventListener("drop", (e) => props.onDrop(props.idx, e));
     addEventListener(_el$, "dragover", props.onDragOver);
     _el$.addEventListener("dragstart", (e) => props.onDragStart(props.idx, e));
@@ -25496,7 +27546,7 @@ function StandaloneAppShortcut(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$q(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$$s(), _el$3 = _el$2.firstChild;
         addEventListener(_el$2, "mouseleave", tilt.onMouseLeave);
         addEventListener(_el$2, "mousemove", tilt.onMouseMove, true);
         _el$2.addEventListener("mouseenter", () => {
@@ -25521,7 +27571,7 @@ function StandaloneAppShortcut(props) {
       label: "Remove shortcut",
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$2$i();
+        var _el$4 = _tmpl$2$j();
         _el$4.$$click = (e) => {
           e.stopPropagation();
           props.onDeleteApp(props.idx, e);
@@ -25545,7 +27595,7 @@ function ExploreStoreButton(props) {
     label: "Explore App Store",
     placement: "bottom",
     get children() {
-      var _el$5 = _tmpl$4$8(), _el$6 = _el$5.firstChild;
+      var _el$5 = _tmpl$4$7(), _el$6 = _el$5.firstChild;
       addEventListener(_el$5, "mouseleave", tilt.onMouseLeave);
       addEventListener(_el$5, "mousemove", tilt.onMouseMove, true);
       addEventListener(_el$5, "mouseenter", tilt.onMouseEnter);
@@ -25582,7 +27632,7 @@ function PinnedShortcuts(props) {
     }
   };
   return (() => {
-    var _el$7 = _tmpl$5$6(), _el$8 = _el$7.firstChild;
+    var _el$7 = _tmpl$5$4(), _el$8 = _el$7.firstChild;
     var _ref$ = trackRef;
     typeof _ref$ === "function" ? use(_ref$, _el$8) : trackRef = _el$8;
     insert(_el$8, createComponent(Show, {
@@ -25635,7 +27685,7 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click", "mousemove", "mousedown"]);
-var _tmpl$$p = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute right-0 top-full mt-3 w-60 bg-white/95 backdrop-blur-xl border border-neutral-200/80 rounded-2xl shadow-[0_12px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 z-[100] origin-top-right animate-in zoom-in-95 duration-150"><div class="px-2.5 py-1 text-xs font-normal text-neutral-400">Profiles</div><div class=space-y-1></div><div class="mt-1.5 pt-1.5 border-t border-neutral-100 flex items-center justify-between px-1"><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100">+ New profile</button><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100 flex items-center gap-1"><span>⚙</span> Settings`), _tmpl$2$h = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$c = /* @__PURE__ */ template(`<span class="text-xs font-semibold text-neutral-800 pr-1 shrink-0">✓`), _tmpl$4$7 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2.5 overflow-hidden min-w-0"><div class="flex items-center justify-center w-6 h-6 rounded-lg text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><span>`), _tmpl$5$5 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400 truncate">No connected account`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-1 min-w-0"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class="text-[10px] font-normal text-neutral-500 truncate">`);
+var _tmpl$$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute right-0 top-full mt-3 w-60 bg-white/95 backdrop-blur-xl border border-neutral-200/80 rounded-2xl shadow-[0_12px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 z-[100] origin-top-right animate-in zoom-in-95 duration-150"><div class="px-2.5 py-1 text-xs font-normal text-neutral-400">Profiles</div><div class=space-y-1></div><div class="mt-1.5 pt-1.5 border-t border-neutral-100 flex items-center justify-between px-1"><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100">+ New profile</button><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100 flex items-center gap-1"><span>⚙</span> Settings`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-semibold text-neutral-800 pr-1 shrink-0">✓`), _tmpl$4$6 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2.5 overflow-hidden min-w-0"><div class="flex items-center justify-center w-6 h-6 rounded-lg text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><span>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400 truncate">No connected account`), _tmpl$6 = /* @__PURE__ */ template(`<div class="flex items-center gap-1 min-w-0"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class="text-[10px] font-normal text-neutral-500 truncate">`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === (props.currentProfileId || "main")) || layoutStore.profiles.find((p) => p.id === "main") || {
     name: "Main",
@@ -25656,7 +27706,7 @@ function ProfileMenu(props) {
     props.onToggle();
   };
   return (() => {
-    var _el$ = _tmpl$2$h(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
       e.stopPropagation();
       props.onToggle();
@@ -25667,7 +27717,7 @@ function ProfileMenu(props) {
         return props.show;
       },
       get children() {
-        var _el$3 = _tmpl$$p(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+        var _el$3 = _tmpl$$r(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
         insert(_el$5, createComponent(For, {
           get each() {
             return [layoutStore.profiles.find((p) => p.id === "main") || {
@@ -25680,7 +27730,7 @@ function ProfileMenu(props) {
             const isSelected = () => props.currentProfileId === profile.id || !props.currentProfileId && profile.id === "main";
             const firstIdentity = () => getPrimaryIdentity(profile?.identities_json);
             return (() => {
-              var _el$9 = _tmpl$4$7(), _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$10.firstChild;
+              var _el$9 = _tmpl$4$6(), _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$10.firstChild;
               _el$9.$$click = () => {
                 props.onSelect(profile.id === "main" ? void 0 : profile.id);
               };
@@ -25691,10 +27741,10 @@ function ProfileMenu(props) {
                   return firstIdentity();
                 },
                 get fallback() {
-                  return _tmpl$5$5();
+                  return _tmpl$5$3();
                 },
                 children: (ident) => (() => {
-                  var _el$14 = _tmpl$6$1(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+                  var _el$14 = _tmpl$6(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
                   _el$15.addEventListener("error", (e) => {
                     e.currentTarget.style.display = "none";
                   });
@@ -25716,7 +27766,7 @@ function ProfileMenu(props) {
                   return isSelected();
                 },
                 get children() {
-                  return _tmpl$3$c();
+                  return _tmpl$3$b();
                 }
               }), null);
               createRenderEffect((_p$) => {
@@ -25752,7 +27802,7 @@ function ProfileMenu(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$o = /* @__PURE__ */ template(`<div role=button tabindex=0 class="w-full p-2.5 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-white/60 dark:bg-neutral-900/50 hover:bg-white dark:hover:bg-neutral-850 hover:border-neutral-300 dark:hover:border-neutral-700 shadow-xs transition-all cursor-pointer flex items-center justify-between gap-2.5 group/noteCard select-none"><div class="flex items-center gap-2 min-w-0"><span class="text-xs font-medium text-neutral-700 dark:text-neutral-200 truncate"></span></div><span class="text-[10px] font-mono text-neutral-400 group-hover/noteCard:text-neutral-600 dark:group-hover/noteCard:text-neutral-300 shrink-0">Notes ↵`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="w-full text-left mt-4 px-1 default-panel-notes">`), _tmpl$3$b = /* @__PURE__ */ template(`<button type=button class="inline-flex items-center gap-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors text-[11px] font-medium select-none group/notes cursor-pointer"><span>Click here to draft a quick note...`);
+var _tmpl$$q = /* @__PURE__ */ template(`<div role=button tabindex=0 class="w-full p-2.5 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-white/60 dark:bg-neutral-900/50 hover:bg-white dark:hover:bg-neutral-850 hover:border-neutral-300 dark:hover:border-neutral-700 shadow-xs transition-all cursor-pointer flex items-center justify-between gap-2.5 group/noteCard select-none"><div class="flex items-center gap-2 min-w-0"><span class="text-xs font-medium text-neutral-700 dark:text-neutral-200 truncate"></span></div><span class="text-[10px] font-mono text-neutral-400 group-hover/noteCard:text-neutral-600 dark:group-hover/noteCard:text-neutral-300 shrink-0">Notes ↵`), _tmpl$2$h = /* @__PURE__ */ template(`<div class="w-full text-left mt-4 px-1 default-panel-notes">`), _tmpl$3$a = /* @__PURE__ */ template(`<button type=button class="inline-flex items-center gap-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors text-[11px] font-medium select-none group/notes cursor-pointer"><span>Click here to draft a quick note...`);
 function DefaultPanelNotesTrigger(props) {
   const [existingNote, setExistingNote] = createSignal("");
   onMount(() => {
@@ -25770,14 +27820,14 @@ function DefaultPanelNotesTrigger(props) {
     return lines[0] || "";
   };
   return (() => {
-    var _el$ = _tmpl$2$g();
+    var _el$ = _tmpl$2$h();
     insert(_el$, createComponent(Show, {
       get when() {
         return existingNote().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$5 = _tmpl$3$b(), _el$6 = _el$5.firstChild;
+          var _el$5 = _tmpl$3$a(), _el$6 = _el$5.firstChild;
           addEventListener(_el$5, "click", props.onOpenNotes, true);
           insert(_el$5, createComponent(PenLine, {
             "class": "w-3 h-3 text-neutral-400 group-hover/notes:text-neutral-700 dark:group-hover/notes:text-neutral-200 transition-colors"
@@ -25786,7 +27836,7 @@ function DefaultPanelNotesTrigger(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$o(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+        var _el$2 = _tmpl$$q(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
         _el$2.$$keydown = (e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
@@ -25805,7 +27855,7 @@ function DefaultPanelNotesTrigger(props) {
   })();
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$n = /* @__PURE__ */ template(`<div role=button tabindex=0><div class="w-[46px] h-[46px] rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center shrink-0 transition-colors relative overflow-hidden pointer-events-none"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$f = /* @__PURE__ */ template(`<div class="min-w-0 flex-1 pr-4"><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-50 truncate tracking-tight group-hover:text-black dark:group-hover:text-white"></h3><p class="text-[11.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate mt-0.5 leading-snug">`), _tmpl$3$a = /* @__PURE__ */ template(`<div class="absolute top-3 right-3 pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity duration-150">`);
+var _tmpl$$p = /* @__PURE__ */ template(`<div role=button tabindex=0><div class="w-[46px] h-[46px] rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center shrink-0 transition-colors relative overflow-hidden pointer-events-none"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="min-w-0 flex-1 pr-4"><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-50 truncate tracking-tight group-hover:text-black dark:group-hover:text-white"></h3><p class="text-[11.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate mt-0.5 leading-snug">`), _tmpl$3$9 = /* @__PURE__ */ template(`<div class="absolute top-3 right-3 pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity duration-150">`);
 function StoreAppCard(props) {
   let iconRef;
   const tilt = useInteractiveTilt({
@@ -25815,7 +27865,7 @@ function StoreAppCard(props) {
     anchorRef: () => iconRef
   });
   const cardContent = (() => {
-    var _el$ = _tmpl$$n(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$p(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.$$keydown = (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -25840,12 +27890,12 @@ function StoreAppCard(props) {
     insert(_el$, (() => {
       var _c$ = memo(() => !!!props.isIconOnly);
       return () => _c$() && [(() => {
-        var _el$4 = _tmpl$2$f(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$g(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         insert(_el$5, () => props.app.name);
         insert(_el$6, () => props.app.description);
         return _el$4;
       })(), (() => {
-        var _el$7 = _tmpl$3$a();
+        var _el$7 = _tmpl$3$9();
         insert(_el$7, createComponent(ArrowUpRight, {
           "class": "w-3.5 h-3.5 text-neutral-400 dark:text-neutral-400 group-hover:text-neutral-900 dark:group-hover:text-white"
         }));
@@ -25872,7 +27922,7 @@ function StoreAppCard(props) {
   }) : cardContent);
 }
 delegateEvents(["click", "mousemove", "keydown"]);
-var _tmpl$$m = /* @__PURE__ */ template(`<div style="mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%);-webkit-mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%)">`), _tmpl$2$e = /* @__PURE__ */ template(`<button type=button>`);
+var _tmpl$$o = /* @__PURE__ */ template(`<div style="mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%);-webkit-mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%)">`), _tmpl$2$f = /* @__PURE__ */ template(`<button type=button>`);
 function StoreCategoryTabs(props) {
   let tabsContainerRef;
   const handleWheel = (e) => {
@@ -25882,14 +27932,14 @@ function StoreCategoryTabs(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$m();
+    var _el$ = _tmpl$$o();
     _el$.addEventListener("wheel", handleWheel);
     var _ref$ = tabsContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : tabsContainerRef = _el$;
     insert(_el$, createComponent(For, {
       each: STORE_CATEGORIES,
       children: (cat) => (() => {
-        var _el$2 = _tmpl$2$e();
+        var _el$2 = _tmpl$2$f();
         _el$2.$$click = () => props.onSelectCat(cat);
         insert(_el$2, cat);
         createRenderEffect(() => className(_el$2, `rounded-full transition-colors cursor-pointer whitespace-nowrap font-medium ${props.isCompact ? "px-2.5 py-0.5 text-[11px]" : "px-3 py-1 text-xs"} ${props.activeCat === cat ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 font-semibold shadow-xs" : "text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800"}`));
@@ -25901,10 +27951,10 @@ function StoreCategoryTabs(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$l = /* @__PURE__ */ template(`<div><button type=button class="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 hover:border-neutral-400 transition-all cursor-pointer group shadow-xs gap-2"><div class="flex items-center gap-2.5 min-w-0"><div class="w-7 h-7 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-300 shrink-0"></div><div class="text-left truncate"><p class="text-xs font-semibold text-neutral-900 dark:text-neutral-50 truncate">Open "<!>"</p><p class="text-[10.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate"></p></div></div><span class="text-[10.5px] font-mono font-medium text-neutral-500 dark:text-neutral-400 group-hover:text-neutral-950 dark:group-hover:text-white shrink-0">↵ launch`);
+var _tmpl$$n = /* @__PURE__ */ template(`<div><button type=button class="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 hover:border-neutral-400 transition-all cursor-pointer group shadow-xs gap-2"><div class="flex items-center gap-2.5 min-w-0"><div class="w-7 h-7 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-300 shrink-0"></div><div class="text-left truncate"><p class="text-xs font-semibold text-neutral-900 dark:text-neutral-50 truncate">Open "<!>"</p><p class="text-[10.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate"></p></div></div><span class="text-[10.5px] font-mono font-medium text-neutral-500 dark:text-neutral-400 group-hover:text-neutral-950 dark:group-hover:text-white shrink-0">↵ launch`);
 function StoreDirectUrlRow(props) {
   return (() => {
-    var _el$ = _tmpl$$l(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+    var _el$ = _tmpl$$n(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
     _el$9.nextSibling;
     var _el$0 = _el$6.nextSibling;
     _el$2.$$click = () => props.onLaunch(props.query);
@@ -25918,10 +27968,10 @@ function StoreDirectUrlRow(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$k = /* @__PURE__ */ template(`<button type=button class="p-1 rounded-md text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 cursor-pointer shrink-0 transition-colors"title="Clear search"aria-label="Clear search">`), _tmpl$2$d = /* @__PURE__ */ template(`<div><input type=text class="w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 outline-none font-sans font-medium"><button type=button class="group/esc h-6 px-2 min-w-6 flex items-center justify-center rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-100/90 dark:bg-neutral-800/90 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors cursor-pointer shrink-0 shadow-xs"title="Close (Esc)"aria-label="Close store"><span class="group-hover/esc:hidden flex items-center justify-center"></span><span class="hidden group-hover/esc:inline text-[10px] font-mono font-medium tracking-tight">ESC`);
+var _tmpl$$m = /* @__PURE__ */ template(`<button type=button class="p-1 rounded-md text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 cursor-pointer shrink-0 transition-colors"title="Clear search"aria-label="Clear search">`), _tmpl$2$e = /* @__PURE__ */ template(`<div><input type=text class="w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 outline-none font-sans font-medium"><button type=button class="group/esc h-6 px-2 min-w-6 flex items-center justify-center rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-100/90 dark:bg-neutral-800/90 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors cursor-pointer shrink-0 shadow-xs"title="Close (Esc)"aria-label="Close store"><span class="group-hover/esc:hidden flex items-center justify-center"></span><span class="hidden group-hover/esc:inline text-[10px] font-mono font-medium tracking-tight">ESC`);
 function StoreOmnibarHeader(props) {
   return (() => {
-    var _el$ = _tmpl$2$d(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$e(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(Search, {
       "class": "w-4 h-4 text-neutral-400 shrink-0"
     }), _el$2);
@@ -25940,7 +27990,7 @@ function StoreOmnibarHeader(props) {
         return props.query.trim().length > 0;
       },
       get children() {
-        var _el$3 = _tmpl$$k();
+        var _el$3 = _tmpl$$m();
         _el$3.$$click = () => props.onInput("");
         insert(_el$3, createComponent(X, {
           "class": "w-3.5 h-3.5"
@@ -25966,10 +28016,10 @@ function StoreOmnibarHeader(props) {
   })();
 }
 delegateEvents(["input", "keydown", "click"]);
-var _tmpl$$j = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-12 px-4 text-center"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-400 mb-3 border border-neutral-200/60 dark:border-neutral-700"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1">No catalog results for "<!>"</p><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 max-w-xs leading-snug">Launch any custom URL to auto-index it for this workspace.</p><button type=button class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 hover:opacity-90 transition-opacity cursor-pointer shadow-double-bezel-flat active:shadow-double-bezel-active">Launch "<!>" as Custom App ↵`);
+var _tmpl$$l = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-12 px-4 text-center"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-400 mb-3 border border-neutral-200/60 dark:border-neutral-700"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1">No catalog results for "<!>"</p><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 max-w-xs leading-snug">Launch any custom URL to auto-index it for this workspace.</p><button type=button class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 hover:opacity-90 transition-opacity cursor-pointer shadow-double-bezel-flat active:shadow-double-bezel-active">Launch "<!>" as Custom App ↵`);
 function StoreZeroResults(props) {
   return (() => {
-    var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$6 = _el$4.nextSibling;
+    var _el$ = _tmpl$$l(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$6 = _el$4.nextSibling;
     _el$6.nextSibling;
     var _el$7 = _el$3.nextSibling, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
     _el$1.nextSibling;
@@ -26098,7 +28148,7 @@ function useStoreModalController(props) {
     setSearchInput: (el) => searchInput = el
   };
 }
-var _tmpl$$i = /* @__PURE__ */ template(`<div class="grid gap-2 sm:gap-2.5">`), _tmpl$2$c = /* @__PURE__ */ template(`<div data-store-modal=backdrop class="absolute inset-0 z-50 bg-neutral-950/20 dark:bg-neutral-950/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 md:p-5 select-none animate-in fade-in duration-150"><div data-store-modal=card class="bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800 rounded-2xl w-full max-w-4xl h-[86vh] max-h-[86vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"><div class="flex-1 overflow-y-auto px-3.5 sm:px-4 py-3 no-scrollbar relative scroll-smooth"style=overscroll-behavior:contain;transform:translateZ(0)>`), _tmpl$3$9 = /* @__PURE__ */ template(`<div style="contain:layout style">`);
+var _tmpl$$k = /* @__PURE__ */ template(`<div class="grid gap-2 sm:gap-2.5">`), _tmpl$2$d = /* @__PURE__ */ template(`<div data-store-modal=backdrop class="absolute inset-0 z-50 bg-neutral-950/20 dark:bg-neutral-950/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 md:p-5 select-none animate-in fade-in duration-150"><div data-store-modal=card class="bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800 rounded-2xl w-full max-w-4xl h-[86vh] max-h-[86vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"><div class="flex-1 overflow-y-auto px-3.5 sm:px-4 py-3 no-scrollbar relative scroll-smooth"style=overscroll-behavior:contain;transform:translateZ(0)>`), _tmpl$3$8 = /* @__PURE__ */ template(`<div style="contain:layout style">`);
 function WebAppStoreModal(props) {
   const [modalWidth, setModalWidth] = createSignal(720);
   let cardRef;
@@ -26141,7 +28191,7 @@ function WebAppStoreModal(props) {
       return props.show;
     },
     get children() {
-      var _el$ = _tmpl$2$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$2$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       _el$.$$mousedown = (e) => {
         if (e.target === e.currentTarget) {
           e.preventDefault();
@@ -26224,13 +28274,13 @@ function WebAppStoreModal(props) {
           });
         },
         get children() {
-          var _el$4 = _tmpl$$i();
+          var _el$4 = _tmpl$$k();
           insert(_el$4, createComponent(For, {
             get each() {
               return ctrl.filteredApps();
             },
             children: (app, idx) => (() => {
-              var _el$5 = _tmpl$3$9();
+              var _el$5 = _tmpl$3$8();
               use((el) => {
                 if (el) ctrl.cardRefs[idx()] = el;
               }, _el$5);
@@ -26301,7 +28351,7 @@ function useLastSplitSession(props) {
   };
   return { lastSplit, handleRestoreSplit };
 }
-var _tmpl$$h = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 dark:bg-neutral-950 text-neutral-800 dark:text-neutral-200 relative @container wake-region pointer-events-auto"style=container-type:size><style>
+var _tmpl$$j = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 dark:bg-neutral-950 text-neutral-800 dark:text-neutral-200 relative @container wake-region pointer-events-auto"style=container-type:size><style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @container (max-height: 380px) {
@@ -26311,7 +28361,7 @@ var _tmpl$$h = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 
         @container (max-height: 250px) {
           .default-panel-shortcuts { display: none !important; }
         }
-      `), _tmpl$2$b = /* @__PURE__ */ template(`<div><div class="w-full max-w-xl flex flex-col items-center px-2 sm:px-4"><div><h1>Apposition Workspace</h1><p class="text-[9px] text-neutral-400 font-mono uppercase tracking-wider mt-1.5"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts">`);
+      `), _tmpl$2$c = /* @__PURE__ */ template(`<div><div class="w-full max-w-xl flex flex-col items-center px-2 sm:px-4"><div><h1>Apposition Workspace</h1><p class="text-[9px] text-neutral-400 font-mono uppercase tracking-wider mt-1.5"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts">`);
 function DefaultPanel(props) {
   const ctrl = useDefaultPanelController(props);
   const {
@@ -26354,7 +28404,7 @@ function DefaultPanel(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$h();
+    var _el$ = _tmpl$$j();
     _el$.firstChild;
     _el$.$$click = (e) => handlePaneInteraction(e.target, true);
     _el$.$$mousedown = (e) => handlePaneInteraction(e.target);
@@ -26367,7 +28417,7 @@ function DefaultPanel(props) {
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$b(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling;
+          var _el$3 = _tmpl$2$c(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling;
           insert(_el$7, () => props.activeWorkspaceName);
           insert(_el$8, createComponent(CommandBar, {
             get id() {
@@ -26520,10 +28570,10 @@ function DefaultPanel(props) {
   })();
 }
 delegateEvents(["focusin", "mousedown", "click"]);
-var _tmpl$$g = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+var _tmpl$$i = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$b = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
-    var _el$ = _tmpl$2$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$b(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
     var _ref$ = props.gateContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.gateContainerRef = _el$;
     var _ref$2 = props.topGateRef;
@@ -26535,7 +28585,7 @@ function GateAnimation(props) {
         return props.gateDomain;
       },
       get children() {
-        var _el$6 = _tmpl$$g();
+        var _el$6 = _tmpl$$i();
         createRenderEffect(() => setAttribute(_el$6, "src", `https://www.google.com/s2/favicons?domain=${props.gateDomain}&sz=128`));
         return _el$6;
       }
@@ -26546,11 +28596,11 @@ function GateAnimation(props) {
     return _el$;
   })();
 }
-var _tmpl$$f = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$9 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`), _tmpl$4$6 = /* @__PURE__ */ template(`<div data-overlay-chrome class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
+var _tmpl$$h = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$a = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`), _tmpl$4$5 = /* @__PURE__ */ template(`<div data-overlay-chrome class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
 function MenuItem(props) {
   const IconComp = props.icon;
   return (() => {
-    var _el$ = _tmpl$2$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$2$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     addEventListener(_el$, "click", props.onClick, true);
     insert(_el$2, createComponent(IconComp, {
       "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
@@ -26561,7 +28611,7 @@ function MenuItem(props) {
         return props.badge;
       },
       get children() {
-        var _el$4 = _tmpl$$f();
+        var _el$4 = _tmpl$$h();
         insert(_el$4, () => props.badge);
         return _el$4;
       }
@@ -26617,7 +28667,7 @@ function PaneContextMenu(props) {
   };
   return createComponent(Portal, {
     get children() {
-      var _el$5 = _tmpl$4$6(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.nextSibling;
+      var _el$5 = _tmpl$4$5(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.nextSibling;
       _el$5.$$contextmenu = (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -26711,7 +28761,7 @@ function PaneContextMenu(props) {
           return (layoutStore.profiles || []).length > 1;
         },
         get children() {
-          return [_tmpl$3$8(), createComponent(For, {
+          return [_tmpl$3$7(), createComponent(For, {
             get each() {
               return layoutStore.profiles;
             },
@@ -26835,19 +28885,19 @@ function PaneContextMenu(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$e = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
+var _tmpl$$g = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
 function MaximizedPaneControls(props) {
   return (() => {
-    var _el$ = _tmpl$$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$3.$$click = () => setLayoutStore("maximizedPaneId", null);
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$d = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
+var _tmpl$$f = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
 function DemoIframe(props) {
   return (() => {
-    var _el$ = _tmpl$$d();
+    var _el$ = _tmpl$$f();
     use((el) => {
       if (el) {
         el.onload = () => {
@@ -26975,11 +29025,102 @@ function DemoIframe(props) {
     return _el$;
   })();
 }
-var _tmpl$$c = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
+var _tmpl$$e = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
 function PaneCrashedOverlay(props) {
   return (() => {
-    var _el$ = _tmpl$$c(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
+    var _el$ = _tmpl$$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
     addEventListener(_el$7, "click", props.onReload, true);
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+class TrpcClient {
+  async invoke(path, input, type = "query") {
+    if (!window.api?.invokeTrpc) {
+      throw new Error("tRPC IPC bridge is not available on window.api");
+    }
+    const res = await window.api.invokeTrpc(path, input, type);
+    if (!res.ok) {
+      throw new Error(res.error || `tRPC error executing ${path}`);
+    }
+    return res.data;
+  }
+  media = {
+    getActiveSources: () => this.invoke("media.getActiveSources", void 0, "query"),
+    toggleMute: (paneId) => this.invoke("media.toggleMute", { paneId }, "mutation"),
+    setMuted: (paneId, muted) => this.invoke(
+      "media.setMuted",
+      { paneId, muted },
+      "mutation"
+    ),
+    toggleMasterMute: () => this.invoke("media.toggleMasterMute", void 0, "mutation")
+  };
+  screen = {
+    getAvailableSources: () => this.invoke("screen.getAvailableSources", void 0, "query"),
+    selectSource: (requestId, sourceId) => this.invoke(
+      "screen.selectSource",
+      { requestId, sourceId },
+      "mutation"
+    ),
+    cancelRequest: (requestId) => this.invoke(
+      "screen.cancelRequest",
+      { requestId },
+      "mutation"
+    )
+  };
+  hibernation = {
+    wakePane: (paneId) => this.invoke(
+      "hibernation.wakePane",
+      { paneId },
+      "mutation"
+    ),
+    hibernatePane: (paneId) => this.invoke(
+      "hibernation.hibernatePane",
+      { paneId },
+      "mutation"
+    ),
+    getHibernatedStatus: (paneId) => this.invoke(
+      "hibernation.getHibernatedStatus",
+      { paneId },
+      "query"
+    )
+  };
+}
+const trpc = new TrpcClient();
+var _tmpl$$d = /* @__PURE__ */ template(`<img class="absolute inset-0 w-full h-full object-cover opacity-30 filter blur-[2px] transition-opacity duration-300 group-hover:opacity-40">`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-30 flex items-center justify-center cursor-pointer select-none bg-neutral-900/10 dark:bg-neutral-950/40 backdrop-blur-sm transition-all duration-300 group"><div class="relative z-10 flex flex-col items-center gap-3 p-6 max-w-sm mx-auto bg-white/95 dark:bg-neutral-900/95 rounded-2xl border border-neutral-200/80 dark:border-neutral-800 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.9)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 group-hover:scale-[1.02] active:scale-[0.98]"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-700 dark:text-neutral-300 border border-neutral-200/60 dark:border-neutral-700/60 shadow-sm"><svg width=20 height=20 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 2v4"></path><path d="m16.2 7.8 2.9-2.9"></path><path d="M18 12h4"></path><path d="m16.2 16.2 2.9 2.9"></path><path d="M12 18v4"></path><path d="m4.9 19.1 2.9-2.9"></path><path d="M2 12h4"></path><path d="m4.9 4.9 2.9 2.9"></path></svg></div><div class=text-center><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100 tracking-tight">Hibernated to Save RAM</h3><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-1 max-w-[220px]"> was suspended after 15 minutes of idle time.</p></div><button type=button class="mt-1 px-4 py-1.5 text-xs font-medium text-neutral-900 dark:text-neutral-100 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded-lg border border-neutral-300/80 dark:border-neutral-700 transition-colors shadow-sm">Click to Wake`);
+function HibernatedPaneOverlay(props) {
+  const handleWake = async (e) => {
+    e.stopPropagation();
+    try {
+      await trpc.hibernation.wakePane(props.paneId);
+      props.onWake?.();
+    } catch (err) {
+      console.error("[HibernatedPaneOverlay] Failed to wake pane:", err);
+    }
+  };
+  return (() => {
+    var _el$ = _tmpl$2$9(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.firstChild, _el$9 = _el$5.nextSibling;
+    _el$.$$click = handleWake;
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.thumbnail;
+      },
+      get children() {
+        var _el$2 = _tmpl$$d();
+        createRenderEffect((_p$) => {
+          var _v$ = props.thumbnail, _v$2 = props.title || "Hibernated Pane";
+          _v$ !== _p$.e && setAttribute(_el$2, "src", _p$.e = _v$);
+          _v$2 !== _p$.t && setAttribute(_el$2, "alt", _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$2;
+      }
+    }), _el$3);
+    insert(_el$7, () => props.title || "This inactive tab", _el$8);
+    _el$9.$$click = handleWake;
     return _el$;
   })();
 }
@@ -27079,28 +29220,7 @@ function usePaneLoadingState(paneId) {
 function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgent, getContainerRef, setIsCrashed, currentUrl) {
   const isNative = () => window.api?.isNativeViews === true;
   const syncBounds = () => {
-    const isOtherMaximized = Boolean(layoutStore.maximizedPaneId && layoutStore.maximizedPaneId !== paneId);
-    const url = currentUrl?.();
-    if (isOtherMaximized || !url || url.trim().length === 0 || url === "about:blank") {
-      window.api?.view?.setBounds(paneId, { x: -1e4, y: -1e4, width: 0, height: 0 });
-      return;
-    }
-    const container = getContainerRef();
-    if (!container) {
-      window.api?.view?.setBounds(paneId, { x: -1e4, y: -1e4, width: 0, height: 0 });
-      return;
-    }
-    const r = container.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0) {
-      window.api?.view?.setBounds(paneId, {
-        x: Math.round(r.left),
-        y: Math.round(r.top),
-        width: Math.round(r.width),
-        height: Math.round(r.height)
-      });
-    } else {
-      window.api?.view?.setBounds(paneId, { x: -1e4, y: -1e4, width: 0, height: 0 });
-    }
+    airspaceCoordinator.syncPane(paneId);
   };
   onMount(() => {
     const unsubCrash = window.api?.onViewCrashed?.((data) => {
@@ -27120,8 +29240,13 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
           y: Math.round(rect.top),
           width: Math.round(rect.width),
           height: Math.round(rect.height)
-        } : { x: -1e4, y: -1e4, width: 0, height: 0 }
+        } : { x: -1e4, y: -1e4, width: 100, height: 100 }
       });
+      const unregAirspace = airspaceCoordinator.register(
+        paneId,
+        getContainerRef,
+        currentUrl
+      );
       let frame = 0;
       const scheduleSync = () => {
         if (frame) return;
@@ -27143,11 +29268,16 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
         });
       }
       createEffect(() => {
+        currentPartition();
+        scheduleSync();
+      });
+      createEffect(() => {
         layoutStore.maximizedPaneId;
         scheduleSync();
       });
       setTimeout(scheduleSync, 50);
       onCleanup(() => {
+        unregAirspace();
         ro.disconnect();
         if (frame) cancelAnimationFrame(frame);
         window.removeEventListener("resize", scheduleSync);
@@ -27155,7 +29285,9 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
         window.removeEventListener("pane.force-sync-bounds", scheduleSync);
         if (currentUrl) window.removeEventListener("pane.navigated", scheduleSync);
         unsubCrash?.();
-        window.api?.view?.destroyPane(paneId);
+        if (!isPaneProtected(paneId, currentUrl?.()) && !isPaneCritical(paneId, currentUrl?.())) {
+          window.api?.view?.destroyPane(paneId);
+        }
       });
     } else {
       onCleanup(() => unsubCrash?.());
@@ -27306,6 +29438,7 @@ function useNativePaneBridge(paneId, onNavigated) {
     );
     offs.push(
       api.onViewFocusWc?.((wcId) => {
+        if (layoutStore.isTransitioning) return;
         const targetPane = webContentsRegistry.getPaneId(wcId);
         if (!targetPane || targetPane !== paneId) return;
         PaneFocusManager.setActivePaneId(paneId);
@@ -27325,12 +29458,20 @@ function useNativePaneBridge(paneId, onNavigated) {
     const onScroll = (_e, d) => window.dispatchEvent(
       new CustomEvent("app:scroll-position", { detail: { paneId, ...d ?? {} } })
     );
+    const onSemanticTitle = (_e, d) => {
+      if (d?.paneId !== paneId || !d?.title) return;
+      window.dispatchEvent(
+        new CustomEvent("app:semantic-title", { detail: { paneId, title: d.title, confidence: d.confidence } })
+      );
+    };
     if (ipc) {
       ipc.on("app:media-timestamp", onTs);
       ipc.on("app:scroll-position", onScroll);
+      ipc.on("app:semantic-title", onSemanticTitle);
       offs.push(() => {
         ipc.removeListener("app:media-timestamp", onTs);
         ipc.removeListener("app:scroll-position", onScroll);
+        ipc.removeListener("app:semantic-title", onSemanticTitle);
       });
     }
     onCleanup(() => offs.forEach((o) => o()));
@@ -27602,52 +29743,19 @@ function usePaneLauncher(paneId, setCurrentType, setCurrentUrl, onUpdate, onNavi
   };
   return { launchApp, handlePointerActivity };
 }
-function useSessionSync(paneId, partition, currentUrl, isActivePane, reloadWebview) {
+function useSessionSync(_paneId, _partition, _currentUrl, _isActivePane, _reloadWebview) {
   onMount(() => {
-    let lastReloadTime = 0;
-    const unsub = window.api?.onPartitionCookieChanged?.((data) => {
-      try {
-        const myPart = partition();
-        if (!myPart || myPart !== data.partition) return;
-        const url = currentUrl();
-        if (!url) return;
-        const lowerUrl = url.toLowerCase();
-        if (lowerUrl.includes("/sessions/social/") || lowerUrl.includes("/oauth/authorize") || lowerUrl.includes("/signin/rejected") || lowerUrl.includes("accounts.google.com")) {
-          return;
-        }
-        let host = "";
-        try {
-          host = new URL(url).hostname;
-        } catch {
-          return;
-        }
-        const cookieDomain = data.domain.startsWith(".") ? data.domain.substring(1) : data.domain;
-        if (host.includes(cookieDomain) || cookieDomain.includes(host)) {
-          if (isActivePane()) {
-            return;
-          }
-          const now = Date.now();
-          if (now - lastReloadTime < 3e3) {
-            return;
-          }
-          lastReloadTime = now;
-          reloadWebview();
-        }
-      } catch (err) {
-        console.debug("useSessionSync error", err);
-      }
-    });
     onCleanup(() => {
-      unsub?.();
     });
   });
 }
-var _tmpl$$b = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 left-0 right-0 h-[2px] z-[60] overflow-hidden bg-neutral-200/40 dark:bg-neutral-800/40"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-200 ease-out">`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane pointer-events-none"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full pointer-events-none"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$4$5 = /* @__PURE__ */ template(`<div data-pane-gap class="w-full h-full bg-transparent">`), _tmpl$5$4 = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0 pointer-events-auto"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
+var _tmpl$$c = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 left-0 right-0 h-[2px] z-[60] overflow-hidden bg-neutral-200/40 dark:bg-neutral-800/40"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-200 ease-out">`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane pointer-events-none"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full pointer-events-none"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div data-pane-gap class="w-full h-full bg-transparent">`), _tmpl$5$2 = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0 pointer-events-auto"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
 const gateTriggeredSet = /* @__PURE__ */ new Set();
 function Pane(props) {
   const [currentUrl, setCurrentUrl] = createSignal(props.url);
   const [currentType, setCurrentType] = createSignal(props.paneType);
   const [isCrashed, setIsCrashed] = createSignal(false);
+  const [hibernatedData, setHibernatedData] = createSignal(null);
   let paneRef;
   let containerRef;
   const initialUrl = props.url || "";
@@ -27666,7 +29774,12 @@ function Pane(props) {
   } = useWebviewBridge(props.id, () => props.isActivePane, (navigatedUrl) => {
     if (navigatedUrl) {
       lastLoadedUrl = navigatedUrl;
-      if (navigatedUrl !== currentUrl()) setCurrentUrl(navigatedUrl);
+      if (navigatedUrl !== currentUrl()) {
+        setCurrentUrl(navigatedUrl);
+        props.onUpdate?.({
+          url: navigatedUrl
+        });
+      }
     }
   });
   createEffect(() => {
@@ -27674,7 +29787,12 @@ function Pane(props) {
   });
   createEffect(() => {
     const targetUrl = props.url;
-    if (targetUrl && !isCanonicalSameUrl(targetUrl, lastLoadedUrl) && !isCanonicalSameUrl(targetUrl, currentUrl())) {
+    const current = currentUrl();
+    if (targetUrl && !isCanonicalSameUrl(targetUrl, lastLoadedUrl) && !isCanonicalSameUrl(targetUrl, current)) {
+      if (current && current !== "about:blank" && (isPaneCritical(props.id, current) || isPaneProtectedMedia(props.id) || lastLoadedUrl && lastLoadedUrl !== "about:blank") || lastLoadedUrl && isPersistentMediaUrl(lastLoadedUrl)) {
+        lastLoadedUrl = current || lastLoadedUrl;
+        return;
+      }
       lastLoadedUrl = targetUrl;
       setCurrentUrl(targetUrl);
       loadURL(targetUrl);
@@ -27688,7 +29806,20 @@ function Pane(props) {
       }
     };
     window.addEventListener("pane.force-gate", handleForceGate);
-    onCleanup(() => window.removeEventListener("pane.force-gate", handleForceGate));
+    const unsubHib = window.api?.onPaneHibernated?.((d) => {
+      if (d.paneId === props.id) setHibernatedData({
+        title: d.title,
+        thumbnail: d.thumbnail
+      });
+    });
+    const unsubRes = window.api?.onPaneRestored?.((d) => {
+      if (d.paneId === props.id) setHibernatedData(null);
+    });
+    onCleanup(() => {
+      window.removeEventListener("pane.force-gate", handleForceGate);
+      unsubHib?.();
+      unsubRes?.();
+    });
   });
   const {
     isInitialGate,
@@ -27711,7 +29842,7 @@ function Pane(props) {
     lastLoadedUrl = url;
     loadURL(url);
   });
-  useSessionSync(props.id, currentPartition, currentUrl, () => props.isActivePane, () => window.api?.viewReload?.(props.id));
+  useSessionSync(props.id);
   useNativePaneView(props.id, initialUrl, currentPartition, currentUserAgent, () => containerRef, setIsCrashed, currentUrl);
   const handleContextMenu = (e) => {
     e.preventDefault();
@@ -27724,36 +29855,22 @@ function Pane(props) {
       pageURL: currentUrl() || ""
     });
   };
+  const handleActivation = (e, isFocus = false) => {
+    if (isFocus && layoutStore.isTransitioning) return;
+    props.onActive?.();
+    const t = e.target;
+    if (t?.closest?.("[data-store-modal], [role='dialog']")) {
+      PaneFocusManager.syncActivePane(props.id);
+      return;
+    }
+    PaneFocusManager.focusPane(props.id);
+  };
   return (() => {
     var _el$ = _tmpl$2$8(), _el$2 = _el$.firstChild, _el$5 = _el$2.firstChild;
     _el$.$$contextmenu = handleContextMenu;
-    _el$.$$click = (e) => {
-      props.onActive?.();
-      const t = e.target;
-      if (t?.closest?.("[data-store-modal], [role='dialog']")) {
-        PaneFocusManager.syncActivePane(props.id);
-        return;
-      }
-      PaneFocusManager.focusPane(props.id);
-    };
-    _el$.$$mousedown = (e) => {
-      props.onActive?.();
-      const t = e.target;
-      if (t?.closest?.("[data-store-modal], [role='dialog']")) {
-        PaneFocusManager.syncActivePane(props.id);
-        return;
-      }
-      PaneFocusManager.focusPane(props.id);
-    };
-    _el$.$$focusin = (e) => {
-      props.onActive?.();
-      const t = e.target;
-      if (t?.closest?.("[data-store-modal], [role='dialog']")) {
-        PaneFocusManager.syncActivePane(props.id);
-        return;
-      }
-      PaneFocusManager.focusPane(props.id);
-    };
+    _el$.$$click = (e) => handleActivation(e);
+    _el$.$$mousedown = (e) => handleActivation(e);
+    _el$.$$focusin = (e) => handleActivation(e, true);
     _el$.addEventListener("mouseenter", (e) => {
       handlePointerActivity(e, () => {
       });
@@ -27767,7 +29884,7 @@ function Pane(props) {
         return isLoading();
       },
       get children() {
-        var _el$3 = _tmpl$$b(), _el$4 = _el$3.firstChild;
+        var _el$3 = _tmpl$$c(), _el$4 = _el$3.firstChild;
         createRenderEffect((_$p) => setStyleProperty(_el$4, "width", `${progress()}%`));
         return _el$3;
       }
@@ -27780,7 +29897,7 @@ function Pane(props) {
       },
       get fallback() {
         return (() => {
-          var _el$6 = _tmpl$3$7();
+          var _el$6 = _tmpl$3$6();
           insert(_el$6, () => props.children);
           return _el$6;
         })();
@@ -27791,7 +29908,7 @@ function Pane(props) {
             return !isNative();
           },
           get fallback() {
-            return _tmpl$4$5();
+            return _tmpl$4$4();
           },
           get children() {
             return createComponent(Show, {
@@ -27805,7 +29922,7 @@ function Pane(props) {
                   },
                   keyed: true,
                   children: (partitionVal) => (() => {
-                    var _el$8 = _tmpl$5$4();
+                    var _el$8 = _tmpl$5$2();
                     use(setupWebview, _el$8);
                     setAttribute(_el$8, "partition", partitionVal);
                     createRenderEffect((_p$) => {
@@ -27923,6 +30040,25 @@ function Pane(props) {
     }), null);
     insert(_el$2, createComponent(Show, {
       get when() {
+        return hibernatedData();
+      },
+      get children() {
+        return createComponent(HibernatedPaneOverlay, {
+          get paneId() {
+            return props.id;
+          },
+          get title() {
+            return hibernatedData()?.title;
+          },
+          get thumbnail() {
+            return hibernatedData()?.thumbnail;
+          },
+          onWake: () => setHibernatedData(null)
+        });
+      }
+    }), null);
+    insert(_el$2, createComponent(Show, {
+      get when() {
         return contextMenu();
       },
       get children() {
@@ -27967,374 +30103,143 @@ function Pane(props) {
   })();
 }
 delegateEvents(["mousemove", "focusin", "mousedown", "click", "contextmenu"]);
-var _tmpl$$a = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-300 ease-out backdrop-blur-[0.5px]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
-function DropSnapPreview(props) {
-  const isSplitTarget = () => {
-    if (!props.target) return false;
-    const node = layoutStore.nodes[props.target.id];
-    return node && (node.type === "split" || props.target.id === layoutStore.rootId);
-  };
-  const getBoundsStyle = () => {
-    const dir = props.target?.direction;
-    const m = SPATIAL_TOKENS.outerBezel;
-    const h = SPATIAL_TOKENS.halfSplitGap;
-    switch (dir) {
-      case "left":
-        return {
-          top: `${m}px`,
-          bottom: `${m}px`,
-          left: `${m}px`,
-          width: `calc(50% - ${m + h}px)`
-        };
-      case "right":
-        return {
-          top: `${m}px`,
-          bottom: `${m}px`,
-          right: `${m}px`,
-          width: `calc(50% - ${m + h}px)`
-        };
-      case "top":
-        return {
-          left: `${m}px`,
-          right: `${m}px`,
-          top: `${m}px`,
-          height: `calc(50% - ${m + h}px)`
-        };
-      case "bottom":
-        return {
-          left: `${m}px`,
-          right: `${m}px`,
-          bottom: `${m}px`,
-          height: `calc(50% - ${m + h}px)`
-        };
-      default:
-        return {};
-    }
+var _tmpl$$b = /* @__PURE__ */ template(`<div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent">`);
+function AbsolutePanesLayer(props) {
+  return (() => {
+    var _el$ = _tmpl$$b();
+    insert(_el$, createComponent(For, {
+      get each() {
+        return props.renderedPaneIds();
+      },
+      children: (paneId) => {
+        const pane = () => layoutStore.nodes[paneId] || getInFlightPane(paneId) || getPaneFromPool(paneId) || getHostPane(paneId) || criticalPanesStore[paneId]?.node || {};
+        return createComponent(AbsolutePane, {
+          get targetId() {
+            return `pane-container-${pane().id}`;
+          },
+          get paneId() {
+            return pane().id;
+          },
+          get isDragging() {
+            return props.drag.activeDragId() === pane().id;
+          },
+          get isGlobalDragging() {
+            return !!props.drag.activeDragId();
+          },
+          get isActive() {
+            return props.ws.activePaneId() === pane().id;
+          },
+          get isReplaceTarget() {
+            return memo(() => props.drag.dragTarget()?.id === pane().id)() && props.drag.dragTarget()?.direction === "replace";
+          },
+          get children() {
+            return createComponent(Pane, {
+              get id() {
+                return pane().id;
+              },
+              get url() {
+                return pane().url;
+              },
+              get paneType() {
+                return pane().paneType;
+              },
+              get title() {
+                return memo(() => pane().paneType === "terminal")() ? "Terminal" : pane().url || "New Tab";
+              },
+              get isActivePane() {
+                return props.ws.activePaneId() === pane().id;
+              },
+              get profileId() {
+                return pane().profileId || props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.default_profile_id || "main";
+              },
+              onClose: () => {
+                unregisterPaneFromPool(pane().id);
+                unregisterCriticalPane(pane().id);
+                unregisterMediaPane(pane().id);
+                unregisterWorkspacePane(pane().id);
+                props.ws.handleClose(pane().id);
+              },
+              onSplit: (dir) => props.ws.handleSplit(pane().id, dir),
+              onUpdate: (data) => props.ws.handleUpdatePane(pane().id, data),
+              onActive: () => {
+                props.ws.setActivePaneId(pane().id);
+                PaneFocusManager.focusPane(pane().id, props.ws.setActivePaneId);
+              },
+              onApplyTemplate: (template2) => props.ws.applyLayoutTemplate(pane().id, template2),
+              get activeWorkspaceId() {
+                return props.ws.activeWorkspace();
+              },
+              get activeWorkspaceName() {
+                return props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.name || "";
+              },
+              onRestoreSplit: (session) => {
+                layoutMemory.applyPreset({
+                  id: session.id,
+                  name: "Restored Split",
+                  layoutState: session.layoutState,
+                  previewApps: session.apps.map((a) => ({
+                    name: a.title,
+                    url: a.url,
+                    domain: a.domain
+                  })),
+                  createdAt: session.timestamp,
+                  updatedAt: session.timestamp
+                }, pane().profileId);
+                props.ws.saveLayout(true);
+              },
+              get children() {
+                return pane().component;
+              }
+            });
+          }
+        });
+      }
+    }));
+    return _el$;
+  })();
+}
+var _tmpl$$a = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`);
+function WorkspaceExitSentinel(props) {
+  const isEdgeHovered = (axis) => {
+    const z = props.hoverZone;
+    if (axis === "top") return ["top", "topLeft", "topRight", "left"].includes(z);
+    if (axis === "left") return ["left", "topLeft", "bottomLeft", "top"].includes(z);
+    return ["bottomRight", "bottom", "right"].includes(z);
   };
   return createComponent(Show, {
     get when() {
-      return memo(() => !!isSplitTarget())() && props.target;
+      return props.hoverZone !== "none";
     },
     get children() {
-      var _el$ = _tmpl$$a(), _el$2 = _el$.firstChild;
-      insert(_el$2, () => props.target.direction === "left" && "Dock Left", null);
-      insert(_el$2, () => props.target.direction === "right" && "Dock Right", null);
-      insert(_el$2, () => props.target.direction === "top" && "Dock Top", null);
-      insert(_el$2, () => props.target.direction === "bottom" && "Dock Bottom", null);
-      createRenderEffect((_$p) => style(_el$, getBoundsStyle(), _$p));
+      var _el$ = _tmpl$$a();
+      _el$.addEventListener("pointerleave", () => {
+        let leaveTimer = window._leaveTimer;
+        if (leaveTimer) clearTimeout(leaveTimer);
+      });
+      _el$.addEventListener("pointerenter", () => {
+        let leaveTimer = window._leaveTimer;
+        if (leaveTimer) clearTimeout(leaveTimer);
+        window._leaveTimer = setTimeout(() => {
+          window.dispatchEvent(new CustomEvent("app:zone-leave"));
+        }, 120);
+      });
+      createRenderEffect((_p$) => {
+        var _v$ = isEdgeHovered("top") ? "108px" : "0px", _v$2 = isEdgeHovered("left") ? "108px" : "0px", _v$3 = isEdgeHovered("right") ? "108px" : "0px", _v$4 = isEdgeHovered("bottom") ? "108px" : "0px";
+        _v$ !== _p$.e && setStyleProperty(_el$, "top", _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$, "left", _p$.t = _v$2);
+        _v$3 !== _p$.a && setStyleProperty(_el$, "right", _p$.a = _v$3);
+        _v$4 !== _p$.o && setStyleProperty(_el$, "bottom", _p$.o = _v$4);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0,
+        a: void 0,
+        o: void 0
+      });
       return _el$;
     }
   });
 }
-var _tmpl$$9 = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$7 = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$4 = /* @__PURE__ */ template(`<button>`), _tmpl$5$3 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
-function FindInPageBar(props) {
-  let inputRef;
-  const [query, setQuery] = createSignal("");
-  const [scope, setScope] = createSignal("active");
-  const [matchCase, setMatchCase] = createSignal(false);
-  const [matchInfo, setMatchInfo] = createSignal({
-    current: 0,
-    total: 0
-  });
-  const [splitCount, setSplitCount] = createSignal(0);
-  let debounceTimer;
-  const triggerFind = (q, forward = true, findNext = false) => {
-    const trimmed = q.trim();
-    if (!trimmed || scope() === "global") {
-      clearTimeout(debounceTimer);
-      window.api?.stopFind?.("clearSelection");
-      setMatchInfo({
-        current: 0,
-        total: 0
-      });
-      return;
-    }
-    const opts = {
-      forward,
-      findNext,
-      matchCase: matchCase(),
-      targetPaneId: scope() === "active" ? props.activePaneId : void 0
-    };
-    if (findNext) {
-      clearTimeout(debounceTimer);
-      window.api?.findInAllPanes?.(trimmed, opts);
-    } else {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
-        window.api?.findInAllPanes?.(trimmed, opts);
-      }, 100);
-    }
-  };
-  const handleSearch = (q, forward = true, findNext = false) => {
-    setQuery(q);
-    triggerFind(q, forward, findNext);
-  };
-  const handleKeyDown = (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      clearTimeout(debounceTimer);
-      window.api?.stopFind?.("clearSelection");
-      props.onClose();
-      if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
-    } else if (e.key === "Enter" && scope() !== "global") {
-      e.preventDefault();
-      triggerFind(query(), !e.shiftKey, true);
-    }
-  };
-  const matchingGlobal = createMemo(() => {
-    if (scope() !== "global") return [];
-    const q = query().trim().toLowerCase();
-    if (!q) return [];
-    const list = [];
-    const wss = props.ws?.workspaces?.() || [];
-    for (const w of wss) {
-      if (w.name.toLowerCase().includes(q)) list.push({
-        id: w.id,
-        name: w.name
-      });
-    }
-    return list.slice(0, 5);
-  });
-  createEffect(() => {
-    if (props.isOpen) {
-      setTimeout(() => {
-        inputRef?.focus();
-        inputRef?.select();
-      }, 30);
-    } else {
-      clearTimeout(debounceTimer);
-      window.api?.stopFind?.("clearSelection");
-      setQuery("");
-      setMatchInfo({
-        current: 0,
-        total: 0
-      });
-    }
-  });
-  onMount(() => {
-    const handleResult = (e) => {
-      const {
-        activeMatchOrdinal,
-        numberOfMatches,
-        matches,
-        activePaneId,
-        paneBreakdown
-      } = e.detail || {};
-      const total = typeof matches === "number" ? matches : typeof numberOfMatches === "number" ? numberOfMatches : 0;
-      setMatchInfo({
-        current: activeMatchOrdinal || 0,
-        total
-      });
-      if (paneBreakdown) setSplitCount(Object.keys(paneBreakdown).filter((k) => paneBreakdown[k].total > 0).length);
-      if (activePaneId) window.dispatchEvent(new CustomEvent("pane.focused", {
-        detail: activePaneId
-      }));
-    };
-    window.addEventListener("pane.found-in-page", handleResult);
-    onCleanup(() => {
-      window.removeEventListener("pane.found-in-page", handleResult);
-      window.api?.stopFind?.("clearSelection");
-    });
-  });
-  return createComponent(Show, {
-    get when() {
-      return props.isOpen;
-    },
-    get children() {
-      var _el$ = _tmpl$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$9 = _el$3.nextSibling;
-      _el$.$$click = (e) => e.stopPropagation();
-      insert(_el$3, createComponent(Search, {
-        "class": "w-3.5 h-3.5 text-neutral-400 shrink-0 mr-1"
-      }), _el$4);
-      _el$4.$$keydown = handleKeyDown;
-      _el$4.$$input = (e) => handleSearch(e.currentTarget.value, true, false);
-      var _ref$ = inputRef;
-      typeof _ref$ === "function" ? use(_ref$, _el$4) : inputRef = _el$4;
-      insert(_el$3, createComponent(Show, {
-        get when() {
-          return query().length > 0;
-        },
-        get children() {
-          var _el$5 = _tmpl$$9();
-          _el$5.$$click = () => {
-            setQuery("");
-            triggerFind("", true, false);
-            inputRef?.focus();
-          };
-          insert(_el$5, createComponent(X, {
-            "class": "w-3 h-3"
-          }));
-          return _el$5;
-        }
-      }), null);
-      insert(_el$2, createComponent(Show, {
-        get when() {
-          return memo(() => query().length > 0)() && scope() !== "global";
-        },
-        get children() {
-          var _el$6 = _tmpl$3$6();
-          insert(_el$6, (() => {
-            var _c$ = memo(() => matchInfo().total > 0);
-            return () => _c$() ? `${matchInfo().current} / ${matchInfo().total}` : "No matches";
-          })(), null);
-          insert(_el$6, createComponent(Show, {
-            get when() {
-              return memo(() => splitCount() > 1)() && scope() === "all";
-            },
-            get children() {
-              var _el$7 = _tmpl$2$7(), _el$8 = _el$7.firstChild;
-              insert(_el$7, splitCount, _el$8);
-              return _el$7;
-            }
-          }), null);
-          return _el$6;
-        }
-      }), _el$9);
-      insert(_el$9, createComponent(ActionTooltip, {
-        label: "Active Split",
-        placement: "bottom",
-        get children() {
-          var _el$0 = _tmpl$4$4();
-          _el$0.$$click = () => {
-            setScope("active");
-            triggerFind(query(), true, false);
-          };
-          insert(_el$0, createComponent(Square, {
-            "class": "w-3 h-3"
-          }));
-          createRenderEffect(() => className(_el$0, `p-1 rounded-md text-xs cursor-pointer ${scope() === "active" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
-          return _el$0;
-        }
-      }), null);
-      insert(_el$9, createComponent(ActionTooltip, {
-        label: "All Splits",
-        placement: "bottom",
-        get children() {
-          var _el$1 = _tmpl$4$4();
-          _el$1.$$click = () => {
-            setScope("all");
-            triggerFind(query(), true, false);
-          };
-          insert(_el$1, createComponent(Layers, {
-            "class": "w-3 h-3"
-          }));
-          createRenderEffect(() => className(_el$1, `p-1 rounded-md text-xs cursor-pointer ${scope() === "all" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
-          return _el$1;
-        }
-      }), null);
-      insert(_el$9, createComponent(ActionTooltip, {
-        label: "All Workspaces",
-        placement: "bottom",
-        get children() {
-          var _el$10 = _tmpl$4$4();
-          _el$10.$$click = () => {
-            setScope("global");
-            triggerFind(query(), true, false);
-          };
-          insert(_el$10, createComponent(Globe, {
-            "class": "w-3 h-3"
-          }));
-          createRenderEffect(() => className(_el$10, `p-1 rounded-md text-xs cursor-pointer ${scope() === "global" ? "bg-white dark:bg-neutral-800 text-neutral-900 dark:text-white shadow-xs" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
-          return _el$10;
-        }
-      }), null);
-      insert(_el$2, createComponent(ActionTooltip, {
-        get label() {
-          return matchCase() ? "Match Case (Active)" : "Match Case (Inactive)";
-        },
-        placement: "bottom",
-        get children() {
-          var _el$11 = _tmpl$5$3();
-          _el$11.$$click = () => {
-            setMatchCase(!matchCase());
-            triggerFind(query(), true, false);
-          };
-          createRenderEffect(() => className(_el$11, `px-1.5 py-0.5 rounded-lg text-[10px] font-mono font-semibold transition-colors cursor-pointer ${matchCase() ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900" : "text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200"}`));
-          return _el$11;
-        }
-      }), null);
-      insert(_el$2, createComponent(Show, {
-        get when() {
-          return scope() !== "global";
-        },
-        get children() {
-          return [createComponent(ActionTooltip, {
-            label: "Previous Match",
-            shortcut: "Shift+Enter",
-            placement: "bottom",
-            get children() {
-              var _el$12 = _tmpl$6();
-              _el$12.$$click = () => triggerFind(query(), false, true);
-              insert(_el$12, createComponent(ChevronUp, {
-                "class": "w-3.5 h-3.5"
-              }));
-              return _el$12;
-            }
-          }), createComponent(ActionTooltip, {
-            label: "Next Match",
-            shortcut: "Enter",
-            placement: "bottom",
-            get children() {
-              var _el$13 = _tmpl$6();
-              _el$13.$$click = () => triggerFind(query(), true, true);
-              insert(_el$13, createComponent(ChevronDown, {
-                "class": "w-3.5 h-3.5"
-              }));
-              return _el$13;
-            }
-          })];
-        }
-      }), null);
-      insert(_el$2, createComponent(ActionTooltip, {
-        label: "Close Search",
-        shortcut: "Esc",
-        placement: "bottom",
-        get children() {
-          var _el$14 = _tmpl$7();
-          _el$14.$$click = () => {
-            window.api?.stopFind?.("clearSelection");
-            props.onClose();
-            if (props.activePaneId) window.api?.view?.focus?.(props.activePaneId);
-          };
-          insert(_el$14, createComponent(X, {
-            "class": "w-3.5 h-3.5"
-          }));
-          return _el$14;
-        }
-      }), null);
-      insert(_el$, createComponent(Show, {
-        get when() {
-          return memo(() => scope() === "global")() && matchingGlobal().length > 0;
-        },
-        get children() {
-          var _el$15 = _tmpl$8();
-          insert(_el$15, createComponent(For, {
-            get each() {
-              return matchingGlobal();
-            },
-            children: (w) => (() => {
-              var _el$16 = _tmpl$0(), _el$17 = _el$16.firstChild;
-              _el$16.$$click = () => {
-                props.ws?.switchWorkspace?.(w.id, "forward");
-                props.onClose();
-              };
-              insert(_el$16, createComponent(Globe, {
-                "class": "w-3.5 h-3.5 text-neutral-400 shrink-0"
-              }), _el$17);
-              insert(_el$17, () => w.name);
-              return _el$16;
-            })()
-          }));
-          return _el$15;
-        }
-      }), null);
-      createRenderEffect(() => setAttribute(_el$4, "placeholder", scope() === "active" ? "Find in active split..." : scope() === "all" ? "Find across all splits..." : "Search all workspaces..."));
-      createRenderEffect(() => _el$4.value = query());
-      return _el$;
-    }
-  });
-}
-delegateEvents(["click", "input", "keydown"]);
 function useCanvasEvents() {
   const [isFindOpen, setIsFindOpen] = createSignal(false);
   onMount(() => {
@@ -28344,23 +30249,39 @@ function useCanvasEvents() {
       if (paneId) {
         const audible = isAudible !== void 0 ? Boolean(isAudible) : Boolean(isPlaying);
         markPaneMediaActive(paneId, audible);
-        updatePaneAudio(paneId, audible, layoutStore.nodes[paneId] || getPaneFromPool(paneId));
+        const node = layoutStore.nodes[paneId] || getPaneFromPool(paneId);
+        registerDynamicStatus(paneId, { isPlaying: Boolean(isPlaying), isAudible: audible }, node);
+        updatePaneAudio(paneId, audible, node);
+      }
+    };
+    const handleDynamicMedia = (e) => {
+      const { paneId, isPlaying, isAudible, hasLiveStream, hasWebRtc } = e.detail || {};
+      if (paneId) {
+        const node = layoutStore.nodes[paneId] || getPaneFromPool(paneId);
+        registerDynamicStatus(paneId, { isPlaying, isAudible, hasLiveStream, hasWebRtc }, node);
+        markPaneMediaActive(paneId, Boolean(isAudible));
+        markPaneCallActive(paneId, Boolean(hasWebRtc));
+        updatePaneAudio(paneId, Boolean(isAudible), node);
       }
     };
     const handleCall = (e) => {
       const { paneId, isInCall } = e.detail || {};
       if (paneId) {
         markPaneCallActive(paneId, Boolean(isInCall));
-        updatePaneCall(paneId, Boolean(isInCall), layoutStore.nodes[paneId] || getPaneFromPool(paneId));
+        const node = layoutStore.nodes[paneId] || getPaneFromPool(paneId);
+        registerDynamicStatus(paneId, { hasWebRtc: Boolean(isInCall) }, node);
+        updatePaneCall(paneId, Boolean(isInCall), node);
       }
     };
     const handleFind = () => setIsFindOpen(true);
     window.addEventListener("app:media-status", handleMedia);
+    window.addEventListener("app:dynamic-media-status", handleDynamicMedia);
     window.addEventListener("app:call-active", handleCall);
     window.addEventListener("app:find-in-page", handleFind);
     onCleanup(() => {
       unsubTimestamp();
       window.removeEventListener("app:media-status", handleMedia);
+      window.removeEventListener("app:dynamic-media-status", handleDynamicMedia);
       window.removeEventListener("app:call-active", handleCall);
       window.removeEventListener("app:find-in-page", handleFind);
     });
@@ -28404,7 +30325,25 @@ function useCommunicatorClip() {
   });
   return { clipPath };
 }
-var _tmpl$$8 = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent"></div><div class="absolute inset-0 z-10 pointer-events-none rounded-xl overflow-hidden">`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors shadow-double-bezel-flat active:shadow-double-bezel-active">Reset & Reload Workspace`);
+function computeRootDockBounds(target) {
+  if (!target || target.tier !== "root") {
+    return { top: "0px", left: "0px", right: "0px", bottom: "0px" };
+  }
+  const gap = SPATIAL_TOKENS.halfSplitGap;
+  switch (target.direction) {
+    case "bottom":
+      return { top: "0px", left: "0px", right: "0px", bottom: `calc(50% + ${gap}px)` };
+    case "top":
+      return { top: `calc(50% + ${gap}px)`, left: "0px", right: "0px", bottom: "0px" };
+    case "left":
+      return { top: "0px", left: `calc(50% + ${gap}px)`, right: "0px", bottom: "0px" };
+    case "right":
+      return { top: "0px", left: "0px", right: `calc(50% + ${gap}px)`, bottom: "0px" };
+    default:
+      return { top: "0px", left: "0px", right: "0px", bottom: "0px" };
+  }
+}
+var _tmpl$$9 = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute z-10 pointer-events-none rounded-xl overflow-hidden will-change-[top,left,right,bottom]">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors shadow-double-bezel-flat active:shadow-double-bezel-active">Reset & Reload Workspace`);
 function AppMainCanvas(props) {
   const displayTree = createMemo(() => getComputedPreviewTree());
   const {
@@ -28414,6 +30353,11 @@ function AppMainCanvas(props) {
   const {
     clipPath
   } = useCommunicatorClip();
+  const rootDockBounds = createMemo(() => computeRootDockBounds(props.drag.dragTarget()));
+  createEffect(() => {
+    rootDockBounds();
+    window.dispatchEvent(new CustomEvent("app:layout-sync"));
+  });
   const activePaneIds = createMemo(() => {
     const ids = [];
     const visited = /* @__PURE__ */ new Set();
@@ -28433,6 +30377,10 @@ function AppMainCanvas(props) {
       for (const [nodeId, n] of Object.entries(layoutStore.nodes)) {
         if (n && n.type === "pane" && nodeId !== SPLIT_PREVIEW_GHOST_ID) ids.push(nodeId);
       }
+    }
+    const draggingId = props.drag.activeDragId();
+    if (draggingId && !ids.includes(draggingId)) {
+      ids.push(draggingId);
     }
     return ids.sort((a, b) => a.localeCompare(b));
   });
@@ -28469,14 +30417,8 @@ function AppMainCanvas(props) {
     props.ws.saveLayout(true);
     reset();
   };
-  const isEdgeHovered = (axis) => {
-    const z = props.hoverZone;
-    if (axis === "top") return ["top", "topLeft", "topRight", "left"].includes(z);
-    if (axis === "left") return ["left", "topLeft", "bottomLeft", "top"].includes(z);
-    return ["bottomRight", "bottom", "right"].includes(z);
-  };
   return (() => {
-    var _el$ = _tmpl$2$6(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling;
+    var _el$ = _tmpl$$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
     var _ref$ = props.canvasContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.canvasContainerRef = _el$;
     insert(_el$2, createComponent(CommandPalette, {
@@ -28501,132 +30443,26 @@ function AppMainCanvas(props) {
         return props.drag.dragTarget();
       }
     }), _el$3);
-    insert(_el$2, createComponent(Show, {
-      get when() {
-        return props.hoverZone !== "none";
-      },
-      get children() {
-        var _el$4 = _tmpl$$8();
-        _el$4.addEventListener("pointerleave", () => {
-          let leaveTimer = window._leaveTimer;
-          if (leaveTimer) clearTimeout(leaveTimer);
-        });
-        _el$4.addEventListener("pointerenter", () => {
-          let leaveTimer = window._leaveTimer;
-          if (leaveTimer) clearTimeout(leaveTimer);
-          window._leaveTimer = setTimeout(() => {
-            window.dispatchEvent(new CustomEvent("app:zone-leave"));
-          }, 120);
-        });
-        createRenderEffect((_p$) => {
-          var _v$ = isEdgeHovered("top") ? "108px" : "0px", _v$2 = isEdgeHovered("left") ? "108px" : "0px", _v$3 = isEdgeHovered("right") ? "108px" : "0px", _v$4 = isEdgeHovered("bottom") ? "108px" : "0px";
-          _v$ !== _p$.e && setStyleProperty(_el$4, "top", _p$.e = _v$);
-          _v$2 !== _p$.t && setStyleProperty(_el$4, "left", _p$.t = _v$2);
-          _v$3 !== _p$.a && setStyleProperty(_el$4, "right", _p$.a = _v$3);
-          _v$4 !== _p$.o && setStyleProperty(_el$4, "bottom", _p$.o = _v$4);
-          return _p$;
-        }, {
-          e: void 0,
-          t: void 0,
-          a: void 0,
-          o: void 0
-        });
-        return _el$4;
+    insert(_el$2, createComponent(WorkspaceExitSentinel, {
+      get hoverZone() {
+        return props.hoverZone;
       }
-    }), _el$5);
-    insert(_el$5, createComponent(For, {
-      get each() {
-        return renderedPaneIds();
+    }), _el$4);
+    insert(_el$2, createComponent(AbsolutePanesLayer, {
+      renderedPaneIds,
+      get ws() {
+        return props.ws;
       },
-      children: (paneId) => {
-        const pane = () => layoutStore.nodes[paneId] || getPaneFromPool(paneId) || getHostPane(paneId) || criticalPanesStore[paneId]?.node || {};
-        return createComponent(AbsolutePane, {
-          get targetId() {
-            return `pane-container-${pane().id}`;
-          },
-          get paneId() {
-            return pane().id;
-          },
-          get isDragging() {
-            return props.drag.activeDragId() === pane().id;
-          },
-          get isGlobalDragging() {
-            return !!props.drag.activeDragId();
-          },
-          get isActive() {
-            return props.ws.activePaneId() === pane().id;
-          },
-          get isReplaceTarget() {
-            return memo(() => props.drag.dragTarget()?.id === pane().id)() && props.drag.dragTarget()?.direction === "replace";
-          },
-          get children() {
-            return createComponent(Pane, {
-              get id() {
-                return pane().id;
-              },
-              get url() {
-                return pane().url;
-              },
-              get paneType() {
-                return pane().paneType;
-              },
-              get title() {
-                return memo(() => pane().paneType === "terminal")() ? "Terminal" : pane().url || "New Tab";
-              },
-              get isActivePane() {
-                return props.ws.activePaneId() === pane().id;
-              },
-              get profileId() {
-                return pane().profileId || props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.default_profile_id || "main";
-              },
-              onClose: () => {
-                unregisterPaneFromPool(pane().id);
-                unregisterCriticalPane(pane().id);
-                unregisterWorkspacePane(pane().id);
-                props.ws.handleClose(pane().id);
-              },
-              onSplit: (dir) => props.ws.handleSplit(pane().id, dir),
-              onUpdate: (data) => props.ws.handleUpdatePane(pane().id, data),
-              onActive: () => {
-                props.ws.setActivePaneId(pane().id);
-                PaneFocusManager.focusPane(pane().id, props.ws.setActivePaneId);
-              },
-              onApplyTemplate: (template2) => props.ws.applyLayoutTemplate(pane().id, template2),
-              get activeWorkspaceId() {
-                return props.ws.activeWorkspace();
-              },
-              get activeWorkspaceName() {
-                return props.ws.workspaces().find((w) => w.id === props.ws.activeWorkspace())?.name || "";
-              },
-              onRestoreSplit: (session) => {
-                layoutMemory.applyPreset({
-                  id: session.id,
-                  name: "Restored Split",
-                  layoutState: session.layoutState,
-                  previewApps: session.apps.map((a) => ({
-                    name: a.title,
-                    url: a.url,
-                    domain: a.domain
-                  })),
-                  createdAt: session.timestamp,
-                  updatedAt: session.timestamp
-                }, pane().profileId);
-                props.ws.saveLayout(true);
-              },
-              get children() {
-                return pane().component;
-              }
-            });
-          }
-        });
+      get drag() {
+        return props.drag;
       }
-    }));
-    insert(_el$6, createComponent(ErrorBoundary, {
+    }), _el$4);
+    insert(_el$4, createComponent(ErrorBoundary, {
       fallback: (err, reset) => (() => {
-        var _el$7 = _tmpl$3$5(), _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.nextSibling;
-        insert(_el$9, () => err.toString());
-        _el$0.$$click = () => handleResetLayout(reset);
-        return _el$7;
+        var _el$5 = _tmpl$2$7(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.nextSibling;
+        insert(_el$7, () => err.toString());
+        _el$8.$$click = () => handleResetLayout(reset);
+        return _el$5;
       })(),
       get children() {
         return createComponent(Show, {
@@ -28674,47 +30510,148 @@ function AppMainCanvas(props) {
       }
     }));
     createRenderEffect((_p$) => {
-      var _v$5 = `${SPATIAL_TOKENS.baseMargin}px`, _v$6 = clipPath(), _v$7 = clipPath();
-      _v$5 !== _p$.e && setStyleProperty(_el$, "padding", _p$.e = _v$5);
-      _v$6 !== _p$.t && setStyleProperty(_el$, "clip-path", _p$.t = _v$6);
-      _v$7 !== _p$.a && setStyleProperty(_el$, "-webkit-clip-path", _p$.a = _v$7);
+      var _v$ = `${SPATIAL_TOKENS.baseMargin}px`, _v$2 = clipPath(), _v$3 = clipPath(), _v$4 = rootDockBounds();
+      _v$ !== _p$.e && setStyleProperty(_el$, "padding", _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$, "clip-path", _p$.t = _v$2);
+      _v$3 !== _p$.a && setStyleProperty(_el$, "-webkit-clip-path", _p$.a = _v$3);
+      _p$.o = style(_el$4, _v$4, _p$.o);
       return _p$;
     }, {
       e: void 0,
       t: void 0,
-      a: void 0
+      a: void 0,
+      o: void 0
     });
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$7 = /* @__PURE__ */ template(`<div class="fixed left-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-left-2 duration-150 whitespace-nowrap select-none">Previous Tab`), _tmpl$2$5 = /* @__PURE__ */ template(`<div>`), _tmpl$3$4 = /* @__PURE__ */ template(`<div class="fixed right-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-right-2 duration-150 whitespace-nowrap select-none">`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class="fixed top-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-top-2 duration-150 whitespace-nowrap select-none">Previous Workspace`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="fixed bottom-6 bg-neutral-900 text-white text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full shadow-lg animate-in fade-in slide-in-from-bottom-2 duration-150 whitespace-nowrap select-none">Next Workspace`);
+var _tmpl$$8 = /* @__PURE__ */ template(`<div class="flex flex-col items-center gap-2.5 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="[writing-mode:vertical-rl] text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-h-[140px] select-none">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div>`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-w-[130px] select-none">`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class="relative w-[18px] h-[18px] flex-shrink-0 flex items-center justify-center"><svg class="w-full h-full -rotate-90"viewBox="0 0 18 18"><circle cx=9 cy=9 r=7 class="stroke-neutral-300/80 dark:stroke-neutral-700/80"stroke-width=1.75 fill=none></circle><circle cx=9 cy=9 r=7 class="stroke-neutral-900 dark:stroke-neutral-100 transition-[stroke-dashoffset] duration-75 ease-linear"stroke-width=1.75 fill=none stroke-dasharray=43.98 stroke-linecap=round></circle></svg><span class="absolute text-[9px] font-semibold text-neutral-800 dark:text-neutral-200">`);
+function BezelShelfItem(props) {
+  const isVertical = () => props.direction === "left" || props.direction === "right";
+  const positionClass = () => {
+    switch (props.direction) {
+      case "right":
+        return "right-0 top-1/2 -translate-y-1/2 rounded-l-2xl rounded-r-none border-r-0";
+      case "left":
+        return "left-0 top-1/2 -translate-y-1/2 rounded-r-2xl rounded-l-none border-l-0";
+      case "top":
+        return "top-0 left-1/2 -translate-x-1/2 rounded-b-2xl rounded-t-none border-t-0";
+      case "bottom":
+        return "bottom-0 left-1/2 -translate-x-1/2 rounded-t-2xl rounded-b-none border-b-0";
+    }
+  };
+  const idleClass = () => {
+    if (isVertical()) {
+      return "w-1 h-14 opacity-25 bg-neutral-400 dark:bg-neutral-600 border-neutral-300 dark:border-neutral-700";
+    }
+    return "h-1 w-14 opacity-25 bg-neutral-400 dark:bg-neutral-600 border-neutral-300 dark:border-neutral-700";
+  };
+  const activeClass = () => "bg-white/95 dark:bg-neutral-900/95 border-neutral-300/90 dark:border-neutral-700/90 shadow-double-bezel-flat shadow-[0_8px_30px_rgb(0_0_0/0.12)] opacity-100";
+  const dashoffset = () => 43.98 * (1 - Math.min(Math.max(props.progress, 0), 1));
+  return (() => {
+    var _el$ = _tmpl$2$6();
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.isActive;
+      },
+      get children() {
+        return createComponent(Show, {
+          get when() {
+            return isVertical();
+          },
+          get fallback() {
+            return (() => {
+              var _el$4 = _tmpl$3$5(), _el$5 = _el$4.firstChild;
+              insert(_el$4, createComponent(Show, {
+                get when() {
+                  return props.direction === "top";
+                },
+                get children() {
+                  return createComponent(TensionRing, {
+                    get icon() {
+                      return props.icon;
+                    },
+                    get dashoffset() {
+                      return dashoffset();
+                    }
+                  });
+                }
+              }), _el$5);
+              insert(_el$5, () => props.label);
+              insert(_el$4, createComponent(Show, {
+                get when() {
+                  return props.direction === "bottom";
+                },
+                get children() {
+                  return createComponent(TensionRing, {
+                    get icon() {
+                      return props.icon;
+                    },
+                    get dashoffset() {
+                      return dashoffset();
+                    }
+                  });
+                }
+              }), null);
+              return _el$4;
+            })();
+          },
+          get children() {
+            var _el$2 = _tmpl$$8(), _el$3 = _el$2.firstChild;
+            insert(_el$2, createComponent(TensionRing, {
+              get icon() {
+                return props.icon;
+              },
+              get dashoffset() {
+                return dashoffset();
+              }
+            }), _el$3);
+            insert(_el$3, () => props.label);
+            return _el$2;
+          }
+        });
+      }
+    }));
+    createRenderEffect(() => className(_el$, `fixed z-[9999] pointer-events-none transition-all duration-200 ease-[cubic-bezier(0.16,1,0.3,1)] border backdrop-blur-md flex items-center justify-center overflow-hidden ${positionClass()} ${props.isActive ? activeClass() : idleClass()} ${props.isActive ? isVertical() ? "w-10 py-3.5 max-h-[220px]" : "h-10 px-3.5 max-w-[220px]" : ""}`));
+    return _el$;
+  })();
+}
+function TensionRing(props) {
+  return (() => {
+    var _el$6 = _tmpl$4$3(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$7.nextSibling;
+    insert(_el$0, () => props.icon);
+    createRenderEffect(() => setAttribute(_el$9, "stroke-dashoffset", props.dashoffset));
+    return _el$6;
+  })();
+}
 function EdgeDragZones(props) {
-  const showLeft = () => {
-    const ts = props.ws.tabs();
-    const idx = ts.findIndex((t) => t.id === props.ws.activeTabId());
-    return idx > 0;
+  const tabs = () => props.ws.tabs() || [];
+  const currentTabIdx = () => tabs().findIndex((t) => t.id === props.ws.activeTabId());
+  const showLeft = () => currentTabIdx() > 0;
+  const showRight = () => true;
+  const leftTabLabel = () => {
+    const prevTab = tabs()[currentTabIdx() - 1];
+    return prevTab?.title || prevTab?.name || "Previous Tab";
   };
-  const showRight = () => {
-    const ts = props.ws.tabs();
-    const idx = ts.findIndex((t) => t.id === props.ws.activeTabId());
-    if (idx < ts.length - 1) return true;
-    if (props.dragEngineRef && !props.dragEngineRef.hasCreatedTab) return true;
-    return false;
+  const isLastTab = () => currentTabIdx() >= tabs().length - 1;
+  const rightTabLabel = () => {
+    if (isLastTab()) return "Create New Tab";
+    const nextTab = tabs()[currentTabIdx() + 1];
+    return nextTab?.title || nextTab?.name || "Next Tab";
   };
-  const showTop = () => {
-    const wks = props.ws.workspaces();
-    const idx = wks.findIndex((w) => w.id === props.ws.activeWorkspace());
-    return idx > 0;
+  const workspaces = () => props.ws.workspaces() || [];
+  const currentWsIdx = () => workspaces().findIndex((w) => w.id === props.ws.activeWorkspace());
+  const showTop = () => currentWsIdx() > 0;
+  const showBottom = () => currentWsIdx() < workspaces().length - 1;
+  const topWsLabel = () => {
+    const prevWs = workspaces()[currentWsIdx() - 1];
+    return prevWs?.name || "Previous Workspace";
   };
-  const showBottom = () => {
-    const wks = props.ws.workspaces();
-    const idx = wks.findIndex((w) => w.id === props.ws.activeWorkspace());
-    return idx < wks.length - 1;
+  const bottomWsLabel = () => {
+    const nextWs = workspaces()[currentWsIdx() + 1];
+    return nextWs?.name || "Next Workspace";
   };
-  const baseZone = "fixed z-[9999] pointer-events-none transition-all duration-200 ease-out border backdrop-blur-[2px] flex items-center justify-center";
-  const idleStyle = "border-neutral-300/40 bg-neutral-200/20 text-transparent opacity-40";
-  const activeStyle = "border-neutral-800 bg-white/95 dark:bg-neutral-900/95 text-neutral-800 dark:text-neutral-100 opacity-100 shadow-[0_8px_30px_rgba(0,0,0,0.12)] scale-105";
   return createComponent(Show, {
     get when() {
       return props.isDragging;
@@ -28725,70 +30662,78 @@ function EdgeDragZones(props) {
           return showLeft();
         },
         get children() {
-          var _el$ = _tmpl$2$5();
-          insert(_el$, createComponent(Show, {
-            get when() {
+          return createComponent(BezelShelfItem, {
+            direction: "left",
+            get isActive() {
               return props.hoverDir === "left";
             },
-            get children() {
-              return _tmpl$$7();
-            }
-          }));
-          createRenderEffect(() => className(_el$, `${baseZone} inset-y-12 left-1.5 w-3 rounded-full ${props.hoverDir === "left" ? activeStyle : idleStyle}`));
-          return _el$;
+            get progress() {
+              return memo(() => props.hoverDir === "left")() ? props.edgeHoverProgress || 0 : 0;
+            },
+            get label() {
+              return leftTabLabel();
+            },
+            icon: "←"
+          });
         }
       }), createComponent(Show, {
         get when() {
           return showRight();
         },
         get children() {
-          var _el$3 = _tmpl$2$5();
-          insert(_el$3, createComponent(Show, {
-            get when() {
+          return createComponent(BezelShelfItem, {
+            direction: "right",
+            get isActive() {
               return props.hoverDir === "right";
             },
-            get children() {
-              var _el$4 = _tmpl$3$4();
-              insert(_el$4, () => props.ws.tabs().findIndex((t) => t.id === props.ws.activeTabId()) < props.ws.tabs().length - 1 ? "Next Tab" : "New Tab");
-              return _el$4;
+            get progress() {
+              return memo(() => props.hoverDir === "right")() ? props.edgeHoverProgress || 0 : 0;
+            },
+            get label() {
+              return rightTabLabel();
+            },
+            get icon() {
+              return isLastTab() ? "+" : "→";
             }
-          }));
-          createRenderEffect(() => className(_el$3, `${baseZone} inset-y-12 right-1.5 w-3 rounded-full ${props.hoverDir === "right" ? activeStyle : idleStyle}`));
-          return _el$3;
+          });
         }
       }), createComponent(Show, {
         get when() {
           return showTop();
         },
         get children() {
-          var _el$5 = _tmpl$2$5();
-          insert(_el$5, createComponent(Show, {
-            get when() {
+          return createComponent(BezelShelfItem, {
+            direction: "top",
+            get isActive() {
               return props.hoverDir === "top";
             },
-            get children() {
-              return _tmpl$4$3();
-            }
-          }));
-          createRenderEffect(() => className(_el$5, `${baseZone} inset-x-12 top-1.5 h-3 rounded-full ${props.hoverDir === "top" ? activeStyle : idleStyle}`));
-          return _el$5;
+            get progress() {
+              return memo(() => props.hoverDir === "top")() ? props.edgeHoverProgress || 0 : 0;
+            },
+            get label() {
+              return topWsLabel();
+            },
+            icon: "↑"
+          });
         }
       }), createComponent(Show, {
         get when() {
           return showBottom();
         },
         get children() {
-          var _el$7 = _tmpl$2$5();
-          insert(_el$7, createComponent(Show, {
-            get when() {
+          return createComponent(BezelShelfItem, {
+            direction: "bottom",
+            get isActive() {
               return props.hoverDir === "bottom";
             },
-            get children() {
-              return _tmpl$5$2();
-            }
-          }));
-          createRenderEffect(() => className(_el$7, `${baseZone} inset-x-12 bottom-1.5 h-3 rounded-full ${props.hoverDir === "bottom" ? activeStyle : idleStyle}`));
-          return _el$7;
+            get progress() {
+              return memo(() => props.hoverDir === "bottom")() ? props.edgeHoverProgress || 0 : 0;
+            },
+            get label() {
+              return bottomWsLabel();
+            },
+            icon: "↓"
+          });
         }
       })];
     }
@@ -28879,7 +30824,7 @@ const __vitePreload = function preload(baseModule, deps, importerUrl) {
     return baseModule().catch(handlePreloadError);
   });
 };
-var _tmpl$$6 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$3 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$2 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
+var _tmpl$$7 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$4 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$2 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
 function CheatSheetModal() {
   const [isOpen, setIsOpen] = createSignal(false);
   const toggle = () => setIsOpen(!isOpen());
@@ -28905,14 +30850,14 @@ function CheatSheetModal() {
     if (keyName === "BACKSLASH") keyName = "\\";
     parts.push(keyName);
     return parts.map((p, i) => (() => {
-      var _el$ = _tmpl$2$4(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$2$5(), _el$2 = _el$.firstChild;
       insert(_el$2, p);
       insert(_el$, createComponent(Show, {
         get when() {
           return i < parts.length - 1;
         },
         get children() {
-          return _tmpl$$6();
+          return _tmpl$$7();
         }
       }), null);
       return _el$;
@@ -28923,7 +30868,7 @@ function CheatSheetModal() {
       return isOpen();
     },
     get children() {
-      var _el$4 = _tmpl$3$3(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.firstChild;
+      var _el$4 = _tmpl$3$4(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.firstChild;
       _el$4.$$click = toggle;
       _el$5.$$click = (e) => e.stopPropagation();
       _el$8.$$click = toggle;
@@ -28953,7 +30898,7 @@ function CheatSheetModal() {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$5 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome>`);
+var _tmpl$$6 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome>`);
 function ModalShell(props) {
   onMount(() => {
     const onKeyDown = (e) => {
@@ -28969,7 +30914,7 @@ function ModalShell(props) {
       return props.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$$5(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$6(), _el$2 = _el$.firstChild;
       _el$.$$click = (e) => {
         if (e.target === e.currentTarget) props.onClose();
       };
@@ -28980,7 +30925,7 @@ function ModalShell(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$4 = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
+var _tmpl$$5 = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
 function ConfirmationModal(props) {
   return createComponent(ModalShell, {
     get isOpen() {
@@ -28992,12 +30937,12 @@ function ConfirmationModal(props) {
     maxWidthClass: "max-w-sm",
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$4(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+        var _el$ = _tmpl$$5(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
         insert(_el$2, () => props.title);
         insert(_el$3, () => props.description);
         return _el$;
       })(), (() => {
-        var _el$4 = _tmpl$2$3(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$4(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         addEventListener(_el$5, "click", props.onCancel, true);
         insert(_el$5, () => props.cancelText || "Cancel");
         addEventListener(_el$6, "click", props.onConfirm, true);
@@ -29140,7 +31085,7 @@ function useMilestoneController(workspaceCount, ws) {
     dismissToast
   };
 }
-var _tmpl$$3 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$2 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$2 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div data-overlay-chrome style=-webkit-app-region:no-drag>`);
+var _tmpl$$4 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$3 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div data-overlay-chrome style=-webkit-app-region:no-drag>`);
 function MilestoneToaster(props) {
   const ctrl = useMilestoneController(props.workspaceCount, props.ws);
   return createComponent(Show, {
@@ -29157,11 +31102,11 @@ function MilestoneToaster(props) {
         },
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$3(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$4(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$4.$$click = () => ctrl.dismissToast("feedback_dismiss");
             return _el$2;
           })(), (() => {
-            var _el$5 = _tmpl$2$2(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+            var _el$5 = _tmpl$2$3(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
             _el$6.$$click = () => ctrl.dismissToast("feedback_give");
             _el$7.$$click = () => ctrl.dismissToast("feedback_snooze");
             return _el$5;
@@ -29174,7 +31119,7 @@ function MilestoneToaster(props) {
         },
         get children() {
           return [(() => {
-            var _el$8 = _tmpl$3$2(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+            var _el$8 = _tmpl$3$3(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
             _el$0.$$click = () => ctrl.dismissToast("timeout");
             return _el$8;
           })(), (() => {
@@ -29191,10 +31136,108 @@ function MilestoneToaster(props) {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-DdMDVGuH.js"), true ? [] : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-6w0tp9B6.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-1RlVH2hi.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-DYrYEAuc.js"), true ? [] : void 0, import.meta.url));
+var _tmpl$$3 = /* @__PURE__ */ template(`<div class="p-5 flex flex-col gap-4 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 select-none"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-3"><div><h2 class="text-base font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">Share Your Screen</h2><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Select the entire display or a specific window to present</p></div><button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-sm font-medium p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">✕</button></div><div class="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800/60 p-1 rounded-lg w-fit border border-neutral-200/50 dark:border-neutral-700/50"><button type=button>Entire Screens</button><button type=button>Application Windows</button></div><div class="grid grid-cols-2 gap-3 max-h-[340px] overflow-y-auto p-1"></div><div class="flex items-center justify-end gap-2 pt-3 border-t border-neutral-200/80 dark:border-neutral-800"><button type=button class="px-4 py-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors border border-neutral-200 dark:border-neutral-700">Cancel</button><button type=button class="px-4 py-1.5 text-xs font-medium text-white bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 disabled:opacity-40 disabled:pointer-events-none rounded-lg transition-colors shadow-sm">Share Screen`), _tmpl$2$2 = /* @__PURE__ */ template(`<div class="col-span-2 py-10 text-center text-xs text-neutral-400">No sources available in this category`), _tmpl$3$2 = /* @__PURE__ */ template(`<div><div class="aspect-video w-full rounded-lg overflow-hidden bg-neutral-950/5 border border-neutral-200/60 dark:border-neutral-800 flex items-center justify-center"><img class="w-full h-full object-contain"></div><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate">`);
+function ScreenSourcePickerModal() {
+  const [isOpen, setIsOpen] = createSignal(false);
+  const [requestId, setRequestId] = createSignal("");
+  const [sources, setSources] = createSignal([]);
+  const [activeTab, setActiveTab] = createSignal("screen");
+  const [selectedId, setSelectedId] = createSignal(null);
+  onMount(() => {
+    const unsub = window.api?.onScreenShareRequest?.((data) => {
+      if (data?.requestId && Array.isArray(data.sources)) {
+        setRequestId(data.requestId);
+        setSources(data.sources);
+        setSelectedId(data.sources[0]?.id || null);
+        const hasScreens = data.sources.some((s) => s.isScreen);
+        setActiveTab(hasScreens ? "screen" : "window");
+        setIsOpen(true);
+      }
+    });
+    onCleanup(() => unsub?.());
+  });
+  const filteredSources = () => sources().filter((s) => activeTab() === "screen" ? s.isScreen : !s.isScreen);
+  const handleClose = async () => {
+    const id = requestId();
+    setIsOpen(false);
+    if (id) {
+      try {
+        await trpc.screen.cancelRequest(id);
+      } catch {
+      }
+    }
+  };
+  const handleShare = async () => {
+    const id = requestId();
+    const chosen = selectedId();
+    if (!id || !chosen) return;
+    setIsOpen(false);
+    try {
+      await trpc.screen.selectSource(id, chosen);
+    } catch {
+    }
+  };
+  return createComponent(ModalShell, {
+    get isOpen() {
+      return isOpen();
+    },
+    onClose: handleClose,
+    maxWidthClass: "max-w-2xl",
+    get children() {
+      var _el$ = _tmpl$$3(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+      _el$4.$$click = handleClose;
+      _el$6.$$click = () => setActiveTab("screen");
+      _el$7.$$click = () => setActiveTab("window");
+      insert(_el$8, createComponent(For, {
+        get each() {
+          return filteredSources();
+        },
+        get fallback() {
+          return _tmpl$2$2();
+        },
+        children: (source) => {
+          const isSelected = () => selectedId() === source.id;
+          return (() => {
+            var _el$11 = _tmpl$3$2(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling;
+            _el$11.$$click = () => setSelectedId(source.id);
+            insert(_el$14, () => source.name);
+            createRenderEffect((_p$) => {
+              var _v$4 = `flex flex-col gap-2 p-2.5 rounded-xl border transition-all cursor-pointer ${isSelected() ? "border-neutral-900 dark:border-neutral-100 ring-2 ring-neutral-900/10 dark:ring-neutral-100/10 bg-neutral-50 dark:bg-neutral-800/40" : "border-neutral-200 dark:border-neutral-800 hover:border-neutral-400 dark:hover:border-neutral-600 bg-white dark:bg-neutral-900"}`, _v$5 = source.thumbnail, _v$6 = source.name;
+              _v$4 !== _p$.e && className(_el$11, _p$.e = _v$4);
+              _v$5 !== _p$.t && setAttribute(_el$13, "src", _p$.t = _v$5);
+              _v$6 !== _p$.a && setAttribute(_el$13, "alt", _p$.a = _v$6);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0,
+              a: void 0
+            });
+            return _el$11;
+          })();
+        }
+      }));
+      _el$0.$$click = handleClose;
+      _el$1.$$click = handleShare;
+      createRenderEffect((_p$) => {
+        var _v$ = `px-3 py-1 text-xs font-medium rounded-md transition-all ${activeTab() === "screen" ? "bg-white dark:bg-neutral-700 text-neutral-900 dark:text-neutral-100 shadow-sm" : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900"}`, _v$2 = `px-3 py-1 text-xs font-medium rounded-md transition-all ${activeTab() === "window" ? "bg-white dark:bg-neutral-700 text-neutral-900 dark:text-neutral-100 shadow-sm" : "text-neutral-500 dark:text-neutral-400 hover:text-neutral-900"}`, _v$3 = !selectedId();
+        _v$ !== _p$.e && className(_el$6, _p$.e = _v$);
+        _v$2 !== _p$.t && className(_el$7, _p$.t = _v$2);
+        _v$3 !== _p$.a && (_el$1.disabled = _p$.a = _v$3);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0,
+        a: void 0
+      });
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-B4bDyOL9.js"), true ? [] : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-Do7q845Q.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-DyJw8Oc1.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-Y5e0VloK.js"), true ? [] : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
@@ -29295,7 +31338,7 @@ function AppModals(props) {
     get ws() {
       return props.ws;
     }
-  })];
+  }), createComponent(ScreenSourcePickerModal, {})];
 }
 var _tmpl$$2 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] pointer-events-auto select-none animate-in slide-in-from-bottom-3 fade-in duration-200"><div class="h-11 flex items-center gap-2.5 px-3 bg-white dark:bg-[#181818] text-neutral-800 dark:text-neutral-100 rounded-[12px] border border-neutral-200/90 dark:border-neutral-800 shadow-[inset_0_1px_0_rgba(255,255,255,1),0_10px_32px_-4px_rgba(0,0,0,0.12)] text-[12.5px] font-sans tracking-tight"><div class="w-6 h-6 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800/80 rounded-[6px] border border-neutral-200/60 dark:border-neutral-700/60 shrink-0"></div><span class="max-w-[220px] truncate text-neutral-700 dark:text-neutral-200 font-medium">Closed <strong class="font-semibold text-neutral-900 dark:text-white"></strong></span><div class="w-[1px] h-4 bg-neutral-200 dark:bg-neutral-700 mx-0.5"></div><button class="h-7 px-2.5 bg-neutral-100 hover:bg-neutral-200/70 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-100 rounded-[7px] border border-neutral-300/60 dark:border-neutral-600/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] text-[11.5px] font-medium flex items-center gap-1.5 transition-all active:scale-95">Undo</button><button class="w-6 h-6 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-[6px] transition-colors -mr-1"aria-label=Dismiss><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`);
 function ClosedItemToast(props) {
@@ -29596,6 +31639,11 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       if (e.detail) handlePaneFocus(e.detail);
     };
     window.addEventListener("app:webview-focused", onWebviewFocused);
+    const onSemanticTitle = (e) => {
+      const { paneId, title } = e.detail || {};
+      if (paneId && title) setLayoutStore("nodes", paneId, (n) => n ? { ...n, title } : n);
+    };
+    window.addEventListener("app:semantic-title", onSemanticTitle);
     window.api?.onViewNavigated?.((data) => {
       setLayoutStore("nodes", data.paneId, (node) => {
         if (!node) return node;
@@ -29732,6 +31780,7 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       );
       window.removeEventListener("app:toast", handleToast);
       window.removeEventListener("app:webview-focused", onWebviewFocused);
+      window.removeEventListener("app:semantic-title", onSemanticTitle);
     });
   });
 }
@@ -29911,32 +31960,6 @@ function useAppLifecycle(ws) {
       } catch {
       }
     });
-    const handleEdgeHover = (e) => {
-      const dir = e.detail.dir;
-      const dragEngineRef = e.detail.dragEngine;
-      if (dir === "left" || dir === "right") {
-        const ts = ws.tabs();
-        const idx = ts.findIndex((t) => t.id === ws.activeTabId());
-        if (dir === "left" && idx > 0) {
-          ws.switchTab(ts[idx - 1].id, "backward");
-        } else if (dir === "right") {
-          if (idx < ts.length - 1) {
-            ws.switchTab(ts[idx + 1].id, "forward");
-          } else if (dragEngineRef && !dragEngineRef.hasCreatedTab) {
-            dragEngineRef.hasCreatedTab = true;
-            ws.handleCreateTab();
-          }
-        }
-      } else if (dir === "top" || dir === "bottom") {
-        const wks = ws.workspaces();
-        const idx = wks.findIndex((w) => w.id === ws.activeWorkspace());
-        if (dir === "top" && idx > 0) {
-          ws.switchWorkspace(wks[idx - 1].id, "backward");
-        } else if (dir === "bottom" && idx < wks.length - 1) {
-          ws.switchWorkspace(wks[idx + 1].id, "forward");
-        }
-      }
-    };
     const handleBeforeUnload = () => {
       ws.saveLayout(true);
     };
@@ -29960,7 +31983,6 @@ function useAppLifecycle(ws) {
       ipc.on("pane.clicked", onPaneClicked);
       ipc.on("catalog.app-discovered", onAppDiscovered);
     }
-    window.addEventListener("app:edge-hover", handleEdgeHover);
     window.addEventListener("app:pane-focus-changed", handlePaneFocusSync);
     window.addEventListener("beforeunload", handleBeforeUnload);
     onCleanup(() => {
@@ -29970,7 +31992,6 @@ function useAppLifecycle(ws) {
         ipc.removeListener("pane.clicked", onPaneClicked);
         ipc.removeListener("catalog.app-discovered", onAppDiscovered);
       }
-      window.removeEventListener("app:edge-hover", handleEdgeHover);
       window.removeEventListener("app:pane-focus-changed", handlePaneFocusSync);
       window.removeEventListener("beforeunload", handleBeforeUnload);
     });
@@ -30023,7 +32044,7 @@ function useSpatialRail(tabCount, hasEyebrow, workspaceNameLength, activeBarRef,
 var _tmpl$$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-green-500><polyline points="20 6 9 17 4 12">`), _tmpl$2$1 = /* @__PURE__ */ template(`<svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-red-500><circle cx=12 cy=12 r=10></circle><line x1=12 y1=8 x2=12 y2=12></line><line x1=12 y1=16 x2=12.01 y2=16>`), _tmpl$3$1 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] px-4 py-2.5 bg-white text-neutral-800 text-[13px] font-medium rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] border border-neutral-200/60 flex items-center gap-2 animate-in slide-in-from-bottom-4 fade-in duration-300">`), _tmpl$4 = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-transparent text-neutral-800 flex flex-row font-sans overflow-hidden w-full h-full pointer-events-none select-none"><div data-overlay-chrome class="pointer-events-auto contents">`);
 function App() {
   const ws = useWorkspaceManager();
-  const drag = useDragEngine(ws.saveLayout, ws.handleClose, ws.getParent, ws.activeTabId, ws.switchTab, ws.cleanupEmptyTabs);
+  const drag = useDragEngine(ws);
   const initialMode = typeof localStorage !== "undefined" ? localStorage.getItem("apposition:ui_mode") : null;
   const [uiMode, setUiModeState] = createSignal(initialMode === "overlap" || initialMode === "collapse" ? initialMode : "inset");
   const setUiMode = (mode) => {
@@ -30049,6 +32070,7 @@ function App() {
     current: false
   };
   const handleZoneEnter = (zone) => {
+    if (drag.activeDragId()) return;
     if (hoverZone() !== zone) setHoverZone(zone);
   };
   useAppLifecycle(ws);
@@ -30128,7 +32150,8 @@ function App() {
       get isMaximized() {
         return !!layoutStore.maximizedPaneId;
       },
-      onZoneEnter: handleZoneEnter
+      onZoneEnter: handleZoneEnter,
+      ws
     }), null);
     insert(_el$2, createComponent(AppEdgeZones, {
       get isMaximized() {
@@ -30163,12 +32186,10 @@ function App() {
       get hoverDir() {
         return drag.edgeHoverDir();
       },
-      ws,
-      get dragEngineRef() {
-        return {
-          hasCreatedTab: drag.hasCreatedTab
-        };
-      }
+      get edgeHoverProgress() {
+        return drag.edgeHoverProgress();
+      },
+      ws
     }), null);
     insert(_el$2, createComponent(AppModals, {
       ws,

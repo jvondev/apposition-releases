@@ -9,7 +9,37 @@ function initMediaContinuity() {
     const dur = media.duration;
     return isFinite(dur) && dur > 15 && dur < 86400;
   };
-  const getMediaStorageKey = () => `apposition:last-media-time:${window.location.pathname}${window.location.search}`;
+  const getMediaStorageKey = () => {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("t");
+      return `apposition:last-media-time:${url.pathname}${url.search}`;
+    } catch {
+      return `apposition:last-media-time:${window.location.pathname}${window.location.search}`;
+    }
+  };
+  const getStoredTime = () => {
+    try {
+      const key = getMediaStorageKey();
+      const val = localStorage.getItem(key) || sessionStorage.getItem(key);
+      return val ? parseFloat(val) : 0;
+    } catch {
+      return 0;
+    }
+  };
+  const setStoredTime = (time) => {
+    try {
+      const key = getMediaStorageKey();
+      if (time > 0) {
+        localStorage.setItem(key, String(time));
+        sessionStorage.setItem(key, String(time));
+      } else {
+        localStorage.removeItem(key);
+        sessionStorage.removeItem(key);
+      }
+    } catch {
+    }
+  };
   const syncMediaTimestamp = (force = false) => {
     const now = Date.now();
     if (!force && now - lastMediaSyncAt < 3e3) return;
@@ -21,14 +51,15 @@ function initMediaContinuity() {
     if (primary && isFinite(primary.duration) && primary.duration > 0) {
       const t = primary.currentTime;
       const dur = primary.duration;
-      const validTime = t >= 5 && t <= dur - 5 ? t : 0;
-      try {
-        if (validTime > 0) {
-          sessionStorage.setItem(getMediaStorageKey(), String(validTime));
-        } else {
-          sessionStorage.removeItem(getMediaStorageKey());
-        }
-      } catch {
+      if (t < 5 && !hasRestoredMedia) {
+        return;
+      }
+      const isEnd = t >= dur - 5;
+      const validTime = !isEnd && t >= 5 ? t : 0;
+      if (isEnd) {
+        setStoredTime(0);
+      } else if (validTime > 0) {
+        setStoredTime(validTime);
       }
       const payload = {
         currentTime: validTime,
@@ -56,13 +87,22 @@ function initMediaContinuity() {
       hasRestoredMedia = true;
       return;
     }
-    let savedTime = 0;
-    try {
-      const stored = sessionStorage.getItem(getMediaStorageKey());
-      if (stored) savedTime = parseFloat(stored);
-    } catch {
-    }
+    const savedTime = getStoredTime();
     if (savedTime < 5) return;
+    const isYouTube = window.location.hostname.includes("youtube.com");
+    if (isYouTube) {
+      const moviePlayer = document.getElementById("movie_player") || window.moviePlayer;
+      if (moviePlayer && typeof moviePlayer.seekTo === "function" && typeof moviePlayer.getCurrentTime === "function") {
+        if (moviePlayer.getCurrentTime() < 3) {
+          try {
+            moviePlayer.seekTo(savedTime, true);
+            hasRestoredMedia = true;
+            return;
+          } catch {
+          }
+        }
+      }
+    }
     const mediaList = Array.from(
       document.querySelectorAll("video, audio")
     );
@@ -77,6 +117,12 @@ function initMediaContinuity() {
       }
     }
   };
+  window.addEventListener("yt-navigate-finish", () => {
+    lastRestoredUrl = "";
+    hasRestoredMedia = false;
+    setTimeout(tryRestoreMedia, 500);
+    setTimeout(tryRestoreMedia, 1500);
+  });
   window.addEventListener(
     "play",
     (e) => {
@@ -88,36 +134,17 @@ function initMediaContinuity() {
     },
     true
   );
-  window.addEventListener(
-    "pause",
-    (e) => {
-      if (e.target instanceof HTMLMediaElement) {
-        const anyPlaying = Array.from(
-          document.querySelectorAll("video, audio")
-        ).some(
-          (m) => !m.paused && !m.ended && m.currentTime > 0 && !m.muted
-        );
-        electron.ipcRenderer.send("pane.media-playing", anyPlaying);
-        syncMediaTimestamp(true);
-      }
-    },
-    true
-  );
-  window.addEventListener(
-    "ended",
-    (e) => {
-      if (e.target instanceof HTMLMediaElement) {
-        const anyPlaying = Array.from(
-          document.querySelectorAll("video, audio")
-        ).some(
-          (m) => !m.paused && !m.ended && m.currentTime > 0 && !m.muted
-        );
-        electron.ipcRenderer.send("pane.media-playing", anyPlaying);
-        syncMediaTimestamp(true);
-      }
-    },
-    true
-  );
+  const handleMediaStop = (e) => {
+    if (e.target instanceof HTMLMediaElement) {
+      const anyPlaying = Array.from(document.querySelectorAll("video, audio")).some(
+        (m) => !m.paused && !m.ended && m.currentTime > 0 && !m.muted
+      );
+      electron.ipcRenderer.send("pane.media-playing", anyPlaying);
+      syncMediaTimestamp(true);
+    }
+  };
+  window.addEventListener("pause", handleMediaStop, true);
+  window.addEventListener("ended", handleMediaStop, true);
   window.addEventListener("loadedmetadata", tryRestoreMedia, true);
   window.addEventListener("canplay", tryRestoreMedia, true);
   window.addEventListener(
@@ -193,6 +220,164 @@ function initScrollContinuity() {
   window.addEventListener("pagehide", () => syncScrollPosition(true));
   window.addEventListener("beforeunload", () => syncScrollPosition(true));
 }
+let lastReportedState = null;
+let reportTimer = null;
+let activeAudioContexts = 0;
+let activePeerConnections = 0;
+let activeStreamTracks = 0;
+function evaluateMediaStatus() {
+  try {
+    const mediaElements = Array.from(
+      document.querySelectorAll("video, audio")
+    );
+    const hasMedia = mediaElements.length > 0;
+    const mediaPlaying = mediaElements.some(
+      (m) => !m.paused && !m.ended && m.readyState > 1
+    );
+    const mediaAudible = mediaElements.some(
+      (m) => !m.paused && !m.ended && !m.muted && m.volume > 0.01
+    );
+    const isPlaying = hasMedia ? mediaPlaying : activeAudioContexts > 0;
+    const isAudible = hasMedia ? mediaAudible : activeAudioContexts > 0;
+    const hasLiveStream = mediaElements.some(
+      (m) => !m.paused && (!isFinite(m.duration) || m.duration <= 0 || m.duration > 86400)
+    );
+    const hasWebRtc = activePeerConnections > 0 || activeStreamTracks > 0;
+    return {
+      isPlaying,
+      isAudible,
+      hasLiveStream,
+      hasWebRtc
+    };
+  } catch {
+    return {
+      isPlaying: false,
+      isAudible: false,
+      hasLiveStream: false,
+      hasWebRtc: false
+    };
+  }
+}
+function scheduleReport(immediate = false) {
+  const checkAndEmit = () => {
+    reportTimer = null;
+    const current = evaluateMediaStatus();
+    const hasChanged = !lastReportedState || lastReportedState.isPlaying !== current.isPlaying || lastReportedState.isAudible !== current.isAudible || lastReportedState.hasLiveStream !== current.hasLiveStream || lastReportedState.hasWebRtc !== current.hasWebRtc;
+    if (hasChanged) {
+      lastReportedState = current;
+      try {
+        electron.ipcRenderer.send("pane.dynamic-media-status", current);
+      } catch {
+      }
+    }
+  };
+  if (immediate) {
+    if (reportTimer) clearTimeout(reportTimer);
+    checkAndEmit();
+  } else if (!reportTimer) {
+    reportTimer = setTimeout(checkAndEmit, 200);
+  }
+}
+function initMediaSensor() {
+  if (typeof window === "undefined") return;
+  if (window.self !== window.top) return;
+  const immediateEvents = ["play", "playing", "pause", "ended", "volumechange"];
+  const throttledEvents = ["timeupdate", "waiting", "canplay"];
+  immediateEvents.forEach((ev) => {
+    window.addEventListener(ev, () => scheduleReport(true), true);
+  });
+  throttledEvents.forEach((ev) => {
+    window.addEventListener(ev, () => scheduleReport(false), true);
+  });
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (AudioCtx && AudioCtx.prototype) {
+      const origResume = AudioCtx.prototype.resume;
+      const origSuspend = AudioCtx.prototype.suspend;
+      const origClose = AudioCtx.prototype.close;
+      AudioCtx.prototype.resume = function() {
+        if (this.state !== "running") {
+          activeAudioContexts = Math.max(1, activeAudioContexts + 1);
+          scheduleReport(true);
+        }
+        return origResume.call(this);
+      };
+      AudioCtx.prototype.suspend = function() {
+        activeAudioContexts = Math.max(0, activeAudioContexts - 1);
+        scheduleReport(false);
+        return origSuspend.call(this);
+      };
+      AudioCtx.prototype.close = function() {
+        activeAudioContexts = Math.max(0, activeAudioContexts - 1);
+        scheduleReport(false);
+        return origClose.call(this);
+      };
+    }
+  } catch {
+  }
+  try {
+    const OrigPeerConn = window.RTCPeerConnection || window.webkitRTCPeerConnection;
+    if (OrigPeerConn) {
+      const PatchedPeerConn = function(...args) {
+        const pc = new OrigPeerConn(...args);
+        activePeerConnections++;
+        scheduleReport(true);
+        pc.addEventListener("connectionstatechange", () => {
+          if (pc.connectionState === "closed" || pc.connectionState === "failed") {
+            activePeerConnections = Math.max(0, activePeerConnections - 1);
+            scheduleReport(true);
+          }
+        });
+        return pc;
+      };
+      PatchedPeerConn.prototype = OrigPeerConn.prototype;
+      const origClose = OrigPeerConn.prototype.close;
+      OrigPeerConn.prototype.close = function() {
+        activePeerConnections = Math.max(0, activePeerConnections - 1);
+        scheduleReport(true);
+        return origClose.call(this);
+      };
+      window.RTCPeerConnection = PatchedPeerConn;
+      if (window.webkitRTCPeerConnection) {
+        window.webkitRTCPeerConnection = PatchedPeerConn;
+      }
+    }
+  } catch {
+  }
+  try {
+    const md = navigator?.mediaDevices;
+    if (md) {
+      const trackStream = (stream) => {
+        stream.getTracks().forEach((track) => {
+          activeStreamTracks++;
+          scheduleReport(true);
+          track.addEventListener("ended", () => {
+            activeStreamTracks = Math.max(0, activeStreamTracks - 1);
+            scheduleReport(true);
+          }, { once: true });
+        });
+      };
+      if (md.getUserMedia) {
+        const origGUM = md.getUserMedia.bind(md);
+        md.getUserMedia = async (...args) => {
+          const stream = await origGUM(...args);
+          trackStream(stream);
+          return stream;
+        };
+      }
+      if (md.getDisplayMedia) {
+        const origGDM = md.getDisplayMedia.bind(md);
+        md.getDisplayMedia = async (...args) => {
+          const stream = await origGDM(...args);
+          trackStream(stream);
+          return stream;
+        };
+      }
+    }
+  } catch {
+  }
+  scheduleReport(true);
+}
 function initManifestHarvester() {
   try {
     const harvest = () => {
@@ -235,6 +420,280 @@ function initManifestHarvester() {
       });
     }
   } catch (err) {
+  }
+}
+const EMAIL_REGEX = /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/;
+function extractGoogleIdentity() {
+  const host = window.location.hostname.toLowerCase();
+  if (!host.includes("google.") && !host.includes("youtube.com")) return null;
+  let email;
+  let displayName;
+  let avatarUrl;
+  try {
+    const globals = window.GLOBALS;
+    if (Array.isArray(globals)) {
+      for (const item of globals) {
+        if (typeof item === "string") {
+          const m = item.match(EMAIL_REGEX);
+          if (m && !m[1].endsWith("@google.com")) {
+            email = m[1];
+            break;
+          }
+        }
+      }
+    }
+  } catch {
+  }
+  if (!email && host.includes("youtube.com")) {
+    try {
+      const ytcfg = window.ytcfg;
+      if (ytcfg && typeof ytcfg.get === "function") {
+        const u = ytcfg.get("USER_DISPLAY_NAME") || ytcfg.get("LOGGED_IN_USER");
+        if (typeof u === "string" && u.trim()) displayName = u.trim();
+      }
+      const handleEl = document.querySelector("#channel-handle, ytd-channel-name #text");
+      if (handleEl?.textContent?.trim()) {
+        const t = handleEl.textContent.trim();
+        if (t.startsWith("@")) displayName = t;
+      }
+    } catch {
+    }
+  }
+  if (!email) {
+    const el = document.querySelector(
+      'a[aria-label*="@"], div[aria-label*="@"], a[href*="SignOutOptions"], [data-email], #profileIdentifier, div[data-profile-identifier]'
+    );
+    if (el) {
+      const text = el.getAttribute("data-email") || el.getAttribute("aria-label") || el.innerText || el.getAttribute("title") || "";
+      const m = text.match(EMAIL_REGEX);
+      if (m && !m[1].endsWith("@google.com")) email = m[1];
+    }
+  }
+  if (!email) {
+    const input = document.querySelector('input[type="email"]');
+    if (input && input.value && EMAIL_REGEX.test(input.value)) {
+      email = input.value.trim();
+    }
+  }
+  const avatarEl = document.querySelector(
+    'a[href*="SignOutOptions"] img, img.gb_k, button#avatar-btn img, img[alt*="Google Account"]'
+  );
+  if (avatarEl?.src) avatarUrl = avatarEl.src;
+  if (email || displayName) {
+    return {
+      providerId: "google",
+      email,
+      displayName: displayName || email,
+      avatarUrl
+    };
+  }
+  return null;
+}
+function extractGithubIdentity() {
+  if (!window.location.hostname.includes("github.com")) return null;
+  const meta = document.querySelector('meta[name="user-login"]')?.getAttribute("content") || document.querySelector('meta[name="octolytics-actor-login"]')?.getAttribute("content");
+  if (meta && meta.trim()) {
+    const handle = `@${meta.trim().replace(/^@/, "")}`;
+    const avatar = document.querySelector("img.avatar-user")?.src;
+    return {
+      providerId: "github",
+      handle,
+      email: handle,
+      displayName: meta.trim(),
+      avatarUrl: avatar
+    };
+  }
+  return null;
+}
+function extractMicrosoftIdentity() {
+  const host = window.location.hostname.toLowerCase();
+  if (!host.includes("microsoft") && !host.includes("live.com") && !host.includes("office.com")) return null;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i) || "";
+      if (k.includes("msal") || k.includes("account")) {
+        const item = localStorage.getItem(k) || "";
+        const m = item.match(EMAIL_REGEX);
+        if (m) return { providerId: "microsoft", email: m[1], displayName: m[1] };
+      }
+    }
+  } catch {
+  }
+  const el = document.querySelector('#mectrl_currentAccount_secondary, [data-test-id="user-email"]');
+  if (el) {
+    const m = (el.textContent || "").match(EMAIL_REGEX);
+    if (m) return { providerId: "microsoft", email: m[1], displayName: m[1] };
+  }
+  return null;
+}
+function extractGenericIdentity() {
+  return extractGoogleIdentity() || extractGithubIdentity() || extractMicrosoftIdentity();
+}
+function initIdentityHarvester() {
+  try {
+    let lastDispatched = "";
+    const scanAndDispatch = () => {
+      const identity = extractGenericIdentity();
+      if (!identity) return;
+      const key = `${identity.providerId}:${identity.email || ""}:${identity.handle || ""}`;
+      if (key === lastDispatched) return;
+      lastDispatched = key;
+      electron.ipcRenderer.send("pane.identity-harvested", identity);
+    };
+    if (document.readyState === "complete" || document.readyState === "interactive") {
+      setTimeout(scanAndDispatch, 1e3);
+    } else {
+      window.addEventListener("DOMContentLoaded", () => setTimeout(scanAndDispatch, 1e3), { once: true });
+    }
+    window.addEventListener("load", () => setTimeout(scanAndDispatch, 1500), { once: true });
+  } catch {
+  }
+}
+const GENERIC_NOISE = /* @__PURE__ */ new Set([
+  "home",
+  "dashboard",
+  "overview",
+  "welcome",
+  "log in",
+  "login",
+  "sign in",
+  "signin",
+  "sign up",
+  "signup",
+  "app",
+  "menu",
+  "navigation",
+  "back",
+  "cancel",
+  "search",
+  "loading",
+  "untitled",
+  "new tab"
+]);
+function cleanCandidate(text) {
+  if (!text) return "";
+  const unreadCleaned = text.replace(/^\s*(\(\d+[\d,.]*\)|\[\d+[\d,.]*\]|[•*🔴])\s*/, "");
+  const collapsed = unreadCleaned.replace(/\s+/g, " ").trim();
+  if (collapsed.length < 2 || collapsed.length > 70) return "";
+  if (GENERIC_NOISE.has(collapsed.toLowerCase())) return "";
+  if (/^\d+$/.test(collapsed)) return "";
+  if (/^[a-f0-9-]{8,}$/i.test(collapsed)) return "";
+  return collapsed;
+}
+function probeActiveNavigation() {
+  const selectors = [
+    'nav [aria-current="page"]',
+    'aside [aria-current="page"]',
+    '[role="navigation"] [aria-current="page"]',
+    '[aria-current="page"]',
+    '[aria-current="location"]',
+    'nav [aria-selected="true"]',
+    'aside [aria-selected="true"]',
+    '[role="tree"] [aria-selected="true"]',
+    'aside [class*="selected"]',
+    'aside [class*="active"]',
+    'nav [class*="selected"]',
+    'nav [class*="active"]',
+    '[class*="sidebar"] [class*="selected"]',
+    '[class*="sidebar"] [class*="active"]'
+  ];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const text = cleanCandidate(el.innerText || el.textContent || "");
+      if (text && text.length >= 2 && text.length <= 40) return text;
+    }
+  }
+  return "";
+}
+function probeDocumentTitleInput() {
+  const inputSelectors = [
+    "#docs-title-widget input",
+    'input[aria-label*="Document title" i]',
+    'input[aria-label*="Board title" i]',
+    'input[aria-label*="Board name" i]',
+    'input[aria-label*="File name" i]',
+    'input[data-testid*="title" i]',
+    'input[data-testid*="board-title" i]',
+    'input[data-testid*="file-title" i]',
+    '[contenteditable][role="heading"]',
+    'h1[contenteditable="true"]',
+    '[data-content-editable-leaf="true"]'
+  ];
+  for (const sel of inputSelectors) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const val = el instanceof HTMLInputElement ? el.value : el.innerText || el.textContent || "";
+      const text = cleanCandidate(val);
+      if (text) return text;
+    }
+  }
+  return "";
+}
+function probeHeading() {
+  const headingSelectors = [
+    'h1:not([aria-hidden="true"])',
+    '[role="heading"][aria-level="1"]:not([aria-hidden="true"])',
+    "h2.hP",
+    '[data-testid="issue-title"]'
+  ];
+  for (const sel of headingSelectors) {
+    const el = document.querySelector(sel);
+    if (el) {
+      const text = cleanCandidate(el.innerText || el.textContent || "");
+      if (text) return text;
+    }
+  }
+  return "";
+}
+function harvestSemanticTitle() {
+  try {
+    const docTitle = probeDocumentTitleInput();
+    if (docTitle) return docTitle;
+    const navItem = probeActiveNavigation();
+    if (navItem) return navItem;
+    const heading = probeHeading();
+    if (heading) return heading;
+    const docTitleEl = cleanCandidate(document.title);
+    if (docTitleEl) return docTitleEl;
+  } catch {
+  }
+  return "";
+}
+function initSemanticTitleHarvester() {
+  try {
+    let lastDispatched = "";
+    const scanAndDispatch = () => {
+      const title = harvestSemanticTitle();
+      if (!title || title === lastDispatched) return;
+      lastDispatched = title;
+      electron.ipcRenderer.send("pane.semantic-title", { title, confidence: 1 });
+    };
+    if (document.readyState === "complete" || document.readyState === "interactive") {
+      setTimeout(scanAndDispatch, 600);
+      setTimeout(scanAndDispatch, 1800);
+    } else {
+      window.addEventListener("DOMContentLoaded", () => setTimeout(scanAndDispatch, 600), {
+        once: true
+      });
+      window.addEventListener("load", () => setTimeout(scanAndDispatch, 1500), { once: true });
+    }
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(scanAndDispatch, 400);
+    });
+    const titleEl = document.querySelector("title");
+    if (titleEl) {
+      observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+    } else if (document.head) {
+      observer.observe(document.head, { childList: true, subtree: true });
+    }
+    window.addEventListener("popstate", () => setTimeout(scanAndDispatch, 400), { passive: true });
+    window.addEventListener("hashchange", () => setTimeout(scanAndDispatch, 400), {
+      passive: true
+    });
+  } catch {
   }
 }
 try {
@@ -356,7 +815,10 @@ try {
   );
   initMediaContinuity();
   initScrollContinuity();
+  initMediaSensor();
   initManifestHarvester();
+  initIdentityHarvester();
+  initSemanticTitleHarvester();
   try {
     class ProxiedNotification extends EventTarget {
       static permission = "granted";
