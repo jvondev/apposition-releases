@@ -53,7 +53,8 @@ const IPC_CHANNELS = {
     SET_DEVICE_EMULATION: "view.setDeviceEmulation",
     SET_NETWORK_THROTTLE: "view.setNetworkThrottle",
     EXTRACT_READER_MODE: "view.extractReaderMode",
-    PICK_COLOR: "view.pickColor"
+    PICK_COLOR: "view.pickColor",
+    COPY_IMAGE: "view.copyImage"
   },
   SEARCH: {
     FIND_IN_ALL_PANES: "search.findInAllPanes",
@@ -85,8 +86,7 @@ const IPC_CHANNELS = {
     CHECK_PREMIUM: "licensing.checkPremium",
     IS_DEV: "licensing.isDev",
     GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
-    SAVE_ATTRIBUTION: "licensing.saveAttribution",
-    CHECK_FOR_UPDATES: "updater.check"
+    SAVE_ATTRIBUTION: "licensing.saveAttribution"
   },
   CHANGELOG: {
     GET_STATUS: "changelog.getStatus",
@@ -112,7 +112,15 @@ const IPC_CHANNELS = {
     HIDE: "tear-hide",
     COMMIT: "tear-commit"
   },
+  UPDATER: {
+    CHECK: "updater.check",
+    DOWNLOAD: "updater.download",
+    APPLY: "updater.apply",
+    GET_STATE: "updater.getState",
+    OPEN_EXTERNAL: "updater.openExternal"
+  },
   EVENTS: {
+    UPDATE_STATE_CHANGED: "app:update-state-changed",
     DEEP_LINK_WORKSPACE: "app.deep-link.workspace",
     OPEN_IN_NEW_PANE: "open-in-new-pane",
     TOAST: "app:toast",
@@ -124,6 +132,8 @@ const IPC_CHANNELS = {
     AUTH_COMPLETED: "app.auth-completed",
     PROFILES_UPDATED: "app.profiles-updated",
     CONTEXT_MENU_NATIVE: "view.context-menu-native",
+    CONTEXT_MENU_SHOW: "view.context-menu-show",
+    CONTEXT_MENU_DISMISS: "view.context-menu-dismiss",
     VIEW_FOCUS_WC: "view.focus-wc",
     SPLIT_PANE_WC: "app:split-pane-wc",
     MAXIMIZE_PANE_WC: "app:maximize-pane-wc",
@@ -191,7 +201,14 @@ function createIpcClient(ipcRenderer) {
       isDev: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.IS_DEV),
       getCheckoutUrl: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL),
       saveAttribution: (ref, affiliateId) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION, ref, affiliateId),
-      checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.CHECK_FOR_UPDATES)
+      checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.CHECK)
+    },
+    updater: {
+      getState: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.GET_STATE),
+      checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.CHECK),
+      downloadUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.DOWNLOAD),
+      applyUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.APPLY),
+      openExternal: (url) => ipcRenderer.invoke(IPC_CHANNELS.UPDATER.OPEN_EXTERNAL, url)
     },
     changelog: {
       getStatus: () => ipcRenderer.invoke(IPC_CHANNELS.CHANGELOG.GET_STATUS),
@@ -285,6 +302,22 @@ function createIpcEvents(ipcRenderer) {
       ipcRenderer.on(IPC_CHANNELS.EVENTS.CONTEXT_MENU_NATIVE, handler);
       return () => ipcRenderer.removeListener(
         IPC_CHANNELS.EVENTS.CONTEXT_MENU_NATIVE,
+        handler
+      );
+    },
+    onContextMenuShow: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.CONTEXT_MENU_SHOW, handler);
+      return () => ipcRenderer.removeListener(
+        IPC_CHANNELS.EVENTS.CONTEXT_MENU_SHOW,
+        handler
+      );
+    },
+    onContextMenuDismiss: (callback) => {
+      const handler = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.CONTEXT_MENU_DISMISS, handler);
+      return () => ipcRenderer.removeListener(
+        IPC_CHANNELS.EVENTS.CONTEXT_MENU_DISMISS,
         handler
       );
     },
@@ -622,7 +655,9 @@ function installGapPointerForwarding() {
         electron.ipcRenderer.send("airspace:chrome-clicked");
         return;
       }
-      isDraggingGuest = true;
+      if (ev.button === 0) {
+        isDraggingGuest = true;
+      }
       ev.preventDefault();
       electron.ipcRenderer.send(
         IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
@@ -690,12 +725,16 @@ function installGapPointerForwarding() {
   window.addEventListener(
     "contextmenu",
     (ev) => {
+      isDraggingGuest = false;
       if (isChrome(ev.clientX, ev.clientY)) return;
       ev.preventDefault();
-      electron.ipcRenderer.send(
-        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
-        buildForwardMsg("mouseup", ev)
-      );
+      ev.stopPropagation();
+      ev.stopImmediatePropagation();
+      electron.ipcRenderer.send("airspace:context-gesture", {
+        x: ev.clientX,
+        y: ev.clientY,
+        shiftKey: ev.shiftKey
+      });
     },
     { capture: true, passive: false }
   );
@@ -769,6 +808,18 @@ const api = {
   getCheckoutUrl: client.licensing.getCheckoutUrl,
   saveAttribution: client.licensing.saveAttribution,
   checkForUpdates: client.licensing.checkForUpdates,
+  updater: {
+    getState: client.updater.getState,
+    checkForUpdates: client.updater.checkForUpdates,
+    downloadUpdate: client.updater.downloadUpdate,
+    applyUpdate: client.updater.applyUpdate,
+    openExternal: client.updater.openExternal
+  },
+  onUpdateStateChanged: (callback) => {
+    const handler = (_, data) => callback(data?.state);
+    electron.ipcRenderer.on(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, handler);
+  },
   // Changelog & What's New
   getChangelogStatus: client.changelog.getStatus,
   markChangelogSeen: client.changelog.markSeen,
@@ -866,10 +917,11 @@ const api = {
     setAudioMuted: (paneId, muted) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, paneId, muted),
     captureFullPage: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, paneId),
     captureViewport: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.CAPTURE_VIEWPORT, paneId),
-    setDeviceEmulation: (paneId, device) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION, paneId, device),
+    setDeviceEmulation: (paneId, device, orientation, scale) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION, paneId, device, orientation, scale),
     setNetworkThrottle: (paneId, profile) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, paneId, profile),
     extractReaderMode: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, paneId),
-    pickColor: (paneId, x, y) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.PICK_COLOR, paneId, x, y)
+    pickColor: (paneId, x, y) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.PICK_COLOR, paneId, x, y),
+    copyImage: (paneId, x, y, srcURL) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.COPY_IMAGE, paneId, x, y, srcURL)
   },
   // Multi-Pane Cross-Split Search & Memory Optimizer
   findInAllPanes: (query, opts) => electron.ipcRenderer.send(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, query, opts),
@@ -914,6 +966,8 @@ const api = {
   onAuthCompleted: events.onAuthCompleted,
   onProfilesUpdated: events.onProfilesUpdated,
   onNativeContextMenu: events.onNativeContextMenu,
+  onContextMenuShow: events.onContextMenuShow,
+  onContextMenuDismiss: events.onContextMenuDismiss,
   onViewFocusWc: events.onViewFocusWc,
   onSplitPaneWc: events.onSplitPaneWc,
   onMaximizePaneWc: events.onMaximizePaneWc,

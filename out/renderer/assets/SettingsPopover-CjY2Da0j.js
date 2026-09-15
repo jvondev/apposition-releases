@@ -1,5 +1,195 @@
-import { c as createSignal, i as insert, a as createComponent, S as Show, b as createRenderEffect, s as setAttribute, l as layoutStore, d as setLayoutStore, m as memo, t as template, e as delegateEvents, F as For, W as WorkspaceIcon, f as createEffect, A as AppIcon, g as frecencyEngine, h as getAppNameFromUrl, j as addEventListener, k as setStyleProperty, o as onMount, P as ProfileForm, n as activeShortcuts, p as className, q as saveShortcut, r as onCleanup, u as style, v as use, w as Portal } from "./index-BaBsT-S7.js";
-var _tmpl$$6 = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Application Updates</span><button class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-3 py-1.5 rounded-md shadow-sm hover:bg-neutral-50 transition-colors cursor-pointer">Check for Updates`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, b as applyUpdate, o as openExternalUrl, t as template, e as delegateEvents, f as onMount, i as initUpdateStore, g as insert, h as Show, m as memo, j as createRenderEffect, s as setStyleProperty, k as createSignal, l as setAttribute, n as layoutStore, p as setLayoutStore, F as For, W as WorkspaceIcon, q as createEffect, A as AppIcon, r as frecencyEngine, v as getAppNameFromUrl, w as addEventListener, P as ProfileForm, x as activeShortcuts, y as className, z as saveShortcut, B as onCleanup, C as style, D as use, E as Portal } from "./index-BvhkRUZr.js";
+var _tmpl$$8 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 active:scale-[0.98] border border-neutral-300/80 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Check for Updates`), _tmpl$2$8 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 opacity-70 cursor-not-allowed"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-neutral-600"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>Checking...`), _tmpl$3$8 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Download Update`), _tmpl$4$5 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg opacity-80 cursor-not-allowed">Downloading...`), _tmpl$5$4 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Restart to Apply`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-neutral-900 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Download Package`), _tmpl$7$4 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Retry Check`);
+function UpdateActionButton() {
+  return createComponent(Switch, {
+    get children() {
+      return [createComponent(Match, {
+        get when() {
+          return updateStore.status === "idle";
+        },
+        get children() {
+          var _el$ = _tmpl$$8();
+          _el$.$$click = () => checkForUpdates();
+          return _el$;
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "checking";
+        },
+        get children() {
+          return _tmpl$2$8();
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "available";
+        },
+        get children() {
+          var _el$3 = _tmpl$3$8();
+          _el$3.$$click = () => downloadUpdate();
+          return _el$3;
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "downloading";
+        },
+        get children() {
+          return _tmpl$4$5();
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "ready";
+        },
+        get children() {
+          var _el$5 = _tmpl$5$4();
+          _el$5.$$click = () => applyUpdate();
+          return _el$5;
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "manual-action-required";
+        },
+        get children() {
+          var _el$6 = _tmpl$6$4();
+          _el$6.$$click = () => {
+            const s = updateStore;
+            if (s.downloadUrl) openExternalUrl(s.downloadUrl);
+          };
+          return _el$6;
+        }
+      }), createComponent(Match, {
+        get when() {
+          return updateStore.status === "error";
+        },
+        get children() {
+          var _el$7 = _tmpl$7$4();
+          _el$7.$$click = () => checkForUpdates();
+          return _el$7;
+        }
+      })];
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$7 = /* @__PURE__ */ template(`<p class="text-[11px] text-neutral-400 mt-1 pl-3">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span><span class="font-medium text-neutral-800">`), _tmpl$3$7 = /* @__PURE__ */ template(`<p class=text-neutral-500>Contacting release server for latest version information...`), _tmpl$4$4 = /* @__PURE__ */ template(`<div class=space-y-1><p class="font-medium text-neutral-900">A new version (<!>) is ready to download.</p><p class="text-neutral-500 text-[11px]">Download and install to receive the latest features, improvements, and fixes.`), _tmpl$5$3 = /* @__PURE__ */ template(`<div class="space-y-2 pt-1"><div class="flex justify-between text-[11px] font-medium text-neutral-700"><span>Downloading update...</span><span>%</span></div><div class="w-full bg-neutral-200 h-2 rounded-full overflow-hidden border border-neutral-300/50"><div class="bg-neutral-900 h-full rounded-full transition-all duration-300 ease-out">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200/80 p-2.5 rounded-lg font-medium"><span class="w-2 h-2 rounded-full bg-emerald-600 shrink-0"></span><span>Update downloaded and verified. Restart Apposition to apply changes.`), _tmpl$7$3 = /* @__PURE__ */ template(`<p class="text-[11px] font-mono text-neutral-600 bg-neutral-100 px-2 py-1 rounded">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="space-y-1.5 bg-white border border-neutral-200 p-2.5 rounded-lg"><p class="font-medium text-neutral-900">Version <!> is available for manual download.`), _tmpl$9$2 = /* @__PURE__ */ template(`<p class="text-red-700 font-medium text-[11px]">`), _tmpl$0$1 = /* @__PURE__ */ template(`<div class="bg-neutral-50 border border-neutral-200/80 rounded-[14px] p-4.5 space-y-3.5 shadow-2xs"><div class="flex items-center justify-between"><div class="flex items-center gap-2"><span class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Application Updates</span><span class="text-[11px] font-mono font-medium text-neutral-600 bg-white border border-neutral-200 px-2 py-0.5 rounded-md shadow-2xs">v</span></div></div><div class="text-xs text-neutral-600">`);
+function UpdateCard() {
+  onMount(() => {
+    initUpdateStore();
+  });
+  return (() => {
+    var _el$ = _tmpl$0$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
+    _el$5.firstChild;
+    var _el$7 = _el$2.nextSibling;
+    insert(_el$5, () => updateStore.currentVersion, null);
+    insert(_el$2, createComponent(UpdateActionButton, {}), null);
+    insert(_el$7, createComponent(Switch, {
+      get children() {
+        return [createComponent(Match, {
+          get when() {
+            return updateStore.status === "idle";
+          },
+          get children() {
+            var _el$8 = _tmpl$2$7(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+            insert(_el$1, () => updateStore.isDev ? "Running in development mode (updates disabled)." : "Apposition is up to date with the latest release.");
+            insert(_el$8, createComponent(Show, {
+              get when() {
+                return updateStore.lastCheckedAt;
+              },
+              get children() {
+                var _el$10 = _tmpl$$7();
+                insert(_el$10, () => {
+                  const ts = updateStore.lastCheckedAt;
+                  if (!ts) return null;
+                  const diff = Math.floor((Date.now() - ts) / 1e3);
+                  if (diff < 60) return "Checked just now";
+                  if (diff < 3600) return `Checked ${Math.floor(diff / 60)}m ago`;
+                  return `Checked ${new Date(ts).toLocaleTimeString([], {
+                    hour: "numeric",
+                    minute: "2-digit"
+                  })}`;
+                });
+                return _el$10;
+              }
+            }), null);
+            return _el$8;
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "checking";
+          },
+          get children() {
+            return _tmpl$3$7();
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "available";
+          },
+          get children() {
+            var _el$12 = _tmpl$4$4(), _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+            _el$16.nextSibling;
+            insert(_el$13, () => updateStore.targetVersion, _el$16);
+            return _el$12;
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "downloading";
+          },
+          get children() {
+            var _el$17 = _tmpl$5$3(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$18.nextSibling, _el$23 = _el$22.firstChild;
+            insert(_el$20, () => updateStore.percent || 0, _el$21);
+            insert(_el$20, createComponent(Show, {
+              get when() {
+                return updateStore.bytesPerSec;
+              },
+              get children() {
+                return [" ", "· ", memo(() => Math.round(updateStore.bytesPerSec / (1024 * 1024) * 10) / 10), " MB/s"];
+              }
+            }), null);
+            createRenderEffect((_$p) => setStyleProperty(_el$23, "width", `${updateStore.percent || 0}%`));
+            return _el$17;
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "ready";
+          },
+          get children() {
+            return _tmpl$6$3();
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "manual-action-required";
+          },
+          get children() {
+            var _el$25 = _tmpl$8$3(), _el$26 = _el$25.firstChild, _el$27 = _el$26.firstChild, _el$29 = _el$27.nextSibling;
+            _el$29.nextSibling;
+            insert(_el$26, () => updateStore.targetVersion, _el$29);
+            insert(_el$25, createComponent(Show, {
+              get when() {
+                return updateStore.terminalCommand;
+              },
+              get children() {
+                var _el$30 = _tmpl$7$3();
+                insert(_el$30, () => updateStore.terminalCommand);
+                return _el$30;
+              }
+            }), null);
+            return _el$25;
+          }
+        }), createComponent(Match, {
+          get when() {
+            return updateStore.status === "error";
+          },
+          get children() {
+            var _el$31 = _tmpl$9$2();
+            insert(_el$31, () => updateStore.message || "An error occurred while checking for updates.");
+            return _el$31;
+          }
+        })];
+      }
+    }));
+    return _el$;
+  })();
+}
+var _tmpl$$6 = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class=mt-4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const [deactivating, setDeactivating] = createSignal(false);
   const handleDeactivate = async () => {
@@ -36,29 +226,10 @@ function AccountTab(props) {
       return dateStr;
     }
   };
-  const handleCheckUpdates = async () => {
-    window.dispatchEvent(new CustomEvent("app:toast", {
-      detail: {
-        message: "Checking for updates...",
-        type: "success"
-      }
-    }));
-    try {
-      const res = await window.api?.checkForUpdates?.();
-      if (res && !res.success) throw new Error();
-    } catch {
-      window.dispatchEvent(new CustomEvent("app:toast", {
-        detail: {
-          message: "Update check failed",
-          type: "error"
-        }
-      }));
-    }
-  };
   return (() => {
     var _el$ = _tmpl$8$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$2.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
-    var _el$30 = _el$9.nextSibling, _el$31 = _el$30.firstChild, _el$32 = _el$31.firstChild, _el$33 = _el$32.nextSibling;
+    var _el$30 = _el$9.nextSibling;
     insert(_el$3, createComponent(Show, {
       get when() {
         return layoutStore.licenseState?.customer?.avatar_url;
@@ -171,7 +342,7 @@ function AccountTab(props) {
         return _el$27;
       }
     }), null);
-    _el$33.$$click = handleCheckUpdates;
+    insert(_el$30, createComponent(UpdateCard, {}));
     return _el$;
   })();
 }

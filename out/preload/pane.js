@@ -696,6 +696,120 @@ function initSemanticTitleHarvester() {
   } catch {
   }
 }
+const APP_MENU_SELECTORS = [
+  ":popover-open",
+  "dialog[open]",
+  "[role='menu']",
+  "[role='listbox']",
+  "[role='dialog']",
+  "[data-radix-popper-content-wrapper]",
+  ".goog-menu",
+  ".docs-material-menu",
+  ".monaco-menu-container",
+  ".ytp-contextmenu",
+  ".ytp-popup",
+  ".vjs-contextmenu",
+  ".figma-menu",
+  ".context-menu",
+  ".contextMenu",
+  ".dropdown-menu",
+  "[data-menu-container]"
+].join(",");
+function isAnyMenuVisible() {
+  try {
+    const list = document.querySelectorAll(APP_MENU_SELECTORS);
+    for (let i = 0; i < list.length; i++) {
+      const el = list[i];
+      const visible = typeof el.checkVisibility === "function" ? el.checkVisibility() : el.offsetParent !== null || el.offsetWidth > 0;
+      if (visible) return true;
+    }
+  } catch {
+  }
+  return false;
+}
+let probeInstalled = false;
+function initPaneContextMenuProbe() {
+  if (probeInstalled) return;
+  probeInstalled = true;
+  window.addEventListener(
+    "contextmenu",
+    (ev) => {
+      const shiftKey = ev.shiftKey;
+      const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
+      const target = path[0] || ev.target;
+      let linkEl = null;
+      let imgEl = null;
+      let isVideoOrPlayer = false;
+      let isCanvas = false;
+      let isAppSurface = false;
+      let isEditable = false;
+      let clickedInsideMenu = false;
+      for (const node of path) {
+        if (!(node instanceof HTMLElement || node instanceof SVGElement)) continue;
+        if (!linkEl && node instanceof HTMLAnchorElement && node.href) linkEl = node;
+        if (!imgEl && node instanceof HTMLImageElement && node.src) imgEl = node;
+        if (!isVideoOrPlayer && (node instanceof HTMLVideoElement || node instanceof HTMLAudioElement || node.matches?.(
+          "video, audio, .html5-video-player, ytd-player, .ytp-player-content, .ytp-cued-thumbnail-overlay, [data-player], .vjs-tech, .plyr"
+        ))) {
+          isVideoOrPlayer = true;
+        }
+        if (!isCanvas && (node instanceof HTMLCanvasElement || node.matches?.("canvas, .figma-canvas, [data-canvas]"))) {
+          isCanvas = true;
+        }
+        if (!isAppSurface && node.matches?.(
+          "[role='application'], .docs-editor, .kix-appview, .kix-canvas-tile-content, .monaco-editor, [data-lexical-editor], .notion-page-content"
+        )) {
+          isAppSurface = true;
+        }
+        if (!clickedInsideMenu && node.matches?.(
+          "[role='menu'], [role='menuitem'], .ytp-contextmenu, .ytp-popup, .figma-menu, .context-menu, .dropdown-menu, dialog[open]"
+        )) {
+          clickedInsideMenu = true;
+        }
+        if (!isEditable && node instanceof HTMLElement && (node.isContentEditable || node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) {
+          isEditable = true;
+        }
+      }
+      const selection = window.getSelection()?.toString().trim() || "";
+      const menuAlreadyOpen = clickedInsideMenu || isAnyMenuVisible();
+      queueMicrotask(() => {
+        const isPrevented = ev.defaultPrevented;
+        if (shiftKey) {
+          electron.ipcRenderer.send("guest:context-probe", {
+            classification: "FORCE_OVERRIDE",
+            linkURL: linkEl?.href || "",
+            srcURL: imgEl?.src || "",
+            selectionText: selection,
+            targetTag: target?.tagName || "",
+            isCanvas,
+            isVideoOrPlayer,
+            isAppSurface,
+            isEditable
+          });
+          return;
+        }
+        const menuNowOpen = isAnyMenuVisible();
+        const hasActiveMenu = menuAlreadyOpen || menuNowOpen;
+        const isInteractiveApp = isCanvas || isVideoOrPlayer || isAppSurface || hasActiveMenu || isPrevented;
+        const classification = isInteractiveApp ? "APP_ACTIVE" : "STANDARD";
+        electron.ipcRenderer.send("guest:context-probe", {
+          classification,
+          linkURL: linkEl?.href || "",
+          srcURL: imgEl?.src || "",
+          selectionText: selection,
+          targetTag: target?.tagName || "",
+          isCanvas,
+          isVideoOrPlayer,
+          isAppSurface,
+          hasAriaMenu: hasActiveMenu,
+          isMenuAlreadyOpen: menuAlreadyOpen,
+          isEditable
+        });
+      });
+    },
+    { capture: true, passive: false }
+  );
+}
 try {
   electron.webFrame.executeJavaScript(`(function() {
     try {
@@ -819,6 +933,7 @@ try {
   initManifestHarvester();
   initIdentityHarvester();
   initSemanticTitleHarvester();
+  initPaneContextMenuProbe();
   try {
     class ProxiedNotification extends EventTarget {
       static permission = "granted";

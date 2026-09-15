@@ -1,24 +1,41 @@
 [
   {
-    "version": "1.3.1",
-    "tag": "v1.3.1",
-    "title": "Apposition v1.3.1",
-    "publishedAt": "2026-09-12",
+    "version": "1.3.2",
+    "tag": "v1.3.2",
+    "title": "Apposition v1.3.2",
+    "publishedAt": "2026-09-15",
+    "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.3.2/context-menu.webp",
     "categories": [
       {
         "category": "Features",
         "items": [
           {
-            "title": "Persistent Media Playback Continuity",
-            "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+            "title": "Compact Context Menus",
+            "description": "Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."
           },
           {
-            "title": "Interactive Audio Equalizer & Smart Indicator",
-            "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+            "title": "Adaptive Tool Memory",
+            "description": "Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."
           },
           {
-            "title": "Communicator App Reload",
-            "description": "Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."
+            "title": "Precision Color Loupe",
+            "description": "Added a high-precision pixel loupe tool to sample colors directly from any workspace panel and copy color codes directly to the clipboard."
+          },
+          {
+            "title": "Modernized Reader Mode",
+            "description": "Distraction-free reading view now features a floating capsule header with reading time estimates, source links, dynamic text sizing, and three calibrated surfaces (White, Sepia, and Charcoal)."
+          },
+          {
+            "title": "Device Hardware Emulation",
+            "description": "Preview and test web pages across simulated mobile and tablet screen dimensions (iPhone, Pixel, and iPad) with automatic display fitting, orientation switching, hardware bezels, and one-key desktop escape."
+          },
+          {
+            "title": "Progressive Split-Screen Showcase",
+            "description": "Interactive app directory now supports live split-screen previewing (up to 4 apps side-by-side or in a 2x2 grid) and dynamic tab creation for comparing enterprise and productivity tools."
+          },
+          {
+            "title": "Seamless Auto-Updates",
+            "description": "In-app updates now download automatically in the background with discreet notifications, live transfer speed, progress tracking, and one-click restart when ready."
           }
         ]
       },
@@ -26,16 +43,40 @@
         "category": "Improvements",
         "items": [
           {
-            "title": "Fluid Drag-and-Drop Spatial Previews",
-            "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
+            "title": "Native Context Arbiter",
+            "description": "Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application's native menu on the first click, while a consecutive click opens Apposition's workspace menu."
           },
           {
-            "title": "Tactile Edge Navigation Shelves",
-            "description": "Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."
+            "title": "Developer Tools Submenu",
+            "description": "Specialized site and developer inspection tools are organized inside a dedicated submenu, keeping the primary workspace menu clean and accessible for non-technical workflows."
           },
           {
-            "title": "Real-Time Profile Details",
-            "description": "The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."
+            "title": "Clean Media & Link Actions",
+            "description": "Right-clicking images and links organizes copy and navigation actions into clean, dedicated submenus to prevent menu clutter."
+          },
+          {
+            "title": "Shift Bypass Shortcut",
+            "description": "Holding Shift while right-clicking anywhere instantly presents Apposition's workspace menu, bypassing in-page menus."
+          },
+          {
+            "title": "Empty Panel Context Menu",
+            "description": "Right-clicking empty workspace panels provides instant workspace and layout controls, while preserving native text selection inside input fields."
+          },
+          {
+            "title": "Instant Split Hub Access",
+            "description": "Creating a split pane immediately loads the workspace hub with instant command bar focus, keyboard shortcuts, and app catalog access."
+          },
+          {
+            "title": "High-Contrast Tab Depth",
+            "description": "Tab icons now render inside a crisp, high-contrast container with refined borders and physical depth, ensuring dark brand marks and favicons remain legible across all workspace themes."
+          },
+          {
+            "title": "Dedicated Full App Catalog",
+            "description": "The full 50+ application catalog is accessible via a dedicated view at the bottom of the directory with smooth category navigation."
+          },
+          {
+            "title": "Synchronized Update Controls",
+            "description": "Synchronized update controls across Settings and the Release Notes viewer, ensuring consistent version status and one-click installation from either view."
           }
         ]
       },
@@ -43,48 +84,24 @@
         "category": "Bug Fixes",
         "items": [
           {
-            "title": "Automatic Account Identification",
-            "description": "Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."
-          },
-          {
-            "title": "Workspace Airspace & Transitions",
-            "description": "Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."
-          },
-          {
-            "title": "Continuous Background Web Sessions",
-            "description": "Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."
-          },
-          {
-            "title": "Communicator Popovers & Settings",
-            "description": "Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."
-          },
-          {
-            "title": "Stable Drag Focus & Screen-Edge Navigation",
-            "description": "Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."
-          },
-          {
-            "title": "Intelligent Semantic Tab Naming",
-            "description": "Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."
-          },
-          {
-            "title": "Intelligent Omnibar & Search Navigation",
-            "description": "Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."
+            "title": "Clipboard Image Copying",
+            "description": "Copying images directly from web pages to the clipboard now functions reliably across all websites."
           }
         ]
       }
     ],
     "highlights": [
       {
-        "title": "Persistent Media Playback Continuity",
-        "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+        "title": "Compact Context Menus",
+        "description": "Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."
       },
       {
-        "title": "Interactive Audio Equalizer & Smart Indicator",
-        "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+        "title": "Adaptive Tool Memory",
+        "description": "Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."
       },
       {
-        "title": "Fluid Drag-and-Drop Spatial Previews",
-        "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
+        "title": "Native Context Arbiter",
+        "description": "Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application's native menu on the first click, while a consecutive click opens Apposition's workspace menu."
       }
     ]
   },

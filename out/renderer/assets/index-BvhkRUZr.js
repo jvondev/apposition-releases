@@ -3644,6 +3644,83 @@ function calculateSpatialRailLayout(input, customConfig) {
     isOmniFocused: Boolean(input.isOmniFocused)
   };
 }
+function clampMenuPosition(target, menu, viewport, margin = 8) {
+  const safeW = Math.max(1, viewport.width);
+  const safeH = Math.max(1, viewport.height);
+  const maxX = Math.max(margin, safeW - menu.width - margin);
+  const maxY = Math.max(margin, safeH - menu.height - margin);
+  let x = target.x;
+  if (x > maxX) {
+    x = Math.max(margin, Math.min(target.x - menu.width, maxX));
+  } else {
+    x = Math.max(margin, Math.min(x, maxX));
+  }
+  let y = target.y;
+  if (y > maxY) {
+    y = Math.max(margin, Math.min(target.y - menu.height, maxY));
+  } else {
+    y = Math.max(margin, Math.min(y, maxY));
+  }
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  };
+}
+function calculateSubmenuPosition(parentRect, submenu, viewport, margin = 8) {
+  const safeW = Math.max(1, viewport.width);
+  const safeH = Math.max(1, viewport.height);
+  const maxX = Math.max(margin, safeW - submenu.width - margin);
+  const maxY = Math.max(margin, safeH - submenu.height - margin);
+  let x = parentRect.x + parentRect.width + 2;
+  if (x > maxX) {
+    x = Math.max(margin, Math.min(parentRect.x - submenu.width - 2, maxX));
+  } else {
+    x = Math.max(margin, x);
+  }
+  let y = parentRect.y;
+  if (y > maxY) {
+    const bottomAligned = parentRect.y + parentRect.height - submenu.height;
+    y = Math.max(margin, Math.min(bottomAligned, maxY));
+  } else {
+    y = Math.max(margin, y);
+  }
+  return {
+    x: Math.round(x),
+    y: Math.round(y)
+  };
+}
+function assertValidRotaryState(state) {
+  const validLayout = ["split_right", "split_bottom", "maximize"];
+  const validPage = ["reader_mode", "capture_full", "capture_viewport", "pick_color"];
+  if (!validLayout.includes(state.layout)) {
+    throw new Error(`Invariant I6 violated: invalid layout tool ${state.layout}`);
+  }
+  if (!validPage.includes(state.pageTool)) {
+    throw new Error(`Invariant I6 violated: invalid page tool ${state.pageTool}`);
+  }
+}
+const initialRotaryState = {
+  layout: "split_right",
+  pageTool: "reader_mode"
+};
+function rotaryReducer(state, action) {
+  switch (action.type) {
+    case "ROTATE_LAYOUT":
+      return { ...state, layout: action.tool };
+    case "ROTATE_PAGE_TOOL":
+      return { ...state, pageTool: action.tool };
+    case "SET_ROTARY_STATE":
+      return {
+        ...state,
+        layout: action.state.layout ?? state.layout,
+        pageTool: action.state.pageTool ?? state.pageTool
+      };
+    case "RESET_ROTARY":
+      return initialRotaryState;
+    default:
+      return state;
+  }
+}
 function findSpatialTargetPane(activeId, dir, treeOverride) {
   const tree = {
     rootId: layoutStore.rootId ? asPaneId(layoutStore.rootId) : null,
@@ -4164,6 +4241,30 @@ class AirspaceCoordinator {
         }
       }
     }
+    const deviceScreen = document.getElementById(`device-screen-${paneId}`);
+    if (deviceScreen) {
+      const dr = deviceScreen.getBoundingClientRect();
+      if (dr.width > 0 && dr.height > 0) {
+        return {
+          x: Math.round(dr.left),
+          y: Math.round(dr.top),
+          width: Math.round(dr.width),
+          height: Math.round(dr.height)
+        };
+      }
+    }
+    const container = reg.getContainerRef();
+    if (container?.getAttribute("data-device-emulated") === "true") {
+      const r2 = container.getBoundingClientRect();
+      if (r2.width > 0 && r2.height > 0) {
+        return {
+          x: Math.round(r2.left),
+          y: Math.round(r2.top),
+          width: Math.round(r2.width),
+          height: Math.round(r2.height)
+        };
+      }
+    }
     const tr = target.getBoundingClientRect();
     if (tr.width > 0 && tr.height > 0 && tr.left >= -50 && tr.top >= -50) {
       return {
@@ -4173,7 +4274,6 @@ class AirspaceCoordinator {
         height: Math.round(tr.height)
       };
     }
-    const container = reg.getContainerRef();
     if (!container) {
       return { x: -1e4, y: -1e4, width: 100, height: 100 };
     }
@@ -4189,7 +4289,14 @@ class AirspaceCoordinator {
     return { x: -1e4, y: -1e4, width: 100, height: 100 };
   }
   syncPane(paneId) {
+    const reg = this.panes.get(paneId);
     const bounds = this.computeBounds(paneId);
+    if (reg?.lastBounds && reg.lastBounds.x === bounds.x && reg.lastBounds.y === bounds.y && reg.lastBounds.width === bounds.width && reg.lastBounds.height === bounds.height) {
+      return;
+    }
+    if (reg) {
+      reg.lastBounds = bounds;
+    }
     window.api?.view?.setBounds(paneId, bounds);
   }
   syncAll() {
@@ -4217,6 +4324,7 @@ class AirspaceCoordinator {
 const airspaceCoordinator = new AirspaceCoordinator();
 if (typeof window !== "undefined") {
   window.addEventListener("resize", () => airspaceCoordinator.scheduleSync());
+  window.addEventListener("scroll", () => airspaceCoordinator.scheduleSync(), true);
   window.addEventListener("app:layout-sync", () => airspaceCoordinator.scheduleSettlementSync());
   window.addEventListener("pane.force-sync-bounds", () => airspaceCoordinator.scheduleSettlementSync());
   window.addEventListener("pane-target-mounted", () => airspaceCoordinator.scheduleSettlementSync());
@@ -5063,6 +5171,28 @@ function useWorkspaceLayout(state, dependencies) {
       );
     }
   };
+  onMount(() => {
+    const handleSplitEvent = (e) => {
+      if (e.detail?.direction) {
+        mutator.handleSplit(
+          e.detail.paneId,
+          e.detail.direction,
+          e.detail.initialUrl
+        );
+      }
+    };
+    const handleCloseEvent = (e) => {
+      if (e.detail?.paneId) {
+        mutator.handleClose(e.detail.paneId);
+      }
+    };
+    window.addEventListener("app:split-pane", handleSplitEvent);
+    window.addEventListener("app:close-pane", handleCloseEvent);
+    onCleanup(() => {
+      window.removeEventListener("app:split-pane", handleSplitEvent);
+      window.removeEventListener("app:close-pane", handleCloseEvent);
+    });
+  });
   return {
     ...mutator,
     ...templates,
@@ -5109,6 +5239,13 @@ function createDemoNavigation(state, dependencies) {
   };
   const demoSwitchTo = async (wsId, tabId, mockTabs, workspaceName) => {
     if (activeWorkspace() === wsId && state.activeTabId() === tabId) {
+      setTabs(mockTabs);
+      await loadNodesForTab(tabId, mockTabs);
+      if (window.IS_WEB_DEMO) {
+        window.dispatchEvent(
+          new CustomEvent("demo:tab-switched", { detail: tabId })
+        );
+      }
       return;
     }
     const currentWs = activeWorkspace();
@@ -5150,6 +5287,11 @@ function createDemoNavigation(state, dependencies) {
       await performTransition2("horizontal", direction, updateState);
     }
     setLayoutStore("isTransitioning", false);
+    if (window.IS_WEB_DEMO) {
+      window.dispatchEvent(
+        new CustomEvent("demo:tab-switched", { detail: tabId })
+      );
+    }
     if (!window.IS_WEB_DEMO) {
       focusPane(state.activePaneId(), layoutStore.nodes[state.activePaneId()]);
     }
@@ -7914,7 +8056,7 @@ function matchAccelerator(acc, isMac) {
     isMac
   );
 }
-var _tmpl$$1D = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$18 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$P = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$D = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0 text-neutral-800 dark:text-neutral-200"><svg xmlns=http://www.w3.org/2000/svg viewBox="0 0 100 100"fill=currentColor class="w-[14px] h-[14px]"><path d="M 26 18 H 50.7 A 1.8 1.8 0 0 1 52.43 20.28 L 35.88 79.95 A 2.8 2.8 0 0 1 33.19 82 H 26 A 8 8 0 0 1 18 74 V 26 A 8 8 0 0 1 26 18 Z"></path><path d="M 74 82 H 49.3 A 1.8 1.8 0 0 1 47.57 79.72 L 64.12 20.05 A 2.8 2.8 0 0 1 66.81 18 H 74 A 8 8 0 0 1 82 26 V 74 A 8 8 0 0 1 74 82 Z"></path></svg></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
+var _tmpl$$1R = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="M9 9h12">`), _tmpl$2$1d = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3">`), _tmpl$3$R = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M9 3v18"></path><path d="m13 9 3 3-3 3">`), _tmpl$4$F = /* @__PURE__ */ template(`<div id=ui-hub><button class="group relative w-[26px] h-[26px] rounded-lg hover:bg-neutral-100 dark:hover:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-400 transition-all active:scale-95"style=-webkit-app-region:no-drag><div class="relative w-full h-full flex items-center justify-center"><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-100 group-hover:opacity-0 text-neutral-800 dark:text-neutral-200"><svg xmlns=http://www.w3.org/2000/svg viewBox="0 0 100 100"fill=currentColor class="w-[14px] h-[14px]"><path d="M 26 18 H 50.7 A 1.8 1.8 0 0 1 52.43 20.28 L 35.88 79.95 A 2.8 2.8 0 0 1 33.19 82 H 26 A 8 8 0 0 1 18 74 V 26 A 8 8 0 0 1 26 18 Z"></path><path d="M 74 82 H 49.3 A 1.8 1.8 0 0 1 47.57 79.72 L 64.12 20.05 A 2.8 2.8 0 0 1 66.81 18 H 74 A 8 8 0 0 1 82 26 V 74 A 8 8 0 0 1 74 82 Z"></path></svg></div><div class="absolute inset-0 flex items-center justify-center transition-opacity duration-200 opacity-0 group-hover:opacity-100 text-neutral-800 dark:text-neutral-200">`);
 function AppUiHub(props) {
   const cycleMode = () => {
     const current = props.uiMode();
@@ -7938,7 +8080,7 @@ function AppUiHub(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$4$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
+    var _el$ = _tmpl$4$F(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
     var _ref$ = props.hubRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.hubRef = _el$;
@@ -7950,21 +8092,21 @@ function AppUiHub(props) {
             return props.uiMode() === "inset";
           },
           get children() {
-            return _tmpl$$1D();
+            return _tmpl$$1R();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "overlap";
           },
           get children() {
-            return _tmpl$2$18();
+            return _tmpl$2$1d();
           }
         }), createComponent(Match, {
           get when() {
             return props.uiMode() === "collapse";
           },
           get children() {
-            return _tmpl$3$P();
+            return _tmpl$3$R();
           }
         })];
       }
@@ -8017,11 +8159,11 @@ const mergeClasses = (...classes) => classes.filter((className2, index, array) =
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-var _tmpl$$1C = /* @__PURE__ */ template(`<svg>`);
+var _tmpl$$1Q = /* @__PURE__ */ template(`<svg>`);
 const Icon = (props) => {
   const [localProps, rest] = splitProps(props, ["color", "size", "strokeWidth", "children", "class", "name", "iconNode", "absoluteStrokeWidth"]);
   return (() => {
-    var _el$ = _tmpl$$1C();
+    var _el$ = _tmpl$$1Q();
     spread(_el$, mergeProps(defaultAttributes, {
       get width() {
         return localProps.size ?? defaultAttributes.width;
@@ -8058,7 +8200,7 @@ const Icon = (props) => {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$22 = [["rect", {
+const iconNode$2b = [["rect", {
   width: "20",
   height: "5",
   x: "2",
@@ -8074,7 +8216,7 @@ const iconNode$22 = [["rect", {
 }]];
 const Archive = (props) => createComponent(Icon, mergeProps(props, {
   name: "Archive",
-  iconNode: iconNode$22
+  iconNode: iconNode$2b
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8082,7 +8224,41 @@ const Archive = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$21 = [["path", {
+const iconNode$2a = [["path", {
+  d: "m12 19-7-7 7-7",
+  key: "1l729n"
+}], ["path", {
+  d: "M19 12H5",
+  key: "x3x0zl"
+}]];
+const ArrowLeft = (props) => createComponent(Icon, mergeProps(props, {
+  name: "ArrowLeft",
+  iconNode: iconNode$2a
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$29 = [["path", {
+  d: "M5 12h14",
+  key: "1ays0h"
+}], ["path", {
+  d: "m12 5 7 7-7 7",
+  key: "xquz4c"
+}]];
+const ArrowRight = (props) => createComponent(Icon, mergeProps(props, {
+  name: "ArrowRight",
+  iconNode: iconNode$29
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$28 = [["path", {
   d: "M7 7h10v10",
   key: "1tivn9"
 }], ["path", {
@@ -8091,7 +8267,7 @@ const iconNode$21 = [["path", {
 }]];
 const ArrowUpRight = (props) => createComponent(Icon, mergeProps(props, {
   name: "ArrowUpRight",
-  iconNode: iconNode$21
+  iconNode: iconNode$28
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8099,7 +8275,7 @@ const ArrowUpRight = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$20 = [["path", {
+const iconNode$27 = [["path", {
   d: "M10.268 21a2 2 0 0 0 3.464 0",
   key: "vwvbt9"
 }], ["path", {
@@ -8108,7 +8284,7 @@ const iconNode$20 = [["path", {
 }]];
 const Bell = (props) => createComponent(Icon, mergeProps(props, {
   name: "Bell",
-  iconNode: iconNode$20
+  iconNode: iconNode$27
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8116,7 +8292,7 @@ const Bell = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1$ = [["circle", {
+const iconNode$26 = [["circle", {
   cx: "18.5",
   cy: "17.5",
   r: "3.5",
@@ -8137,7 +8313,7 @@ const iconNode$1$ = [["circle", {
 }]];
 const Bike = (props) => createComponent(Icon, mergeProps(props, {
   name: "Bike",
-  iconNode: iconNode$1$
+  iconNode: iconNode$26
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8145,7 +8321,7 @@ const Bike = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1_ = [["path", {
+const iconNode$25 = [["path", {
   d: "M12 7v14",
   key: "1akyts"
 }], ["path", {
@@ -8154,7 +8330,7 @@ const iconNode$1_ = [["path", {
 }]];
 const BookOpen = (props) => createComponent(Icon, mergeProps(props, {
   name: "BookOpen",
-  iconNode: iconNode$1_
+  iconNode: iconNode$25
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8162,13 +8338,13 @@ const BookOpen = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1Z = [["path", {
+const iconNode$24 = [["path", {
   d: "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z",
   key: "1fy3hk"
 }]];
 const Bookmark = (props) => createComponent(Icon, mergeProps(props, {
   name: "Bookmark",
-  iconNode: iconNode$1Z
+  iconNode: iconNode$24
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8176,7 +8352,7 @@ const Bookmark = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1Y = [["path", {
+const iconNode$23 = [["path", {
   d: "M12 8V4H8",
   key: "hb8ula"
 }], ["rect", {
@@ -8201,7 +8377,7 @@ const iconNode$1Y = [["path", {
 }]];
 const Bot = (props) => createComponent(Icon, mergeProps(props, {
   name: "Bot",
-  iconNode: iconNode$1Y
+  iconNode: iconNode$23
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8209,7 +8385,7 @@ const Bot = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1X = [["path", {
+const iconNode$22 = [["path", {
   d: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z",
   key: "hh9hay"
 }], ["path", {
@@ -8221,7 +8397,7 @@ const iconNode$1X = [["path", {
 }]];
 const Box = (props) => createComponent(Icon, mergeProps(props, {
   name: "Box",
-  iconNode: iconNode$1X
+  iconNode: iconNode$22
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8229,7 +8405,7 @@ const Box = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1W = [["path", {
+const iconNode$21 = [["path", {
   d: "M16 3h3v18h-3",
   key: "1yor1f"
 }], ["path", {
@@ -8238,7 +8414,7 @@ const iconNode$1W = [["path", {
 }]];
 const Brackets = (props) => createComponent(Icon, mergeProps(props, {
   name: "Brackets",
-  iconNode: iconNode$1W
+  iconNode: iconNode$21
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8246,7 +8422,7 @@ const Brackets = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1V = [["path", {
+const iconNode$20 = [["path", {
   d: "M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16",
   key: "jecpp"
 }], ["rect", {
@@ -8259,7 +8435,7 @@ const iconNode$1V = [["path", {
 }]];
 const Briefcase = (props) => createComponent(Icon, mergeProps(props, {
   name: "Briefcase",
-  iconNode: iconNode$1V
+  iconNode: iconNode$20
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8267,7 +8443,7 @@ const Briefcase = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1U = [["path", {
+const iconNode$1$ = [["path", {
   d: "m9.06 11.9 8.07-8.06a2.85 2.85 0 1 1 4.03 4.03l-8.06 8.08",
   key: "1styjt"
 }], ["path", {
@@ -8276,7 +8452,7 @@ const iconNode$1U = [["path", {
 }]];
 const Brush = (props) => createComponent(Icon, mergeProps(props, {
   name: "Brush",
-  iconNode: iconNode$1U
+  iconNode: iconNode$1$
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8284,7 +8460,7 @@ const Brush = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1T = [["path", {
+const iconNode$1_ = [["path", {
   d: "m8 2 1.88 1.88",
   key: "fmnt4t"
 }], ["path", {
@@ -8320,7 +8496,7 @@ const iconNode$1T = [["path", {
 }]];
 const Bug = (props) => createComponent(Icon, mergeProps(props, {
   name: "Bug",
-  iconNode: iconNode$1T
+  iconNode: iconNode$1_
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8328,7 +8504,7 @@ const Bug = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1S = [["path", {
+const iconNode$1Z = [["path", {
   d: "M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z",
   key: "1b4qmf"
 }], ["path", {
@@ -8352,7 +8528,7 @@ const iconNode$1S = [["path", {
 }]];
 const Building2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Building2",
-  iconNode: iconNode$1S
+  iconNode: iconNode$1Z
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8360,7 +8536,7 @@ const Building2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1R = [["rect", {
+const iconNode$1Y = [["rect", {
   width: "16",
   height: "20",
   x: "4",
@@ -8403,7 +8579,7 @@ const iconNode$1R = [["rect", {
 }]];
 const Calculator = (props) => createComponent(Icon, mergeProps(props, {
   name: "Calculator",
-  iconNode: iconNode$1R
+  iconNode: iconNode$1Y
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8411,7 +8587,7 @@ const Calculator = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1Q = [["path", {
+const iconNode$1X = [["path", {
   d: "M8 2v4",
   key: "1cmpym"
 }], ["path", {
@@ -8430,7 +8606,7 @@ const iconNode$1Q = [["path", {
 }]];
 const Calendar = (props) => createComponent(Icon, mergeProps(props, {
   name: "Calendar",
-  iconNode: iconNode$1Q
+  iconNode: iconNode$1X
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8438,7 +8614,7 @@ const Calendar = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1P = [["path", {
+const iconNode$1W = [["path", {
   d: "M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z",
   key: "1tc9qg"
 }], ["circle", {
@@ -8449,7 +8625,7 @@ const iconNode$1P = [["path", {
 }]];
 const Camera = (props) => createComponent(Icon, mergeProps(props, {
   name: "Camera",
-  iconNode: iconNode$1P
+  iconNode: iconNode$1W
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8457,7 +8633,7 @@ const Camera = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1O = [["path", {
+const iconNode$1V = [["path", {
   d: "M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2",
   key: "5owen"
 }], ["circle", {
@@ -8476,7 +8652,7 @@ const iconNode$1O = [["path", {
 }]];
 const Car = (props) => createComponent(Icon, mergeProps(props, {
   name: "Car",
-  iconNode: iconNode$1O
+  iconNode: iconNode$1V
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8484,13 +8660,27 @@ const Car = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1N = [["path", {
+const iconNode$1U = [["path", {
+  d: "M20 6 9 17l-5-5",
+  key: "1gmf2c"
+}]];
+const Check = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Check",
+  iconNode: iconNode$1U
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$1T = [["path", {
   d: "m6 9 6 6 6-6",
   key: "qrunsl"
 }]];
 const ChevronDown = (props) => createComponent(Icon, mergeProps(props, {
   name: "ChevronDown",
-  iconNode: iconNode$1N
+  iconNode: iconNode$1T
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8498,13 +8688,27 @@ const ChevronDown = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1M = [["path", {
+const iconNode$1S = [["path", {
+  d: "m9 18 6-6-6-6",
+  key: "mthhwq"
+}]];
+const ChevronRight = (props) => createComponent(Icon, mergeProps(props, {
+  name: "ChevronRight",
+  iconNode: iconNode$1S
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$1R = [["path", {
   d: "m18 15-6-6-6 6",
   key: "153udz"
 }]];
 const ChevronUp = (props) => createComponent(Icon, mergeProps(props, {
   name: "ChevronUp",
-  iconNode: iconNode$1M
+  iconNode: iconNode$1R
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8512,7 +8716,7 @@ const ChevronUp = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1L = [["rect", {
+const iconNode$1Q = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -8538,7 +8742,7 @@ const iconNode$1L = [["rect", {
 }]];
 const CircuitBoard = (props) => createComponent(Icon, mergeProps(props, {
   name: "CircuitBoard",
-  iconNode: iconNode$1L
+  iconNode: iconNode$1Q
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8546,7 +8750,7 @@ const CircuitBoard = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1K = [["rect", {
+const iconNode$1P = [["rect", {
   width: "8",
   height: "4",
   x: "8",
@@ -8572,7 +8776,7 @@ const iconNode$1K = [["rect", {
 }]];
 const ClipboardList = (props) => createComponent(Icon, mergeProps(props, {
   name: "ClipboardList",
-  iconNode: iconNode$1K
+  iconNode: iconNode$1P
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8580,7 +8784,7 @@ const ClipboardList = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1J = [["circle", {
+const iconNode$1O = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -8591,7 +8795,7 @@ const iconNode$1J = [["circle", {
 }]];
 const Clock = (props) => createComponent(Icon, mergeProps(props, {
   name: "Clock",
-  iconNode: iconNode$1J
+  iconNode: iconNode$1O
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8599,13 +8803,13 @@ const Clock = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1I = [["path", {
+const iconNode$1N = [["path", {
   d: "M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z",
   key: "p7xjir"
 }]];
 const Cloud = (props) => createComponent(Icon, mergeProps(props, {
   name: "Cloud",
-  iconNode: iconNode$1I
+  iconNode: iconNode$1N
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8613,7 +8817,7 @@ const Cloud = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1H = [["path", {
+const iconNode$1M = [["path", {
   d: "m18 16 4-4-4-4",
   key: "1inbqp"
 }], ["path", {
@@ -8625,7 +8829,7 @@ const iconNode$1H = [["path", {
 }]];
 const CodeXml = (props) => createComponent(Icon, mergeProps(props, {
   name: "CodeXml",
-  iconNode: iconNode$1H
+  iconNode: iconNode$1M
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8633,7 +8837,7 @@ const CodeXml = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1G = [["path", {
+const iconNode$1L = [["path", {
   d: "M10 2v2",
   key: "7u0qdc"
 }], ["path", {
@@ -8648,7 +8852,7 @@ const iconNode$1G = [["path", {
 }]];
 const Coffee = (props) => createComponent(Icon, mergeProps(props, {
   name: "Coffee",
-  iconNode: iconNode$1G
+  iconNode: iconNode$1L
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8656,7 +8860,7 @@ const Coffee = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1F = [["circle", {
+const iconNode$1K = [["circle", {
   cx: "8",
   cy: "8",
   r: "6",
@@ -8673,7 +8877,7 @@ const iconNode$1F = [["circle", {
 }]];
 const Coins = (props) => createComponent(Icon, mergeProps(props, {
   name: "Coins",
-  iconNode: iconNode$1F
+  iconNode: iconNode$1K
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8681,13 +8885,34 @@ const Coins = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1E = [["path", {
+const iconNode$1J = [["rect", {
+  width: "18",
+  height: "18",
+  x: "3",
+  y: "3",
+  rx: "2",
+  key: "afitv7"
+}], ["path", {
+  d: "M12 3v18",
+  key: "108xh3"
+}]];
+const Columns2 = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Columns2",
+  iconNode: iconNode$1J
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$1I = [["path", {
   d: "M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3",
   key: "11bfej"
 }]];
 const Command = (props) => createComponent(Icon, mergeProps(props, {
   name: "Command",
-  iconNode: iconNode$1E
+  iconNode: iconNode$1I
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8695,7 +8920,7 @@ const Command = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1D = [["path", {
+const iconNode$1H = [["path", {
   d: "m16.24 7.76-1.804 5.411a2 2 0 0 1-1.265 1.265L7.76 16.24l1.804-5.411a2 2 0 0 1 1.265-1.265z",
   key: "9ktpf1"
 }], ["circle", {
@@ -8706,7 +8931,7 @@ const iconNode$1D = [["path", {
 }]];
 const Compass = (props) => createComponent(Icon, mergeProps(props, {
   name: "Compass",
-  iconNode: iconNode$1D
+  iconNode: iconNode$1H
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8714,7 +8939,7 @@ const Compass = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1C = [["circle", {
+const iconNode$1G = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -8725,7 +8950,7 @@ const iconNode$1C = [["circle", {
 }]];
 const Contrast = (props) => createComponent(Icon, mergeProps(props, {
   name: "Contrast",
-  iconNode: iconNode$1C
+  iconNode: iconNode$1G
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8733,7 +8958,7 @@ const Contrast = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1B = [["rect", {
+const iconNode$1F = [["rect", {
   width: "14",
   height: "14",
   x: "8",
@@ -8747,7 +8972,7 @@ const iconNode$1B = [["rect", {
 }]];
 const Copy = (props) => createComponent(Icon, mergeProps(props, {
   name: "Copy",
-  iconNode: iconNode$1B
+  iconNode: iconNode$1F
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8755,7 +8980,7 @@ const Copy = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1A = [["polyline", {
+const iconNode$1E = [["polyline", {
   points: "9 10 4 15 9 20",
   key: "r3jprv"
 }], ["path", {
@@ -8764,7 +8989,7 @@ const iconNode$1A = [["polyline", {
 }]];
 const CornerDownLeft = (props) => createComponent(Icon, mergeProps(props, {
   name: "CornerDownLeft",
-  iconNode: iconNode$1A
+  iconNode: iconNode$1E
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8772,7 +8997,7 @@ const CornerDownLeft = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1z = [["rect", {
+const iconNode$1D = [["rect", {
   width: "16",
   height: "16",
   x: "4",
@@ -8813,7 +9038,7 @@ const iconNode$1z = [["rect", {
 }]];
 const Cpu = (props) => createComponent(Icon, mergeProps(props, {
   name: "Cpu",
-  iconNode: iconNode$1z
+  iconNode: iconNode$1D
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8821,7 +9046,7 @@ const Cpu = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1y = [["rect", {
+const iconNode$1C = [["rect", {
   width: "20",
   height: "14",
   x: "2",
@@ -8837,7 +9062,7 @@ const iconNode$1y = [["rect", {
 }]];
 const CreditCard = (props) => createComponent(Icon, mergeProps(props, {
   name: "CreditCard",
-  iconNode: iconNode$1y
+  iconNode: iconNode$1C
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8845,7 +9070,7 @@ const CreditCard = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1x = [["path", {
+const iconNode$1B = [["path", {
   d: "M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z",
   key: "1vdc57"
 }], ["path", {
@@ -8854,7 +9079,7 @@ const iconNode$1x = [["path", {
 }]];
 const Crown = (props) => createComponent(Icon, mergeProps(props, {
   name: "Crown",
-  iconNode: iconNode$1x
+  iconNode: iconNode$1B
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8862,7 +9087,7 @@ const Crown = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1w = [["ellipse", {
+const iconNode$1A = [["ellipse", {
   cx: "12",
   cy: "5",
   rx: "9",
@@ -8877,7 +9102,7 @@ const iconNode$1w = [["ellipse", {
 }]];
 const Database = (props) => createComponent(Icon, mergeProps(props, {
   name: "Database",
-  iconNode: iconNode$1w
+  iconNode: iconNode$1A
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8885,7 +9110,7 @@ const Database = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1v = [["line", {
+const iconNode$1z = [["line", {
   x1: "12",
   x2: "12",
   y1: "2",
@@ -8897,7 +9122,7 @@ const iconNode$1v = [["line", {
 }]];
 const DollarSign = (props) => createComponent(Icon, mergeProps(props, {
   name: "DollarSign",
-  iconNode: iconNode$1v
+  iconNode: iconNode$1z
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8905,7 +9130,7 @@ const DollarSign = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1u = [["path", {
+const iconNode$1y = [["path", {
   d: "M14.4 14.4 9.6 9.6",
   key: "ic80wn"
 }], ["path", {
@@ -8923,7 +9148,7 @@ const iconNode$1u = [["path", {
 }]];
 const Dumbbell = (props) => createComponent(Icon, mergeProps(props, {
   name: "Dumbbell",
-  iconNode: iconNode$1u
+  iconNode: iconNode$1y
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8931,7 +9156,7 @@ const Dumbbell = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1t = [["path", {
+const iconNode$1x = [["path", {
   d: "M15 3h6v6",
   key: "1q9fwt"
 }], ["path", {
@@ -8943,7 +9168,7 @@ const iconNode$1t = [["path", {
 }]];
 const ExternalLink = (props) => createComponent(Icon, mergeProps(props, {
   name: "ExternalLink",
-  iconNode: iconNode$1t
+  iconNode: iconNode$1x
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8951,7 +9176,7 @@ const ExternalLink = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1s = [["path", {
+const iconNode$1w = [["path", {
   d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
   key: "1nclc0"
 }], ["circle", {
@@ -8962,7 +9187,7 @@ const iconNode$1s = [["path", {
 }]];
 const Eye = (props) => createComponent(Icon, mergeProps(props, {
   name: "Eye",
-  iconNode: iconNode$1s
+  iconNode: iconNode$1w
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8970,7 +9195,7 @@ const Eye = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1r = [["path", {
+const iconNode$1v = [["path", {
   d: "M10 12.5 8 15l2 2.5",
   key: "1tg20x"
 }], ["path", {
@@ -8985,7 +9210,7 @@ const iconNode$1r = [["path", {
 }]];
 const FileCode = (props) => createComponent(Icon, mergeProps(props, {
   name: "FileCode",
-  iconNode: iconNode$1r
+  iconNode: iconNode$1v
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -8993,7 +9218,7 @@ const FileCode = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1q = [["path", {
+const iconNode$1u = [["path", {
   d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
   key: "1rqfz7"
 }], ["path", {
@@ -9011,7 +9236,7 @@ const iconNode$1q = [["path", {
 }]];
 const FileText = (props) => createComponent(Icon, mergeProps(props, {
   name: "FileText",
-  iconNode: iconNode$1q
+  iconNode: iconNode$1u
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9019,7 +9244,7 @@ const FileText = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1p = [["rect", {
+const iconNode$1t = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -9050,7 +9275,7 @@ const iconNode$1p = [["rect", {
 }]];
 const Film = (props) => createComponent(Icon, mergeProps(props, {
   name: "Film",
-  iconNode: iconNode$1p
+  iconNode: iconNode$1t
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9058,7 +9283,7 @@ const Film = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1o = [["path", {
+const iconNode$1s = [["path", {
   d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z",
   key: "i9b6wo"
 }], ["line", {
@@ -9070,7 +9295,7 @@ const iconNode$1o = [["path", {
 }]];
 const Flag = (props) => createComponent(Icon, mergeProps(props, {
   name: "Flag",
-  iconNode: iconNode$1o
+  iconNode: iconNode$1s
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9078,7 +9303,7 @@ const Flag = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1n = [["path", {
+const iconNode$1r = [["path", {
   d: "M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z",
   key: "1fr9dc"
 }], ["path", {
@@ -9093,7 +9318,7 @@ const iconNode$1n = [["path", {
 }]];
 const FolderKanban = (props) => createComponent(Icon, mergeProps(props, {
   name: "FolderKanban",
-  iconNode: iconNode$1n
+  iconNode: iconNode$1r
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9101,13 +9326,13 @@ const FolderKanban = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1m = [["path", {
+const iconNode$1q = [["path", {
   d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
   key: "1kt360"
 }]];
 const Folder = (props) => createComponent(Icon, mergeProps(props, {
   name: "Folder",
-  iconNode: iconNode$1m
+  iconNode: iconNode$1q
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9115,7 +9340,7 @@ const Folder = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1l = [["line", {
+const iconNode$1p = [["line", {
   x1: "6",
   x2: "10",
   y1: "11",
@@ -9145,7 +9370,7 @@ const iconNode$1l = [["line", {
 }]];
 const Gamepad2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Gamepad2",
-  iconNode: iconNode$1l
+  iconNode: iconNode$1p
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9153,7 +9378,7 @@ const Gamepad2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1k = [["path", {
+const iconNode$1o = [["path", {
   d: "m12 14 4-4",
   key: "9kzdfg"
 }], ["path", {
@@ -9162,7 +9387,7 @@ const iconNode$1k = [["path", {
 }]];
 const Gauge = (props) => createComponent(Icon, mergeProps(props, {
   name: "Gauge",
-  iconNode: iconNode$1k
+  iconNode: iconNode$1o
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9170,7 +9395,7 @@ const Gauge = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1j = [["line", {
+const iconNode$1n = [["line", {
   x1: "6",
   x2: "6",
   y1: "3",
@@ -9192,7 +9417,7 @@ const iconNode$1j = [["line", {
 }]];
 const GitBranch = (props) => createComponent(Icon, mergeProps(props, {
   name: "GitBranch",
-  iconNode: iconNode$1j
+  iconNode: iconNode$1n
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9200,7 +9425,7 @@ const GitBranch = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1i = [["circle", {
+const iconNode$1m = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -9214,7 +9439,7 @@ const iconNode$1i = [["circle", {
 }]];
 const Globe = (props) => createComponent(Icon, mergeProps(props, {
   name: "Globe",
-  iconNode: iconNode$1i
+  iconNode: iconNode$1m
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9222,7 +9447,7 @@ const Globe = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1h = [["circle", {
+const iconNode$1l = [["circle", {
   cx: "12",
   cy: "9",
   r: "1",
@@ -9255,7 +9480,7 @@ const iconNode$1h = [["circle", {
 }]];
 const GripHorizontal = (props) => createComponent(Icon, mergeProps(props, {
   name: "GripHorizontal",
-  iconNode: iconNode$1h
+  iconNode: iconNode$1l
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9263,7 +9488,7 @@ const GripHorizontal = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1g = [["line", {
+const iconNode$1k = [["line", {
   x1: "4",
   x2: "20",
   y1: "9",
@@ -9290,7 +9515,7 @@ const iconNode$1g = [["line", {
 }]];
 const Hash = (props) => createComponent(Icon, mergeProps(props, {
   name: "Hash",
-  iconNode: iconNode$1g
+  iconNode: iconNode$1k
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9298,13 +9523,13 @@ const Hash = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1f = [["path", {
+const iconNode$1j = [["path", {
   d: "M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3",
   key: "1xhozi"
 }]];
 const Headphones = (props) => createComponent(Icon, mergeProps(props, {
   name: "Headphones",
-  iconNode: iconNode$1f
+  iconNode: iconNode$1j
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9312,13 +9537,13 @@ const Headphones = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1e = [["path", {
+const iconNode$1i = [["path", {
   d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z",
   key: "c3ymky"
 }]];
 const Heart = (props) => createComponent(Icon, mergeProps(props, {
   name: "Heart",
-  iconNode: iconNode$1e
+  iconNode: iconNode$1i
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9326,7 +9551,7 @@ const Heart = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1d = [["path", {
+const iconNode$1h = [["path", {
   d: "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8",
   key: "5wwlr5"
 }], ["path", {
@@ -9335,7 +9560,7 @@ const iconNode$1d = [["path", {
 }]];
 const House = (props) => createComponent(Icon, mergeProps(props, {
   name: "House",
-  iconNode: iconNode$1d
+  iconNode: iconNode$1h
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9343,7 +9568,7 @@ const House = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1c = [["rect", {
+const iconNode$1g = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -9360,9 +9585,9 @@ const iconNode$1c = [["rect", {
   d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21",
   key: "1xmnt7"
 }]];
-const Image = (props) => createComponent(Icon, mergeProps(props, {
+const Image$1 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Image",
-  iconNode: iconNode$1c
+  iconNode: iconNode$1g
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9370,7 +9595,7 @@ const Image = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1b = [["polyline", {
+const iconNode$1f = [["polyline", {
   points: "22 12 16 12 14 15 10 15 8 12 2 12",
   key: "o97t9d"
 }], ["path", {
@@ -9379,7 +9604,7 @@ const iconNode$1b = [["polyline", {
 }]];
 const Inbox = (props) => createComponent(Icon, mergeProps(props, {
   name: "Inbox",
-  iconNode: iconNode$1b
+  iconNode: iconNode$1f
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9387,7 +9612,7 @@ const Inbox = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$1a = [["path", {
+const iconNode$1e = [["path", {
   d: "M6 5v11",
   key: "mdvv1e"
 }], ["path", {
@@ -9399,7 +9624,7 @@ const iconNode$1a = [["path", {
 }]];
 const Kanban = (props) => createComponent(Icon, mergeProps(props, {
   name: "Kanban",
-  iconNode: iconNode$1a
+  iconNode: iconNode$1e
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9407,7 +9632,7 @@ const Kanban = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$19 = [["path", {
+const iconNode$1d = [["path", {
   d: "m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4",
   key: "g0fldk"
 }], ["path", {
@@ -9421,7 +9646,7 @@ const iconNode$19 = [["path", {
 }]];
 const Key = (props) => createComponent(Icon, mergeProps(props, {
   name: "Key",
-  iconNode: iconNode$19
+  iconNode: iconNode$1d
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9429,7 +9654,7 @@ const Key = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$18 = [["line", {
+const iconNode$1c = [["line", {
   x1: "3",
   x2: "21",
   y1: "22",
@@ -9465,7 +9690,7 @@ const iconNode$18 = [["line", {
 }]];
 const Landmark = (props) => createComponent(Icon, mergeProps(props, {
   name: "Landmark",
-  iconNode: iconNode$18
+  iconNode: iconNode$1c
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9473,7 +9698,7 @@ const Landmark = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$17 = [["path", {
+const iconNode$1b = [["path", {
   d: "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z",
   key: "zw3jo"
 }], ["path", {
@@ -9485,7 +9710,7 @@ const iconNode$17 = [["path", {
 }]];
 const Layers = (props) => createComponent(Icon, mergeProps(props, {
   name: "Layers",
-  iconNode: iconNode$17
+  iconNode: iconNode$1b
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9493,7 +9718,7 @@ const Layers = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$16 = [["path", {
+const iconNode$1a = [["path", {
   d: "M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5",
   key: "1gvzjb"
 }], ["path", {
@@ -9505,7 +9730,7 @@ const iconNode$16 = [["path", {
 }]];
 const Lightbulb = (props) => createComponent(Icon, mergeProps(props, {
   name: "Lightbulb",
-  iconNode: iconNode$16
+  iconNode: iconNode$1a
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9513,7 +9738,7 @@ const Lightbulb = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$15 = [["path", {
+const iconNode$19 = [["path", {
   d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
   key: "1cjeqo"
 }], ["path", {
@@ -9522,7 +9747,7 @@ const iconNode$15 = [["path", {
 }]];
 const Link = (props) => createComponent(Icon, mergeProps(props, {
   name: "Link",
-  iconNode: iconNode$15
+  iconNode: iconNode$19
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9530,7 +9755,7 @@ const Link = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$14 = [["rect", {
+const iconNode$18 = [["rect", {
   x: "3",
   y: "5",
   width: "6",
@@ -9552,7 +9777,7 @@ const iconNode$14 = [["rect", {
 }]];
 const ListTodo = (props) => createComponent(Icon, mergeProps(props, {
   name: "ListTodo",
-  iconNode: iconNode$14
+  iconNode: iconNode$18
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9560,7 +9785,7 @@ const ListTodo = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$13 = [["rect", {
+const iconNode$17 = [["rect", {
   width: "18",
   height: "11",
   x: "3",
@@ -9574,7 +9799,7 @@ const iconNode$13 = [["rect", {
 }]];
 const Lock = (props) => createComponent(Icon, mergeProps(props, {
   name: "Lock",
-  iconNode: iconNode$13
+  iconNode: iconNode$17
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9582,7 +9807,7 @@ const Lock = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$12 = [["rect", {
+const iconNode$16 = [["rect", {
   width: "20",
   height: "16",
   x: "2",
@@ -9595,7 +9820,7 @@ const iconNode$12 = [["rect", {
 }]];
 const Mail = (props) => createComponent(Icon, mergeProps(props, {
   name: "Mail",
-  iconNode: iconNode$12
+  iconNode: iconNode$16
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9603,7 +9828,7 @@ const Mail = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$11 = [["path", {
+const iconNode$15 = [["path", {
   d: "M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0",
   key: "1r0f0z"
 }], ["circle", {
@@ -9614,7 +9839,7 @@ const iconNode$11 = [["path", {
 }]];
 const MapPin = (props) => createComponent(Icon, mergeProps(props, {
   name: "MapPin",
-  iconNode: iconNode$11
+  iconNode: iconNode$15
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9622,7 +9847,7 @@ const MapPin = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$10 = [["path", {
+const iconNode$14 = [["path", {
   d: "M14.106 5.553a2 2 0 0 0 1.788 0l3.659-1.83A1 1 0 0 1 21 4.619v12.764a1 1 0 0 1-.553.894l-4.553 2.277a2 2 0 0 1-1.788 0l-4.212-2.106a2 2 0 0 0-1.788 0l-3.659 1.83A1 1 0 0 1 3 19.381V6.618a1 1 0 0 1 .553-.894l4.553-2.277a2 2 0 0 1 1.788 0z",
   key: "169xi5"
 }], ["path", {
@@ -9634,7 +9859,7 @@ const iconNode$10 = [["path", {
 }]];
 const Map$1 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Map",
-  iconNode: iconNode$10
+  iconNode: iconNode$14
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9642,7 +9867,7 @@ const Map$1 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$$ = [["polyline", {
+const iconNode$13 = [["polyline", {
   points: "15 3 21 3 21 9",
   key: "mznyad"
 }], ["polyline", {
@@ -9663,7 +9888,7 @@ const iconNode$$ = [["polyline", {
 }]];
 const Maximize2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Maximize2",
-  iconNode: iconNode$$
+  iconNode: iconNode$13
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9671,7 +9896,7 @@ const Maximize2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$_ = [["path", {
+const iconNode$12 = [["path", {
   d: "M8 3H5a2 2 0 0 0-2 2v3",
   key: "1dcmit"
 }], ["path", {
@@ -9686,7 +9911,7 @@ const iconNode$_ = [["path", {
 }]];
 const Maximize = (props) => createComponent(Icon, mergeProps(props, {
   name: "Maximize",
-  iconNode: iconNode$_
+  iconNode: iconNode$12
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9694,7 +9919,7 @@ const Maximize = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$Z = [["path", {
+const iconNode$11 = [["path", {
   d: "m3 11 18-5v12L3 14v-3z",
   key: "n962bs"
 }], ["path", {
@@ -9703,7 +9928,7 @@ const iconNode$Z = [["path", {
 }]];
 const Megaphone = (props) => createComponent(Icon, mergeProps(props, {
   name: "Megaphone",
-  iconNode: iconNode$Z
+  iconNode: iconNode$11
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9711,13 +9936,13 @@ const Megaphone = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$Y = [["path", {
+const iconNode$10 = [["path", {
   d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
   key: "1lielz"
 }]];
 const MessageSquare = (props) => createComponent(Icon, mergeProps(props, {
   name: "MessageSquare",
-  iconNode: iconNode$Y
+  iconNode: iconNode$10
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9725,7 +9950,7 @@ const MessageSquare = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$X = [["path", {
+const iconNode$$ = [["path", {
   d: "M14 9a2 2 0 0 1-2 2H6l-4 4V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2z",
   key: "p1xzt8"
 }], ["path", {
@@ -9734,7 +9959,7 @@ const iconNode$X = [["path", {
 }]];
 const MessagesSquare = (props) => createComponent(Icon, mergeProps(props, {
   name: "MessagesSquare",
-  iconNode: iconNode$X
+  iconNode: iconNode$$
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9742,7 +9967,7 @@ const MessagesSquare = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$W = [["polyline", {
+const iconNode$_ = [["polyline", {
   points: "4 14 10 14 10 20",
   key: "11kfnr"
 }], ["polyline", {
@@ -9763,7 +9988,7 @@ const iconNode$W = [["polyline", {
 }]];
 const Minimize2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Minimize2",
-  iconNode: iconNode$W
+  iconNode: iconNode$_
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9771,7 +9996,7 @@ const Minimize2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$V = [["path", {
+const iconNode$Z = [["path", {
   d: "M8 3v3a2 2 0 0 1-2 2H3",
   key: "hohbtr"
 }], ["path", {
@@ -9786,7 +10011,7 @@ const iconNode$V = [["path", {
 }]];
 const Minimize = (props) => createComponent(Icon, mergeProps(props, {
   name: "Minimize",
-  iconNode: iconNode$V
+  iconNode: iconNode$Z
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9794,13 +10019,57 @@ const Minimize = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$U = [["path", {
+const iconNode$Y = [["path", {
+  d: "M5 12h14",
+  key: "1ays0h"
+}]];
+const Minus = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Minus",
+  iconNode: iconNode$Y
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$X = [["rect", {
+  width: "20",
+  height: "14",
+  x: "2",
+  y: "3",
+  rx: "2",
+  key: "48i651"
+}], ["line", {
+  x1: "8",
+  x2: "16",
+  y1: "21",
+  y2: "21",
+  key: "1svkeh"
+}], ["line", {
+  x1: "12",
+  x2: "12",
+  y1: "17",
+  y2: "21",
+  key: "vw1qmm"
+}]];
+const Monitor = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Monitor",
+  iconNode: iconNode$X
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$W = [["path", {
   d: "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z",
   key: "a7tn18"
 }]];
 const Moon = (props) => createComponent(Icon, mergeProps(props, {
   name: "Moon",
-  iconNode: iconNode$U
+  iconNode: iconNode$W
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9808,7 +10077,7 @@ const Moon = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$T = [["path", {
+const iconNode$V = [["path", {
   d: "M9 18V5l12-2v13",
   key: "1jmyc2"
 }], ["circle", {
@@ -9824,7 +10093,7 @@ const iconNode$T = [["path", {
 }]];
 const Music = (props) => createComponent(Icon, mergeProps(props, {
   name: "Music",
-  iconNode: iconNode$T
+  iconNode: iconNode$V
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9832,7 +10101,7 @@ const Music = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$S = [["rect", {
+const iconNode$U = [["rect", {
   x: "16",
   y: "16",
   width: "6",
@@ -9862,7 +10131,7 @@ const iconNode$S = [["rect", {
 }]];
 const Network = (props) => createComponent(Icon, mergeProps(props, {
   name: "Network",
-  iconNode: iconNode$S
+  iconNode: iconNode$U
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9870,7 +10139,7 @@ const Network = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$R = [["circle", {
+const iconNode$T = [["circle", {
   cx: "13.5",
   cy: "6.5",
   r: ".5",
@@ -9900,7 +10169,7 @@ const iconNode$R = [["circle", {
 }]];
 const Palette = (props) => createComponent(Icon, mergeProps(props, {
   name: "Palette",
-  iconNode: iconNode$R
+  iconNode: iconNode$T
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9908,7 +10177,7 @@ const Palette = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$Q = [["rect", {
+const iconNode$S = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -9921,7 +10190,7 @@ const iconNode$Q = [["rect", {
 }]];
 const PanelBottom = (props) => createComponent(Icon, mergeProps(props, {
   name: "PanelBottom",
-  iconNode: iconNode$Q
+  iconNode: iconNode$S
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9929,7 +10198,7 @@ const PanelBottom = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$P = [["rect", {
+const iconNode$R = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -9942,7 +10211,7 @@ const iconNode$P = [["rect", {
 }]];
 const PanelRight = (props) => createComponent(Icon, mergeProps(props, {
   name: "PanelRight",
-  iconNode: iconNode$P
+  iconNode: iconNode$R
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9950,7 +10219,7 @@ const PanelRight = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$O = [["path", {
+const iconNode$Q = [["path", {
   d: "M12 20h9",
   key: "t2du7b"
 }], ["path", {
@@ -9959,7 +10228,7 @@ const iconNode$O = [["path", {
 }]];
 const PenLine = (props) => createComponent(Icon, mergeProps(props, {
   name: "PenLine",
-  iconNode: iconNode$O
+  iconNode: iconNode$Q
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -9967,7 +10236,7 @@ const PenLine = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$N = [["path", {
+const iconNode$P = [["path", {
   d: "M15.707 21.293a1 1 0 0 1-1.414 0l-1.586-1.586a1 1 0 0 1 0-1.414l5.586-5.586a1 1 0 0 1 1.414 0l1.586 1.586a1 1 0 0 1 0 1.414z",
   key: "nt11vn"
 }], ["path", {
@@ -9984,6 +10253,37 @@ const iconNode$N = [["path", {
 }]];
 const PenTool = (props) => createComponent(Icon, mergeProps(props, {
   name: "PenTool",
+  iconNode: iconNode$P
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$O = [["path", {
+  d: "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z",
+  key: "foiqr5"
+}]];
+const Phone = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Phone",
+  iconNode: iconNode$O
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$N = [["path", {
+  d: "M12 17v5",
+  key: "bb1du9"
+}], ["path", {
+  d: "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
+  key: "1nkz8b"
+}]];
+const Pin = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Pin",
   iconNode: iconNode$N
 }));
 /**
@@ -9993,37 +10293,6 @@ const PenTool = (props) => createComponent(Icon, mergeProps(props, {
  * See the LICENSE file in the root directory of this source tree.
  */
 const iconNode$M = [["path", {
-  d: "M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z",
-  key: "foiqr5"
-}]];
-const Phone = (props) => createComponent(Icon, mergeProps(props, {
-  name: "Phone",
-  iconNode: iconNode$M
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$L = [["path", {
-  d: "M12 17v5",
-  key: "bb1du9"
-}], ["path", {
-  d: "M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z",
-  key: "1nkz8b"
-}]];
-const Pin = (props) => createComponent(Icon, mergeProps(props, {
-  name: "Pin",
-  iconNode: iconNode$L
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$K = [["path", {
   d: "m2 22 1-1h3l9-9",
   key: "1sre89"
 }], ["path", {
@@ -10035,6 +10304,34 @@ const iconNode$K = [["path", {
 }]];
 const Pipette = (props) => createComponent(Icon, mergeProps(props, {
   name: "Pipette",
+  iconNode: iconNode$M
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$L = [["path", {
+  d: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z",
+  key: "1v9wt8"
+}]];
+const Plane = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Plane",
+  iconNode: iconNode$L
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$K = [["polygon", {
+  points: "6 3 20 12 6 21 6 3",
+  key: "1oa8hb"
+}]];
+const Play = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Play",
   iconNode: iconNode$K
 }));
 /**
@@ -10044,34 +10341,6 @@ const Pipette = (props) => createComponent(Icon, mergeProps(props, {
  * See the LICENSE file in the root directory of this source tree.
  */
 const iconNode$J = [["path", {
-  d: "M17.8 19.2 16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.2c.4-.3.6-.7.5-1.2z",
-  key: "1v9wt8"
-}]];
-const Plane = (props) => createComponent(Icon, mergeProps(props, {
-  name: "Plane",
-  iconNode: iconNode$J
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$I = [["polygon", {
-  points: "6 3 20 12 6 21 6 3",
-  key: "1oa8hb"
-}]];
-const Play = (props) => createComponent(Icon, mergeProps(props, {
-  name: "Play",
-  iconNode: iconNode$I
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$H = [["path", {
   d: "M5 12h14",
   key: "1ays0h"
 }], ["path", {
@@ -10080,7 +10349,7 @@ const iconNode$H = [["path", {
 }]];
 const Plus = (props) => createComponent(Icon, mergeProps(props, {
   name: "Plus",
-  iconNode: iconNode$H
+  iconNode: iconNode$J
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10088,7 +10357,7 @@ const Plus = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$G = [["path", {
+const iconNode$I = [["path", {
   d: "M16.85 18.58a9 9 0 1 0-9.7 0",
   key: "d71mpg"
 }], ["path", {
@@ -10105,7 +10374,7 @@ const iconNode$G = [["path", {
 }]];
 const Podcast = (props) => createComponent(Icon, mergeProps(props, {
   name: "Podcast",
-  iconNode: iconNode$G
+  iconNode: iconNode$I
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10113,7 +10382,7 @@ const Podcast = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$F = [["rect", {
+const iconNode$H = [["rect", {
   width: "5",
   height: "5",
   x: "3",
@@ -10164,7 +10433,7 @@ const iconNode$F = [["rect", {
 }]];
 const QrCode = (props) => createComponent(Icon, mergeProps(props, {
   name: "QrCode",
-  iconNode: iconNode$F
+  iconNode: iconNode$H
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10172,7 +10441,7 @@ const QrCode = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$E = [["path", {
+const iconNode$G = [["path", {
   d: "M4.9 19.1C1 15.2 1 8.8 4.9 4.9",
   key: "1vaf9d"
 }], ["path", {
@@ -10192,7 +10461,7 @@ const iconNode$E = [["path", {
 }]];
 const Radio = (props) => createComponent(Icon, mergeProps(props, {
   name: "Radio",
-  iconNode: iconNode$E
+  iconNode: iconNode$G
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10200,7 +10469,7 @@ const Radio = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$D = [["path", {
+const iconNode$F = [["path", {
   d: "M4 2v20l2-1 2 1 2-1 2 1 2-1 2 1 2-1 2 1V2l-2 1-2-1-2 1-2-1-2 1-2-1-2 1Z",
   key: "q3az6g"
 }], ["path", {
@@ -10212,7 +10481,7 @@ const iconNode$D = [["path", {
 }]];
 const Receipt = (props) => createComponent(Icon, mergeProps(props, {
   name: "Receipt",
-  iconNode: iconNode$D
+  iconNode: iconNode$F
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10220,7 +10489,7 @@ const Receipt = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$C = [["path", {
+const iconNode$E = [["path", {
   d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",
   key: "v9h5vc"
 }], ["path", {
@@ -10235,7 +10504,7 @@ const iconNode$C = [["path", {
 }]];
 const RefreshCw = (props) => createComponent(Icon, mergeProps(props, {
   name: "RefreshCw",
-  iconNode: iconNode$C
+  iconNode: iconNode$E
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10243,7 +10512,7 @@ const RefreshCw = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$B = [["path", {
+const iconNode$D = [["path", {
   d: "M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z",
   key: "m3kijz"
 }], ["path", {
@@ -10258,7 +10527,7 @@ const iconNode$B = [["path", {
 }]];
 const Rocket = (props) => createComponent(Icon, mergeProps(props, {
   name: "Rocket",
-  iconNode: iconNode$B
+  iconNode: iconNode$D
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10266,16 +10535,16 @@ const Rocket = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$A = [["path", {
-  d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
-  key: "1357e3"
+const iconNode$C = [["path", {
+  d: "M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8",
+  key: "1p45f6"
 }], ["path", {
-  d: "M3 3v5h5",
-  key: "1xhq8a"
+  d: "M21 3v5h-5",
+  key: "1q7to0"
 }]];
-const RotateCcw = (props) => createComponent(Icon, mergeProps(props, {
-  name: "RotateCcw",
-  iconNode: iconNode$A
+const RotateCw = (props) => createComponent(Icon, mergeProps(props, {
+  name: "RotateCw",
+  iconNode: iconNode$C
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10283,7 +10552,7 @@ const RotateCcw = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$z = [["path", {
+const iconNode$B = [["path", {
   d: "m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z",
   key: "7g6ntu"
 }], ["path", {
@@ -10301,7 +10570,7 @@ const iconNode$z = [["path", {
 }]];
 const Scale = (props) => createComponent(Icon, mergeProps(props, {
   name: "Scale",
-  iconNode: iconNode$z
+  iconNode: iconNode$B
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10309,7 +10578,7 @@ const Scale = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$y = [["circle", {
+const iconNode$A = [["circle", {
   cx: "6",
   cy: "6",
   r: "3",
@@ -10331,7 +10600,7 @@ const iconNode$y = [["circle", {
 }]];
 const Scissors = (props) => createComponent(Icon, mergeProps(props, {
   name: "Scissors",
-  iconNode: iconNode$y
+  iconNode: iconNode$A
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10339,7 +10608,7 @@ const Scissors = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$x = [["circle", {
+const iconNode$z = [["circle", {
   cx: "11",
   cy: "11",
   r: "8",
@@ -10350,7 +10619,7 @@ const iconNode$x = [["circle", {
 }]];
 const Search = (props) => createComponent(Icon, mergeProps(props, {
   name: "Search",
-  iconNode: iconNode$x
+  iconNode: iconNode$z
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10358,7 +10627,7 @@ const Search = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$w = [["path", {
+const iconNode$y = [["path", {
   d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
   key: "1ffxy3"
 }], ["path", {
@@ -10367,7 +10636,7 @@ const iconNode$w = [["path", {
 }]];
 const Send = (props) => createComponent(Icon, mergeProps(props, {
   name: "Send",
-  iconNode: iconNode$w
+  iconNode: iconNode$y
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10375,7 +10644,7 @@ const Send = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$v = [["rect", {
+const iconNode$x = [["rect", {
   width: "20",
   height: "8",
   x: "2",
@@ -10406,7 +10675,7 @@ const iconNode$v = [["rect", {
 }]];
 const Server = (props) => createComponent(Icon, mergeProps(props, {
   name: "Server",
-  iconNode: iconNode$v
+  iconNode: iconNode$x
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10414,7 +10683,7 @@ const Server = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$u = [["path", {
+const iconNode$w = [["path", {
   d: "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
   key: "1qme2f"
 }], ["circle", {
@@ -10425,7 +10694,7 @@ const iconNode$u = [["path", {
 }]];
 const Settings = (props) => createComponent(Icon, mergeProps(props, {
   name: "Settings",
-  iconNode: iconNode$u
+  iconNode: iconNode$w
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10433,7 +10702,7 @@ const Settings = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$t = [["path", {
+const iconNode$v = [["path", {
   d: "M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z",
   key: "1bo67w"
 }], ["rect", {
@@ -10451,7 +10720,7 @@ const iconNode$t = [["path", {
 }]];
 const Shapes = (props) => createComponent(Icon, mergeProps(props, {
   name: "Shapes",
-  iconNode: iconNode$t
+  iconNode: iconNode$v
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10459,7 +10728,7 @@ const Shapes = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$s = [["circle", {
+const iconNode$u = [["circle", {
   cx: "18",
   cy: "5",
   r: "3",
@@ -10489,7 +10758,7 @@ const iconNode$s = [["circle", {
 }]];
 const Share2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Share2",
-  iconNode: iconNode$s
+  iconNode: iconNode$u
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10497,30 +10766,13 @@ const Share2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$r = [["path", {
-  d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
-  key: "oel41y"
-}], ["path", {
-  d: "m9 12 2 2 4-4",
-  key: "dzmm74"
-}]];
-const ShieldCheck = (props) => createComponent(Icon, mergeProps(props, {
-  name: "ShieldCheck",
-  iconNode: iconNode$r
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$q = [["path", {
+const iconNode$t = [["path", {
   d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
   key: "oel41y"
 }]];
 const Shield = (props) => createComponent(Icon, mergeProps(props, {
   name: "Shield",
-  iconNode: iconNode$q
+  iconNode: iconNode$t
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10528,7 +10780,7 @@ const Shield = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$p = [["path", {
+const iconNode$s = [["path", {
   d: "M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z",
   key: "hou9p0"
 }], ["path", {
@@ -10540,7 +10792,7 @@ const iconNode$p = [["path", {
 }]];
 const ShoppingBag = (props) => createComponent(Icon, mergeProps(props, {
   name: "ShoppingBag",
-  iconNode: iconNode$p
+  iconNode: iconNode$s
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10548,7 +10800,7 @@ const ShoppingBag = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$o = [["circle", {
+const iconNode$r = [["circle", {
   cx: "8",
   cy: "21",
   r: "1",
@@ -10564,7 +10816,7 @@ const iconNode$o = [["circle", {
 }]];
 const ShoppingCart = (props) => createComponent(Icon, mergeProps(props, {
   name: "ShoppingCart",
-  iconNode: iconNode$o
+  iconNode: iconNode$r
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10572,7 +10824,7 @@ const ShoppingCart = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$n = [["rect", {
+const iconNode$q = [["rect", {
   width: "14",
   height: "20",
   x: "5",
@@ -10586,7 +10838,7 @@ const iconNode$n = [["rect", {
 }]];
 const Smartphone = (props) => createComponent(Icon, mergeProps(props, {
   name: "Smartphone",
-  iconNode: iconNode$n
+  iconNode: iconNode$q
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10594,7 +10846,7 @@ const Smartphone = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$m = [["circle", {
+const iconNode$p = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -10617,7 +10869,7 @@ const iconNode$m = [["circle", {
 }]];
 const Smile = (props) => createComponent(Icon, mergeProps(props, {
   name: "Smile",
-  iconNode: iconNode$m
+  iconNode: iconNode$p
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10625,7 +10877,7 @@ const Smile = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$l = [["path", {
+const iconNode$o = [["path", {
   d: "M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z",
   key: "4pj2yx"
 }], ["path", {
@@ -10643,7 +10895,7 @@ const iconNode$l = [["path", {
 }]];
 const Sparkles = (props) => createComponent(Icon, mergeProps(props, {
   name: "Sparkles",
-  iconNode: iconNode$l
+  iconNode: iconNode$o
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10651,7 +10903,7 @@ const Sparkles = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$k = [["rect", {
+const iconNode$n = [["rect", {
   width: "18",
   height: "18",
   x: "3",
@@ -10661,7 +10913,7 @@ const iconNode$k = [["rect", {
 }]];
 const Square = (props) => createComponent(Icon, mergeProps(props, {
   name: "Square",
-  iconNode: iconNode$k
+  iconNode: iconNode$n
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10669,13 +10921,13 @@ const Square = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$j = [["path", {
+const iconNode$m = [["path", {
   d: "M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z",
   key: "r04s7s"
 }]];
 const Star = (props) => createComponent(Icon, mergeProps(props, {
   name: "Star",
-  iconNode: iconNode$j
+  iconNode: iconNode$m
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10683,7 +10935,7 @@ const Star = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$i = [["circle", {
+const iconNode$l = [["circle", {
   cx: "12",
   cy: "12",
   r: "4",
@@ -10715,7 +10967,7 @@ const iconNode$i = [["circle", {
 }]];
 const Sun = (props) => createComponent(Icon, mergeProps(props, {
   name: "Sun",
-  iconNode: iconNode$i
+  iconNode: iconNode$l
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10723,7 +10975,32 @@ const Sun = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$h = [["path", {
+const iconNode$k = [["rect", {
+  width: "16",
+  height: "20",
+  x: "4",
+  y: "2",
+  rx: "2",
+  ry: "2",
+  key: "76otgf"
+}], ["line", {
+  x1: "12",
+  x2: "12.01",
+  y1: "18",
+  y2: "18",
+  key: "1dp563"
+}]];
+const Tablet = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Tablet",
+  iconNode: iconNode$k
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$j = [["path", {
   d: "M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z",
   key: "vktsd0"
 }], ["circle", {
@@ -10735,7 +11012,7 @@ const iconNode$h = [["path", {
 }]];
 const Tag = (props) => createComponent(Icon, mergeProps(props, {
   name: "Tag",
-  iconNode: iconNode$h
+  iconNode: iconNode$j
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10743,7 +11020,7 @@ const Tag = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$g = [["circle", {
+const iconNode$i = [["circle", {
   cx: "12",
   cy: "12",
   r: "10",
@@ -10761,7 +11038,7 @@ const iconNode$g = [["circle", {
 }]];
 const Target = (props) => createComponent(Icon, mergeProps(props, {
   name: "Target",
-  iconNode: iconNode$g
+  iconNode: iconNode$i
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10769,7 +11046,7 @@ const Target = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$f = [["polyline", {
+const iconNode$h = [["polyline", {
   points: "4 17 10 11 4 5",
   key: "akl6gq"
 }], ["line", {
@@ -10781,7 +11058,7 @@ const iconNode$f = [["polyline", {
 }]];
 const Terminal = (props) => createComponent(Icon, mergeProps(props, {
   name: "Terminal",
-  iconNode: iconNode$f
+  iconNode: iconNode$h
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10789,7 +11066,7 @@ const Terminal = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$e = [["path", {
+const iconNode$g = [["path", {
   d: "M3 6h18",
   key: "d0wm0j"
 }], ["path", {
@@ -10813,7 +11090,7 @@ const iconNode$e = [["path", {
 }]];
 const Trash2 = (props) => createComponent(Icon, mergeProps(props, {
   name: "Trash2",
-  iconNode: iconNode$e
+  iconNode: iconNode$g
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10821,7 +11098,7 @@ const Trash2 = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$d = [["polyline", {
+const iconNode$f = [["polyline", {
   points: "22 7 13.5 15.5 8.5 10.5 2 17",
   key: "126l90"
 }], ["polyline", {
@@ -10830,7 +11107,7 @@ const iconNode$d = [["polyline", {
 }]];
 const TrendingUp = (props) => createComponent(Icon, mergeProps(props, {
   name: "TrendingUp",
-  iconNode: iconNode$d
+  iconNode: iconNode$f
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10838,7 +11115,7 @@ const TrendingUp = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$c = [["path", {
+const iconNode$e = [["path", {
   d: "M6 9H4.5a2.5 2.5 0 0 1 0-5H6",
   key: "17hqa7"
 }], ["path", {
@@ -10859,7 +11136,7 @@ const iconNode$c = [["path", {
 }]];
 const Trophy = (props) => createComponent(Icon, mergeProps(props, {
   name: "Trophy",
-  iconNode: iconNode$c
+  iconNode: iconNode$e
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10867,7 +11144,7 @@ const Trophy = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$b = [["rect", {
+const iconNode$d = [["rect", {
   width: "20",
   height: "15",
   x: "2",
@@ -10881,6 +11158,47 @@ const iconNode$b = [["rect", {
 }]];
 const Tv = (props) => createComponent(Icon, mergeProps(props, {
   name: "Tv",
+  iconNode: iconNode$d
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$c = [["path", {
+  d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
+  key: "1yyitq"
+}], ["circle", {
+  cx: "9",
+  cy: "7",
+  r: "4",
+  key: "nufk8"
+}], ["polyline", {
+  points: "16 11 18 13 22 9",
+  key: "1pwet4"
+}]];
+const UserCheck = (props) => createComponent(Icon, mergeProps(props, {
+  name: "UserCheck",
+  iconNode: iconNode$c
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$b = [["path", {
+  d: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2",
+  key: "975kel"
+}], ["circle", {
+  cx: "12",
+  cy: "7",
+  r: "4",
+  key: "17ys0d"
+}]];
+const User = (props) => createComponent(Icon, mergeProps(props, {
+  name: "User",
   iconNode: iconNode$b
 }));
 /**
@@ -10897,47 +11215,6 @@ const iconNode$a = [["path", {
   cy: "7",
   r: "4",
   key: "nufk8"
-}], ["polyline", {
-  points: "16 11 18 13 22 9",
-  key: "1pwet4"
-}]];
-const UserCheck = (props) => createComponent(Icon, mergeProps(props, {
-  name: "UserCheck",
-  iconNode: iconNode$a
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$9 = [["path", {
-  d: "M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2",
-  key: "975kel"
-}], ["circle", {
-  cx: "12",
-  cy: "7",
-  r: "4",
-  key: "17ys0d"
-}]];
-const User = (props) => createComponent(Icon, mergeProps(props, {
-  name: "User",
-  iconNode: iconNode$9
-}));
-/**
- * @license lucide-solid v0.473.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */
-const iconNode$8 = [["path", {
-  d: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2",
-  key: "1yyitq"
-}], ["circle", {
-  cx: "9",
-  cy: "7",
-  r: "4",
-  key: "nufk8"
 }], ["path", {
   d: "M22 21v-2a4 4 0 0 0-3-3.87",
   key: "kshegd"
@@ -10947,7 +11224,7 @@ const iconNode$8 = [["path", {
 }]];
 const Users = (props) => createComponent(Icon, mergeProps(props, {
   name: "Users",
-  iconNode: iconNode$8
+  iconNode: iconNode$a
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10955,7 +11232,7 @@ const Users = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$7 = [["path", {
+const iconNode$9 = [["path", {
   d: "M3 2v7c0 1.1.9 2 2 2h4a2 2 0 0 0 2-2V2",
   key: "cjf0a3"
 }], ["path", {
@@ -10967,7 +11244,7 @@ const iconNode$7 = [["path", {
 }]];
 const Utensils = (props) => createComponent(Icon, mergeProps(props, {
   name: "Utensils",
-  iconNode: iconNode$7
+  iconNode: iconNode$9
 }));
 /**
  * @license lucide-solid v0.473.0 - ISC
@@ -10975,7 +11252,7 @@ const Utensils = (props) => createComponent(Icon, mergeProps(props, {
  * This source code is licensed under the ISC license.
  * See the LICENSE file in the root directory of this source tree.
  */
-const iconNode$6 = [["path", {
+const iconNode$8 = [["path", {
   d: "m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5",
   key: "ftymec"
 }], ["rect", {
@@ -10988,6 +11265,52 @@ const iconNode$6 = [["path", {
 }]];
 const Video = (props) => createComponent(Icon, mergeProps(props, {
   name: "Video",
+  iconNode: iconNode$8
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$7 = [["path", {
+  d: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
+  key: "uqj9uw"
+}], ["path", {
+  d: "M16 9a5 5 0 0 1 0 6",
+  key: "1q6k2b"
+}], ["path", {
+  d: "M19.364 18.364a9 9 0 0 0 0-12.728",
+  key: "ijwkga"
+}]];
+const Volume2 = (props) => createComponent(Icon, mergeProps(props, {
+  name: "Volume2",
+  iconNode: iconNode$7
+}));
+/**
+ * @license lucide-solid v0.473.0 - ISC
+ *
+ * This source code is licensed under the ISC license.
+ * See the LICENSE file in the root directory of this source tree.
+ */
+const iconNode$6 = [["path", {
+  d: "M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z",
+  key: "uqj9uw"
+}], ["line", {
+  x1: "22",
+  x2: "16",
+  y1: "9",
+  y2: "15",
+  key: "1ewh16"
+}], ["line", {
+  x1: "16",
+  x2: "22",
+  y1: "9",
+  y2: "15",
+  key: "5ykzw1"
+}]];
+const VolumeX = (props) => createComponent(Icon, mergeProps(props, {
+  name: "VolumeX",
   iconNode: iconNode$6
 }));
 /**
@@ -11186,7 +11509,7 @@ const ICON_LIST = [
   { id: "film", name: "Film", category: "Creative", keywords: ["movie", "cinema", "animation"], component: Film },
   { id: "music", name: "Music", category: "Creative", keywords: ["audio", "sound", "track", "spotify"], component: Music },
   { id: "headphones", name: "Headphones", category: "Creative", keywords: ["listen", "audio", "beats"], component: Headphones },
-  { id: "image", name: "Image", category: "Creative", keywords: ["picture", "asset", "gallery"], component: Image },
+  { id: "image", name: "Image", category: "Creative", keywords: ["picture", "asset", "gallery"], component: Image$1 },
   { id: "wand-2", name: "Magic Wand", category: "Creative", keywords: ["fx", "filter", "effects"], component: WandSparkles },
   { id: "scissors", name: "Scissors", category: "Creative", keywords: ["craft", "edit", "clip"], component: Scissors },
   { id: "brush", name: "Brush", category: "Creative", keywords: ["paint", "art", "sketch"], component: Brush },
@@ -11309,7 +11632,7 @@ function getSmartIconId(name = "") {
     return "moon";
   return "folder";
 }
-var _tmpl$$1B = /* @__PURE__ */ template(`<span>`);
+var _tmpl$$1P = /* @__PURE__ */ template(`<span>`);
 function WorkspaceIcon(props) {
   const iconId = () => {
     if (props.icon && props.icon !== "auto") {
@@ -11322,7 +11645,7 @@ function WorkspaceIcon(props) {
     return item ? item.component : Folder;
   };
   return (() => {
-    var _el$ = _tmpl$$1B();
+    var _el$ = _tmpl$$1P();
     insert(_el$, () => {
       const Comp = IconComp();
       return createComponent(Comp, {
@@ -11338,7 +11661,7 @@ function WorkspaceIcon(props) {
     return _el$;
   })();
 }
-var _tmpl$$1A = /* @__PURE__ */ template(`<span><span class=text-neutral-400></span><span>`);
+var _tmpl$$1O = /* @__PURE__ */ template(`<span><span class=text-neutral-400></span><span>`);
 function TabIslandEyebrow(props) {
   const isIconOnly = () => props.mode === "icon-only";
   return createComponent(Show, {
@@ -11346,7 +11669,7 @@ function TabIslandEyebrow(props) {
       return props.workspaceName;
     },
     get children() {
-      var _el$ = _tmpl$$1A(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$$1O(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, createComponent(WorkspaceIcon, {
         get icon() {
           return props.workspaceIcon;
@@ -16696,7 +17019,7 @@ var Flip = /* @__PURE__ */ (function() {
 })();
 Flip.version = "3.15.0";
 typeof window !== "undefined" && window.gsap && window.gsap.registerPlugin(Flip);
-var _tmpl$$1z = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$17 = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$O = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$i = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$5 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1N = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$1c = /* @__PURE__ */ template(`<div class="flex gap-[1px] w-3 h-2 p-[1px] rounded-[2px] border border-neutral-400/80"><div class="flex-1 bg-neutral-400/60 rounded-[1px]"></div><div class="flex-1 bg-neutral-400/60 rounded-[1px]">`), _tmpl$3$Q = /* @__PURE__ */ template(`<span class="text-[9px] font-medium text-neutral-400 italic">Auto-naming`), _tmpl$4$E = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-2"><div class="flex items-center justify-between pl-1"><div class="flex items-center gap-1.5"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest">Tab</span><div class="flex items-center gap-[2px] p-[2px] rounded-[4px] bg-neutral-100 dark:bg-neutral-800 text-neutral-400"></div></div></div><div class="relative group/input"><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-2 pb-2"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$6$j = /* @__PURE__ */ template(`<div class="pt-1 px-1 flex flex-col gap-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Tab`), _tmpl$7$c = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="tab-island-popover fixed z-[9999] pointer-events-auto cursor-default transform origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[260px] flex flex-col p-1.5 overflow-hidden">`), _tmpl$8$6 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg transition-transform active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg transition-colors">No, new panes only`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-2.5 h-2 rounded-[2px] border border-neutral-400/80 bg-neutral-300/40">`), _tmpl$0$1 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function TabPopover(props) {
   let popoverRef;
@@ -16721,14 +17044,14 @@ function TabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$1z();
+        var _el$ = _tmpl$$1N();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$7$b(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$7$c(), _el$3 = _el$2.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -16738,7 +17061,7 @@ function TabPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$17 = _tmpl$8$5(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
+              var _el$17 = _tmpl$8$6(), _el$18 = _el$17.firstChild, _el$19 = _el$18.nextSibling, _el$20 = _el$19.firstChild, _el$22 = _el$20.nextSibling, _el$23 = _el$19.nextSibling, _el$24 = _el$23.firstChild, _el$25 = _el$24.nextSibling;
               insert(_el$22, () => props.cascadePrompt?.profileName);
               _el$24.$$click = (e) => {
                 e.stopPropagation();
@@ -16753,7 +17076,7 @@ function TabPopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$4$C(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$4 = _tmpl$4$E(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$1 = _el$5.nextSibling, _el$10 = _el$1.firstChild;
               insert(_el$8, createComponent(Show, {
                 get when() {
                   return props.isSplit;
@@ -16762,7 +17085,7 @@ function TabPopover(props) {
                   return _tmpl$9$1();
                 },
                 get children() {
-                  return _tmpl$2$17();
+                  return _tmpl$2$1c();
                 }
               }));
               insert(_el$5, createComponent(Show, {
@@ -16770,7 +17093,7 @@ function TabPopover(props) {
                   return !props.tab.custom_name;
                 },
                 get children() {
-                  return _tmpl$3$O();
+                  return _tmpl$3$Q();
                 }
               }), null);
               _el$10.$$keydown = (e) => {
@@ -16842,7 +17165,7 @@ function TabPopover(props) {
               }), null);
               return _el$11;
             })(), (() => {
-              var _el$15 = _tmpl$6$i(), _el$16 = _el$15.firstChild;
+              var _el$15 = _tmpl$6$j(), _el$16 = _el$15.firstChild;
               _el$16.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -16870,10 +17193,10 @@ function TabPopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$1y = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-full h-full object-contain pointer-events-none select-none">`, true, false, false), _tmpl$2$16 = /* @__PURE__ */ template(`<div>`), _tmpl$3$N = /* @__PURE__ */ template(`<svg viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
+var _tmpl$$1M = /* @__PURE__ */ template(`<img alt loading=lazy decoding=async class="w-3.5 h-3.5 object-contain pointer-events-none select-none">`, true, false, false), _tmpl$2$1b = /* @__PURE__ */ template(`<div>`), _tmpl$3$P = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono font-bold text-neutral-600 dark:text-neutral-300 leading-none select-none">`), _tmpl$4$D = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 class="text-neutral-400 dark:text-neutral-500 shrink-0"><circle cx=12 cy=12 r=10></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20">`);
 function Favicon(props) {
   const [failed, setFailed] = createSignal(false);
-  const size = () => props.size || 16;
+  const isSquircle = () => props.asSquircle !== false;
   const hasError = () => failed() || isFaviconFailed(props.url);
   const faviconUrl = () => {
     if (hasError()) return "";
@@ -16883,49 +17206,60 @@ function Favicon(props) {
     setFailed(true);
     markFaviconFailed(props.url);
   };
+  const domainInitial = () => {
+    try {
+      const d = extractDomain(props.url);
+      if (!d) return "";
+      const clean = d.replace(/^(www\.)/i, "");
+      return clean.charAt(0).toUpperCase();
+    } catch {
+      return "";
+    }
+  };
   return (() => {
-    var _el$ = _tmpl$2$16();
+    var _el$ = _tmpl$2$1b();
     insert(_el$, createComponent(Show, {
       get when() {
         return memo(() => !!faviconUrl())() && !hasError();
       },
       get fallback() {
-        return (() => {
-          var _el$3 = _tmpl$3$N();
-          createRenderEffect((_p$) => {
-            var _v$4 = Math.max(10, size() - 4), _v$5 = Math.max(10, size() - 4);
-            _v$4 !== _p$.e && setAttribute(_el$3, "width", _p$.e = _v$4);
-            _v$5 !== _p$.t && setAttribute(_el$3, "height", _p$.t = _v$5);
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
-          return _el$3;
-        })();
+        return createComponent(Show, {
+          get when() {
+            return domainInitial();
+          },
+          get fallback() {
+            return _tmpl$4$D();
+          },
+          get children() {
+            var _el$3 = _tmpl$3$P();
+            insert(_el$3, domainInitial);
+            return _el$3;
+          }
+        });
       },
       get children() {
-        var _el$2 = _tmpl$$1y();
+        var _el$2 = _tmpl$$1M();
         _el$2.addEventListener("error", handleError2);
         createRenderEffect(() => setAttribute(_el$2, "src", faviconUrl()));
         return _el$2;
       }
     }));
     createRenderEffect((_p$) => {
-      var _v$ = `flex items-center justify-center shrink-0 overflow-hidden ${props.isHibernated ? "grayscale opacity-60 transition-opacity duration-150 group-hover/tab:grayscale-0 group-hover/tab:opacity-100" : ""} ${props.class || ""}`, _v$2 = `${size()}px`, _v$3 = `${size()}px`;
+      var _v$ = `flex items-center justify-center shrink-0 ${isSquircle() ? "w-5 h-5 rounded-[6px] bg-white text-neutral-900 border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,1)] overflow-hidden" : "overflow-hidden"} ${props.isHibernated ? "grayscale opacity-60 transition-opacity duration-150 group-hover/tab:grayscale-0 group-hover/tab:opacity-100" : ""} ${props.class || ""}`, _v$2 = !isSquircle() && props.size ? {
+        width: `${props.size}px`,
+        height: `${props.size}px`
+      } : void 0;
       _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-      _v$2 !== _p$.t && setStyleProperty(_el$, "width", _p$.t = _v$2);
-      _v$3 !== _p$.a && setStyleProperty(_el$, "height", _p$.a = _v$3);
+      _p$.t = style(_el$, _v$2, _p$.t);
       return _p$;
     }, {
       e: void 0,
-      t: void 0,
-      a: void 0
+      t: void 0
     });
     return _el$;
   })();
 }
-var _tmpl$$1x = /* @__PURE__ */ template(`<div class="flex items-center justify-center rounded-[3px] bg-neutral-200/80 dark:bg-neutral-800 text-[8px] font-mono font-semibold text-neutral-500 dark:text-neutral-400 z-0 shrink-0 ml-0.5">+`), _tmpl$2$15 = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1L = /* @__PURE__ */ template(`<div class="w-5 h-5 flex items-center justify-center rounded-[6px] bg-neutral-200/80 dark:bg-neutral-800 text-[9px] font-mono font-bold text-neutral-600 dark:text-neutral-400 border border-neutral-300/50 dark:border-neutral-700/50 z-0 shrink-0 ml-0.5 select-none">+`), _tmpl$2$1a = /* @__PURE__ */ template(`<div>`);
 function TabFaviconStack(props) {
   const size = () => props.size || 14;
   const validUrls = createMemo(() => (props.urls || []).filter((u) => u && u.trim().length > 0 && u !== "about:blank"));
@@ -16944,7 +17278,7 @@ function TabFaviconStack(props) {
       return validUrls().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$2$15();
+      var _el$ = _tmpl$2$1a();
       insert(_el$, createComponent(For, {
         get each() {
           return visibleUrls();
@@ -16952,7 +17286,7 @@ function TabFaviconStack(props) {
         children: (url, idx) => {
           const isFocused = createMemo(() => Boolean(props.activeUrl && (props.activeUrl === url || extractDomain(props.activeUrl) && extractDomain(props.activeUrl) === extractDomain(url))));
           return (() => {
-            var _el$4 = _tmpl$2$15();
+            var _el$4 = _tmpl$2$1a();
             insert(_el$4, createComponent(Favicon, {
               url,
               get size() {
@@ -16963,9 +17297,9 @@ function TabFaviconStack(props) {
               }
             }));
             createRenderEffect((_p$) => {
-              var _v$3 = `relative flex items-center justify-center shrink-0 transition-transform transition-opacity duration-150 ${isMulti() ? `${isFocused() ? "scale-105 opacity-100 z-20 drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)]" : "opacity-75 z-10"}` : "opacity-100 z-10"}`, _v$4 = isFocused() ? 20 : 10 - idx();
-              _v$3 !== _p$.e && className(_el$4, _p$.e = _v$3);
-              _v$4 !== _p$.t && setStyleProperty(_el$4, "z-index", _p$.t = _v$4);
+              var _v$ = `relative flex items-center justify-center shrink-0 transition-transform transition-opacity duration-150 ${isMulti() ? `${isFocused() ? "scale-105 opacity-100 z-20 drop-shadow-[0_1px_2px_rgba(0,0,0,0.3)]" : "opacity-75 z-10"}` : "opacity-100 z-10"}`, _v$2 = isFocused() ? 20 : 10 - idx();
+              _v$ !== _p$.e && className(_el$4, _p$.e = _v$);
+              _v$2 !== _p$.t && setStyleProperty(_el$4, "z-index", _p$.t = _v$2);
               return _p$;
             }, {
               e: void 0,
@@ -16980,18 +17314,9 @@ function TabFaviconStack(props) {
           return validUrls().length > 3;
         },
         get children() {
-          var _el$2 = _tmpl$$1x();
+          var _el$2 = _tmpl$$1L();
           _el$2.firstChild;
           insert(_el$2, () => validUrls().length - 3, null);
-          createRenderEffect((_p$) => {
-            var _v$ = `${size()}px`, _v$2 = `${size()}px`;
-            _v$ !== _p$.e && setStyleProperty(_el$2, "width", _p$.e = _v$);
-            _v$2 !== _p$.t && setStyleProperty(_el$2, "height", _p$.t = _v$2);
-            return _p$;
-          }, {
-            e: void 0,
-            t: void 0
-          });
           return _el$2;
         }
       }), null);
@@ -17135,14 +17460,14 @@ function initAudioMatrixListener() {
     window.removeEventListener("app:media-status", handleDynamic);
   };
 }
-var _tmpl$$1w = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[10px] bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-3">`);
+var _tmpl$$1K = /* @__PURE__ */ template(`<span class="flex items-end pb-[3px] gap-[2px] h-4 px-1.5 rounded-[6px] bg-neutral-900/10 dark:bg-white/10 hover:bg-neutral-900/20 dark:hover:bg-white/20 active:scale-95 cursor-pointer shrink-0 transition-all text-current select-none ml-1 group/eq"title="Playing audio - Click to mute"><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[10px] bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[6px] bg-current rounded-full animate-eq-soft-3">`);
 function TabAudioEqualizer(props) {
   return createComponent(Show, {
     get when() {
       return props.isPlaying;
     },
     get children() {
-      var _el$ = _tmpl$$1w();
+      var _el$ = _tmpl$$1K();
       _el$.$$click = (e) => {
         e.stopPropagation();
         const targetIds = Array.from(/* @__PURE__ */ new Set([...props.leafPaneIds, ...props.activePaneId ? [props.activePaneId] : []]));
@@ -17744,7 +18069,7 @@ function computeSmartTabName(customName, leafPanes, activePaneId) {
   const primaryName = getPaneLabel(orderedPanes[0]);
   return `${primaryName} + ${orderedPanes.length - 1}`;
 }
-var _tmpl$$1v = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$2$14 = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
+var _tmpl$$1J = /* @__PURE__ */ template(`<button><svg width=8 height=8 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`), _tmpl$2$19 = /* @__PURE__ */ template(`<div class="relative group/tab shrink-0"role=presentation><div><button role=tab><span>`);
 function TabItem(props) {
   const leafInfo = createMemo(() => {
     const isActive = props.isActive;
@@ -17785,7 +18110,7 @@ function TabItem(props) {
     return props.isActive ? "max-w-[140px] opacity-100 ml-1.5" : "max-w-0 opacity-0 ml-0 group-hover/tab:max-w-[130px] group-hover/tab:opacity-100 group-hover/tab:ml-1.5";
   });
   return (() => {
-    var _el$ = _tmpl$2$14(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$2$19(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     addEventListener(_el$3, "contextmenu", props.onContextMenu, true);
     addEventListener(_el$3, "click", props.onTabClick, true);
     insert(_el$3, createComponent(TabFaviconStack, {
@@ -17859,7 +18184,7 @@ function TabItem(props) {
         return props.onCloseTab;
       },
       get children() {
-        var _el$5 = _tmpl$$1v();
+        var _el$5 = _tmpl$$1J();
         _el$5.$$click = (e) => {
           e.stopPropagation();
           props.onCloseTab?.(props.tab.id);
@@ -17897,16 +18222,16 @@ function TabItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$1u = /* @__PURE__ */ template(`<div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$1I = /* @__PURE__ */ template(`<div class="p-[2px] rounded-[12px] ml-0.5 shrink-0 transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] bg-transparent hover:bg-neutral-900/10"><button title="New Tab"aria-label="New Tab"class="group/newtab flex items-center justify-center w-7 h-7 rounded-[10px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/newtab:rotate-90 group-active/newtab:scale-[0.9]"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function TabIslandAddButton(props) {
   return (() => {
-    var _el$ = _tmpl$$1u(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$1I(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => props.onCreateTab(e.currentTarget.getBoundingClientRect());
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$1t = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$13 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full max-w-full overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink min-w-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden flex-1 min-w-0 shrink [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1">`);
+var _tmpl$$1H = /* @__PURE__ */ template(`<span class="text-[11px] text-neutral-400 italic px-2 select-none shrink-0">No tabs — start one →`), _tmpl$2$18 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 pointer-events-auto w-full max-w-full overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] shrink min-w-0"role=tablist style=-webkit-app-region:no-drag><div class="flex items-center gap-1.5 overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&amp;::-webkit-scrollbar]:hidden flex-1 min-w-0 shrink [mask-image:linear-gradient(to_right,transparent_0px,black_12px,black_calc(100%-12px),transparent_100%)] px-1">`);
 function TabIsland(props) {
   const [configOpenId, setConfigOpenId] = createSignal(null);
   const [configPos, setConfigPos] = createSignal(null);
@@ -17928,7 +18253,7 @@ function TabIsland(props) {
   });
   const tabItemMode = () => props.tabItemMode || "expanded";
   return (() => {
-    var _el$ = _tmpl$2$13(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$18(), _el$2 = _el$.firstChild;
     insert(_el$, createComponent(TabIslandEyebrow, {
       get workspaceName() {
         return props.activeWorkspaceName;
@@ -18055,7 +18380,7 @@ function TabIsland(props) {
         return props.tabs.length === 0;
       },
       get children() {
-        return _tmpl$$1t();
+        return _tmpl$$1H();
       }
     }), null);
     insert(_el$, createComponent(TabIslandAddButton, {
@@ -18067,7 +18392,7 @@ function TabIsland(props) {
     return _el$;
   })();
 }
-var _tmpl$$1s = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-full max-w-full px-1"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1G = /* @__PURE__ */ template(`<div id=topbar class="absolute top-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden left-2 max-w-0 opacity-0"><div class="h-full flex items-center min-w-0 w-full max-w-full px-1"style=-webkit-app-region:no-drag>`);
 function AppTopbar(props) {
   const handleCloseTab = async (tabId) => {
     const currentTabs = props.ws.tabs();
@@ -18128,7 +18453,7 @@ function AppTopbar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$1s(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1G(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.topbarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.topbarRef = _el$;
@@ -18170,7 +18495,7 @@ function AppTopbar(props) {
     }
   });
 }
-var _tmpl$$1r = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$12 = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$M = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
+var _tmpl$$1F = /* @__PURE__ */ template(`<div><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[250px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]"></span><span class="text-[9px] text-neutral-400 font-medium"> </span></div><div class="p-1 max-h-[220px] overflow-y-auto flex flex-col gap-0.5">`), _tmpl$2$17 = /* @__PURE__ */ template(`<span class="text-[9px] text-neutral-400 font-mono">↵`), _tmpl$3$O = /* @__PURE__ */ template(`<button><span class="truncate flex-1">`);
 function formatUrlForDisplay(rawUrl) {
   try {
     const query = extractSearchQuery(rawUrl);
@@ -18254,7 +18579,7 @@ function HistoryDropdown(props) {
       return memo(() => !!props.isOpen)() && props.items.length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$1r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
+      var _el$ = _tmpl$$1F(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$4.nextSibling;
       _el$.$$pointerdown = (e) => e.stopPropagation();
       var _ref$ = dropdownRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : dropdownRef = _el$;
@@ -18268,7 +18593,7 @@ function HistoryDropdown(props) {
           return props.items;
         },
         children: (item, idx) => (() => {
-          var _el$9 = _tmpl$3$M(), _el$0 = _el$9.firstChild;
+          var _el$9 = _tmpl$3$O(), _el$0 = _el$9.firstChild;
           _el$9.$$click = (e) => {
             e.stopPropagation();
             props.onSelect(item.url, item.index);
@@ -18292,7 +18617,7 @@ function HistoryDropdown(props) {
               return highlightedIndex() === idx();
             },
             get children() {
-              return _tmpl$2$12();
+              return _tmpl$2$17();
             }
           }), null);
           createRenderEffect(() => className(_el$9, `w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-left text-[11px] transition-colors group ${highlightedIndex() === idx() ? "bg-neutral-100/90 text-neutral-950 font-semibold shadow-sm" : "text-neutral-700 hover:text-neutral-950 hover:bg-neutral-50"}`));
@@ -18305,21 +18630,21 @@ function HistoryDropdown(props) {
   });
 }
 delegateEvents(["pointerdown", "mousemove", "click"]);
-var _tmpl$$1q = /* @__PURE__ */ template(`<kbd>`);
+var _tmpl$$1E = /* @__PURE__ */ template(`<kbd>`);
 function ShortcutBadge(props) {
   return createComponent(Show, {
     get when() {
       return props.shortcut;
     },
     get children() {
-      var _el$ = _tmpl$$1q();
+      var _el$ = _tmpl$$1E();
       insert(_el$, () => props.shortcut);
       createRenderEffect(() => className(_el$, `px-1.5 py-0.5 text-[10px] font-sans font-semibold rounded bg-white text-neutral-900 shadow-sm border border-neutral-200/80 leading-none tracking-normal inline-flex items-center justify-center select-none ${props.class || ""}`));
       return _el$;
     }
   });
 }
-var _tmpl$$1p = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$11 = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
+var _tmpl$$1D = /* @__PURE__ */ template(`<div><span>`), _tmpl$2$16 = /* @__PURE__ */ template(`<div class="inline-flex items-center justify-center shrink-0">`);
 function ActionTooltip(props) {
   let triggerRef;
   const [isOpen, setIsOpen] = createSignal(false);
@@ -18367,7 +18692,7 @@ function ActionTooltip(props) {
   };
   onCleanup(() => clearTimeout(hoverTimer));
   return (() => {
-    var _el$ = _tmpl$2$11();
+    var _el$ = _tmpl$2$16();
     _el$.$$pointerdown = handlePointerLeave;
     _el$.addEventListener("pointerleave", handlePointerLeave);
     _el$.addEventListener("pointerenter", handlePointerEnter);
@@ -18381,7 +18706,7 @@ function ActionTooltip(props) {
       get children() {
         return createComponent(Portal, {
           get children() {
-            var _el$2 = _tmpl$$1p(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$1D(), _el$3 = _el$2.firstChild;
             insert(_el$3, () => props.label);
             insert(_el$2, createComponent(ShortcutBadge, {
               get shortcut() {
@@ -18408,7 +18733,7 @@ function ActionTooltip(props) {
   })();
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$1o = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$10 = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$L = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$B = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1C = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Back><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m15 18-6-6 6-6">`), _tmpl$2$15 = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0"title=Forward><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="m9 18 6-6-6-6">`), _tmpl$3$N = /* @__PURE__ */ template(`<button title="Reload Page"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$4$C = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0 relative"style=-webkit-app-region:no-drag>`);
 function ActivePaneNav(props) {
   let longPressTimer;
   const [showBackHistory, setShowBackHistory] = createSignal(false);
@@ -18513,7 +18838,7 @@ function ActivePaneNav(props) {
   };
   onCleanup(() => clearTimeout(longPressTimer));
   return (() => {
-    var _el$ = _tmpl$4$B();
+    var _el$ = _tmpl$4$C();
     insert(_el$, createComponent(ActionTooltip, {
       label: "Back",
       shortcut: isMac ? "⌘[" : "Ctrl+[",
@@ -18521,7 +18846,7 @@ function ActivePaneNav(props) {
         return !canGoBack();
       },
       get children() {
-        var _el$2 = _tmpl$$1o();
+        var _el$2 = _tmpl$$1C();
         _el$2.$$contextmenu = (e) => {
           e.preventDefault();
           if (backItems().length > 0) openHistory("back");
@@ -18548,7 +18873,7 @@ function ActivePaneNav(props) {
         return !canGoForward();
       },
       get children() {
-        var _el$3 = _tmpl$2$10();
+        var _el$3 = _tmpl$2$15();
         _el$3.$$contextmenu = (e) => {
           e.preventDefault();
           if (fwdItems().length > 0) openHistory("fwd");
@@ -18575,7 +18900,7 @@ function ActivePaneNav(props) {
         return !props.node;
       },
       get children() {
-        var _el$4 = _tmpl$3$L();
+        var _el$4 = _tmpl$3$N();
         _el$4.$$click = handleReload;
         createRenderEffect((_p$) => {
           var _v$ = `flex items-center justify-center w-7 h-7 rounded-[9px] hover:bg-neutral-100/90 active:scale-[0.94] transition-all text-neutral-600 hover:text-neutral-900 disabled:opacity-30 disabled:pointer-events-none shrink-0 ${isReloading() ? "animate-spin text-neutral-900" : ""}`, _v$2 = !props.node;
@@ -19280,7 +19605,7 @@ function useSearchSuggestions(urlInput, profileApps) {
     isDomainPattern
   };
 }
-var _tmpl$$1n = /* @__PURE__ */ template(`<img loading=eager style=image-rendering:-webkit-optimize-contrast>`, true, false, false), _tmpl$2$$ = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$1B = /* @__PURE__ */ template(`<img loading=eager style=image-rendering:-webkit-optimize-contrast>`, true, false, false), _tmpl$2$14 = /* @__PURE__ */ template(`<div>`);
 function getDeterministicGradient(name) {
   const gradients = ["linear-gradient(135deg, #ef4444 0%, #f97316 100%)", "linear-gradient(135deg, #3b82f6 0%, #06b6d4 100%)", "linear-gradient(135deg, #10b981 0%, #059669 100%)", "linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)", "linear-gradient(135deg, #f59e0b 0%, #e11d48 100%)", "linear-gradient(135deg, #6366f1 0%, #a855f7 100%)", "linear-gradient(135deg, #14b8a6 0%, #0ea5e9 100%)"];
   let hash = 0;
@@ -19308,7 +19633,7 @@ function AppIcon(props) {
     },
     get fallback() {
       return (() => {
-        var _el$2 = _tmpl$2$$();
+        var _el$2 = _tmpl$2$14();
         insert(_el$2, () => (props.app.name || domain() || "A").charAt(0));
         createRenderEffect((_p$) => {
           var _v$4 = `${props.class || "w-6 h-6"} rounded-lg flex items-center justify-center text-[10px] font-bold text-white uppercase select-none shrink-0 shadow-xs`, _v$5 = getDeterministicGradient(props.app.name || domain() || "A");
@@ -19323,7 +19648,7 @@ function AppIcon(props) {
       })();
     },
     get children() {
-      var _el$ = _tmpl$$1n();
+      var _el$ = _tmpl$$1B();
       _el$.addEventListener("error", () => setHasError(true));
       createRenderEffect((_p$) => {
         var _v$ = faviconSrc(), _v$2 = `${props.class || "w-6 h-6"} rounded-lg object-contain shrink-0 p-0.5 bg-white shadow-xs border border-neutral-200/50`, _v$3 = props.app.name;
@@ -19444,7 +19769,7 @@ function useProfileApps(_profileId) {
     handleDrop
   };
 }
-var _tmpl$$1m = /* @__PURE__ */ template(`<div>`), _tmpl$2$_ = /* @__PURE__ */ template(`<div class="w-5 h-5 flex items-center justify-center shrink-0">`), _tmpl$3$K = /* @__PURE__ */ template(`<span class="text-[10px] text-neutral-500 truncate tracking-tight">`), _tmpl$4$A = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$5$p = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate tracking-tight text-neutral-800 font-medium">`), _tmpl$6$h = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$7$a = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
+var _tmpl$$1A = /* @__PURE__ */ template(`<div>`), _tmpl$2$13 = /* @__PURE__ */ template(`<div class="w-5 h-5 flex items-center justify-center shrink-0">`), _tmpl$3$M = /* @__PURE__ */ template(`<span class="text-[10px] text-neutral-500 truncate tracking-tight">`), _tmpl$4$B = /* @__PURE__ */ template(`<span class="text-[8px] font-bold bg-neutral-100 text-neutral-500 uppercase px-1.5 py-0.5 rounded tracking-wide shrink-0 border border-neutral-200/50">Launch`), _tmpl$5$p = /* @__PURE__ */ template(`<button class="w-full text-left px-3 py-2 rounded-xl flex items-center justify-between transition-colors cursor-pointer"><div class="flex items-center gap-3 min-w-0"><div class="flex flex-col min-w-0"><span class="text-xs truncate tracking-tight text-neutral-800 font-medium">`), _tmpl$6$i = /* @__PURE__ */ template(`<span class="flex items-center justify-center w-5 h-5 rounded-md bg-neutral-100 shrink-0 border border-neutral-200/50">`), _tmpl$7$b = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 flex items-center gap-0.5 shrink-0">Open`);
 function CommandBarDropdown(props) {
   let listContainer;
   createEffect(() => {
@@ -19458,7 +19783,7 @@ function CommandBarDropdown(props) {
   });
   const isVisible = () => props.show && props.suggestions.length > 0;
   return (() => {
-    var _el$ = _tmpl$$1m();
+    var _el$ = _tmpl$$1A();
     use((el) => {
       listContainer = el;
       props.containerRef(el);
@@ -19476,7 +19801,7 @@ function CommandBarDropdown(props) {
           },
           get fallback() {
             return (() => {
-              var _el$9 = _tmpl$6$h();
+              var _el$9 = _tmpl$6$i();
               insert(_el$9, createComponent(Switch, {
                 get children() {
                   return [createComponent(Match, {
@@ -19511,7 +19836,7 @@ function CommandBarDropdown(props) {
             })();
           },
           get children() {
-            var _el$4 = _tmpl$2$_();
+            var _el$4 = _tmpl$2$13();
             insert(_el$4, createComponent(AppIcon, {
               get app() {
                 return item.appItem;
@@ -19527,7 +19852,7 @@ function CommandBarDropdown(props) {
             return item.subtitle;
           },
           get children() {
-            var _el$7 = _tmpl$3$K();
+            var _el$7 = _tmpl$3$M();
             insert(_el$7, () => item.subtitle);
             return _el$7;
           }
@@ -19542,7 +19867,7 @@ function CommandBarDropdown(props) {
                 return props.activeIdx === idx();
               },
               get children() {
-                var _el$0 = _tmpl$7$a(), _el$1 = _el$0.firstChild;
+                var _el$0 = _tmpl$7$b(), _el$1 = _el$0.firstChild;
                 insert(_el$0, createComponent(CornerDownLeft, {
                   "class": "w-2.5 h-2.5"
                 }), _el$1);
@@ -19551,7 +19876,7 @@ function CommandBarDropdown(props) {
             });
           },
           get children() {
-            return _tmpl$4$A();
+            return _tmpl$4$B();
           }
         }), null);
         createRenderEffect((_$p) => classList(_el$2, {
@@ -19612,16 +19937,16 @@ function cleanUrlString(rawUrl) {
     return rawUrl;
   }
 }
-var _tmpl$$1l = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$Z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$J = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$o = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$g = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all shrink-0 active:scale-95">`), _tmpl$7$9 = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
+var _tmpl$$1z = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><circle cx=11 cy=11 r=8></circle><path d="m21 21-4.3-4.3">`), _tmpl$2$12 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=20 height=8 x=2 y=2 rx=2></rect><rect width=20 height=8 x=2 y=14 rx=2></rect><line x1=6 x2=6.01 y1=6 y2=6></line><line x1=6 x2=6.01 y1=18 y2=18>`), _tmpl$3$L = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=18 height=11 x=3 y=11 rx=2></rect><path d="M7 11V7a5 5 0 0 1 10 0v4">`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-6 h-full text-neutral-400 pl-1 shrink-0 select-none">`), _tmpl$5$o = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class=text-neutral-900><polyline points="20 6 9 17 4 12">`), _tmpl$6$h = /* @__PURE__ */ template(`<button class="opacity-0 group-hover/omni:opacity-100 flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-500 hover:text-neutral-900 transition-all shrink-0 active:scale-95">`), _tmpl$7$a = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><rect width=14 height=14 x=8 y=8 rx=2></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2">`);
 function OmniboxInputIcon(props) {
   return (() => {
-    var _el$ = _tmpl$4$z();
+    var _el$ = _tmpl$4$A();
     insert(_el$, createComponent(Show, {
       get when() {
         return props.type === "search";
       },
       get children() {
-        return _tmpl$$1l();
+        return _tmpl$$1z();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -19629,7 +19954,7 @@ function OmniboxInputIcon(props) {
         return props.type === "localhost";
       },
       get children() {
-        return _tmpl$2$Z();
+        return _tmpl$2$12();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -19637,7 +19962,7 @@ function OmniboxInputIcon(props) {
         return props.type === "url";
       },
       get children() {
-        return _tmpl$3$J();
+        return _tmpl$3$L();
       }
     }), null);
     return _el$;
@@ -19645,14 +19970,14 @@ function OmniboxInputIcon(props) {
 }
 function CopyCleanButton(props) {
   return (() => {
-    var _el$5 = _tmpl$6$g();
+    var _el$5 = _tmpl$6$h();
     addEventListener(_el$5, "click", props.onCopy, true);
     insert(_el$5, createComponent(Show, {
       get when() {
         return props.copied;
       },
       get fallback() {
-        return _tmpl$7$9();
+        return _tmpl$7$a();
       },
       get children() {
         return _tmpl$5$o();
@@ -19780,7 +20105,7 @@ function useOmniboxEvents(params) {
   };
   return { handleKeyDown, dismiss };
 }
-var _tmpl$$1k = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
+var _tmpl$$1y = /* @__PURE__ */ template(`<div class="absolute bottom-0 left-2 right-2 h-[1.5px] bg-neutral-200/40 overflow-hidden rounded-full pointer-events-none"><div class="h-full bg-neutral-800 transition-all duration-200 ease-out">`);
 function ActivePaneProgress(props) {
   const [loading, setLoading] = createSignal(false);
   const [progress, setProgress] = createSignal(0);
@@ -19863,13 +20188,13 @@ function ActivePaneProgress(props) {
       return loading();
     },
     get children() {
-      var _el$ = _tmpl$$1k(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1y(), _el$2 = _el$.firstChild;
       createRenderEffect((_$p) => setStyleProperty(_el$2, "width", `${progress()}%`));
       return _el$;
     }
   });
 }
-var _tmpl$$1j = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$Y = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 active:scale-95">`), _tmpl$3$I = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$1x = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=animate-pulse><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$2$11 = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-5 h-5 rounded-md hover:bg-neutral-200/80 text-neutral-700 transition-colors shrink-0 active:scale-95">`), _tmpl$3$K = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function ActivePaneAudio(props) {
   const [isPlaying, setIsPlaying] = createSignal(false);
   const [isMuted, setIsMuted] = createSignal(false);
@@ -19900,17 +20225,17 @@ function ActivePaneAudio(props) {
       return isAudible();
     },
     get children() {
-      var _el$ = _tmpl$2$Y();
+      var _el$ = _tmpl$2$11();
       _el$.$$click = handleToggleMute;
       insert(_el$, createComponent(Show, {
         get when() {
           return !muted();
         },
         get fallback() {
-          return _tmpl$3$I();
+          return _tmpl$3$K();
         },
         get children() {
-          return _tmpl$$1j();
+          return _tmpl$$1x();
         }
       }));
       createRenderEffect((_p$) => {
@@ -19927,7 +20252,7 @@ function ActivePaneAudio(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$1i = /* @__PURE__ */ template(`<div class="relative flex items-center flex-1 min-w-0 w-full"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)..."><div><span class=truncate></span></div><div>`);
+var _tmpl$$1w = /* @__PURE__ */ template(`<div class="relative flex items-center flex-1 min-w-0 w-full"><div style=-webkit-app-region:no-drag><input type=text autocomplete=off autocorrect=off placeholder="Search or enter address (Alt+D)..."><div><span class=truncate></span></div><div>`);
 function ActivePaneOmnibox(props) {
   let inputRef;
   let omniContainerRef;
@@ -20030,7 +20355,7 @@ function ActivePaneOmnibox(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$1i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
+    var _el$ = _tmpl$$1w(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling;
     use((el) => omniContainerRef = el, _el$);
     _el$2.$$click = startEditing;
     insert(_el$2, createComponent(OmniboxInputIcon, {
@@ -20109,7 +20434,7 @@ function ActivePaneOmnibox(props) {
   })();
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$1h = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"><div class="w-full max-w-md bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl overflow-hidden pointer-events-auto"><div class="flex items-center justify-between px-5 py-4 border-b border-neutral-100 dark:border-neutral-800"><div><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Saved Layout Presets</h3><p class="text-[11px] text-neutral-400 font-mono mt-0.5">Your customized multi-pane stacks</p></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button></div><form class="p-4 border-b border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-950/40 flex gap-2"><input type=text placeholder="Save current layout as (e.g. Daily Review)..."class="flex-1 px-3 py-1.5 text-xs bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400"><button type=submit class="px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 rounded-xl text-xs font-medium hover:opacity-90 active:scale-95 disabled:opacity-40 transition-all flex items-center gap-1 shrink-0 cursor-pointer"><span>Save Current</span></button></form><div class="p-4 max-h-72 overflow-y-auto flex flex-col gap-2">`), _tmpl$2$X = /* @__PURE__ */ template(`<div class="py-8 text-center text-xs text-neutral-400 font-mono">No saved presets yet. Arrange your split layout and save it above.`), _tmpl$3$H = /* @__PURE__ */ template(`<div class="group flex items-center justify-between p-3 rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 hover:border-neutral-300 dark:hover:border-neutral-700 bg-white dark:bg-neutral-900/60 transition-all"><div><h4 class="text-xs font-semibold text-neutral-900 dark:text-neutral-100"></h4><p class="text-[10px] text-neutral-400 font-mono mt-0.5"></p></div><div class="flex items-center gap-1.5"><button class="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"><span>Apply</span></button><button class="p-1 text-neutral-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"title="Delete Preset">`);
+var _tmpl$$1v = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150"><div class="w-full max-w-md bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-2xl shadow-2xl overflow-hidden pointer-events-auto"><div class="flex items-center justify-between px-5 py-4 border-b border-neutral-100 dark:border-neutral-800"><div><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100">Saved Layout Presets</h3><p class="text-[11px] text-neutral-400 font-mono mt-0.5">Your customized multi-pane stacks</p></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors"></button></div><form class="p-4 border-b border-neutral-100 dark:border-neutral-800 bg-neutral-50/50 dark:bg-neutral-950/40 flex gap-2"><input type=text placeholder="Save current layout as (e.g. Daily Review)..."class="flex-1 px-3 py-1.5 text-xs bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-xl focus:outline-none focus:border-neutral-400 dark:focus:border-neutral-600 text-neutral-900 dark:text-neutral-100 placeholder-neutral-400"><button type=submit class="px-3 py-1.5 bg-neutral-900 dark:bg-white text-white dark:text-neutral-900 rounded-xl text-xs font-medium hover:opacity-90 active:scale-95 disabled:opacity-40 transition-all flex items-center gap-1 shrink-0 cursor-pointer"><span>Save Current</span></button></form><div class="p-4 max-h-72 overflow-y-auto flex flex-col gap-2">`), _tmpl$2$10 = /* @__PURE__ */ template(`<div class="py-8 text-center text-xs text-neutral-400 font-mono">No saved presets yet. Arrange your split layout and save it above.`), _tmpl$3$J = /* @__PURE__ */ template(`<div class="group flex items-center justify-between p-3 rounded-xl border border-neutral-200/70 dark:border-neutral-800/80 hover:border-neutral-300 dark:hover:border-neutral-700 bg-white dark:bg-neutral-900/60 transition-all"><div><h4 class="text-xs font-semibold text-neutral-900 dark:text-neutral-100"></h4><p class="text-[10px] text-neutral-400 font-mono mt-0.5"></p></div><div class="flex items-center gap-1.5"><button class="px-2.5 py-1 bg-neutral-100 hover:bg-neutral-200 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-200 rounded-lg text-xs font-medium transition-colors flex items-center gap-1 cursor-pointer"><span>Apply</span></button><button class="p-1 text-neutral-400 hover:text-red-500 rounded-lg transition-colors cursor-pointer"title="Delete Preset">`);
 function UserPresetsModal(props) {
   const [presets, setPresets] = createSignal([]);
   const [newPresetName, setNewPresetName] = createSignal("");
@@ -20151,7 +20476,7 @@ function UserPresetsModal(props) {
     get children() {
       return createComponent(Portal, {
         get children() {
-          var _el$ = _tmpl$$1h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$6.nextSibling;
+          var _el$ = _tmpl$$1v(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$6.nextSibling;
           addEventListener(_el$, "click", props.onClose, true);
           _el$2.$$click = (e) => e.stopPropagation();
           addEventListener(_el$5, "click", props.onClose, true);
@@ -20168,7 +20493,7 @@ function UserPresetsModal(props) {
               return presets().length > 0;
             },
             get fallback() {
-              return _tmpl$2$X();
+              return _tmpl$2$10();
             },
             get children() {
               return createComponent(For, {
@@ -20176,7 +20501,7 @@ function UserPresetsModal(props) {
                   return presets();
                 },
                 children: (preset) => (() => {
-                  var _el$10 = _tmpl$3$H(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$11.nextSibling, _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$15.nextSibling;
+                  var _el$10 = _tmpl$3$J(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$11.nextSibling, _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$15.nextSibling;
                   insert(_el$12, () => preset.name);
                   insert(_el$13, () => preset.previewApps.map((a) => a.name).join(" + ") || "Layout");
                   _el$15.$$click = () => handleApply(preset);
@@ -20201,7 +20526,7 @@ function UserPresetsModal(props) {
   });
 }
 delegateEvents(["click", "input"]);
-var _tmpl$$1g = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$W = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$G = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom</span></button></div><div class="px-2 py-1.5 border-t border-neutral-100 bg-neutral-50/50"><button class="w-full text-left px-2 py-1 hover:bg-neutral-100 text-neutral-600 hover:text-neutral-900 rounded-md text-[10px] font-medium transition-colors flex items-center justify-between"><span>My Presets...</span><span class="text-[9px] text-neutral-400">⌘P`), _tmpl$4$y = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
+var _tmpl$$1u = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 pl-2 pr-1 py-1.5 flex items-center justify-center transition-colors"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round stroke-linejoin=round><rect width=18 height=18 x=3 y=3 rx=2></rect><path d="M12 3v18">`), _tmpl$2$$ = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$3$I = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none"><div class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div class="bg-white rounded-[calc(1.25rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] w-[160px] flex flex-col overflow-hidden"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Split Layout</span></div><div class="p-1 grid grid-cols-2 gap-0.5"><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◧</span><span class="text-[9px] font-medium uppercase tracking-wide">Left</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">◨</span><span class="text-[9px] font-medium uppercase tracking-wide">Right</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬒</span><span class="text-[9px] font-medium uppercase tracking-wide">Top</span></button><button class="flex flex-col items-center p-2 hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 rounded-lg transition-colors active:scale-95"><span class="text-xl leading-none mb-1">⬓</span><span class="text-[9px] font-medium uppercase tracking-wide">Bottom</span></button></div><div class="px-2 py-1.5 border-t border-neutral-100 bg-neutral-50/50"><button class="w-full text-left px-2 py-1 hover:bg-neutral-100 text-neutral-600 hover:text-neutral-900 rounded-md text-[10px] font-medium transition-colors flex items-center justify-between"><span>My Presets...</span><span class="text-[9px] text-neutral-400">⌘P`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="relative group/splitmenu flex items-center shrink-0 bg-transparent hover:bg-neutral-100 rounded-[10px] transition-colors"><button class="text-neutral-400 hover:text-neutral-900 pr-1.5 pl-0.5 py-1.5 flex items-center justify-center transition-colors"title="Split Options"><span class="text-[8px] opacity-70">▼`);
 function SplitMenu(props) {
   let triggerRef;
   const [coords, setCoords] = createSignal({
@@ -20237,7 +20562,7 @@ function SplitMenu(props) {
     props.setShowSplitMenu(false);
   };
   return (() => {
-    var _el$ = _tmpl$4$y(), _el$3 = _el$.firstChild;
+    var _el$ = _tmpl$4$z(), _el$3 = _el$.firstChild;
     var _ref$ = triggerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : triggerRef = _el$;
     insert(_el$, createComponent(ActionTooltip, {
@@ -20249,7 +20574,7 @@ function SplitMenu(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$1g();
+        var _el$2 = _tmpl$$1u();
         _el$2.$$click = (e) => {
           e.stopPropagation();
           PaneFocusManager.focusPane(props.paneId);
@@ -20268,14 +20593,14 @@ function SplitMenu(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$W();
+              var _el$4 = _tmpl$2$$();
               _el$4.$$click = (e) => {
                 e.stopPropagation();
                 props.setShowSplitMenu(false);
               };
               return _el$4;
             })(), (() => {
-              var _el$5 = _tmpl$3$G(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling, _el$12 = _el$9.nextSibling, _el$13 = _el$12.firstChild;
+              var _el$5 = _tmpl$3$I(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling, _el$12 = _el$9.nextSibling, _el$13 = _el$12.firstChild;
               _el$5.$$pointerdown = (e) => e.stopPropagation();
               _el$0.$$click = (e) => handleSplitClick("left", e);
               _el$1.$$click = (e) => handleSplitClick("right", e);
@@ -20451,7 +20776,7 @@ function getPrimaryIdentityDisplay(rawJson) {
   const primary = getPrimaryIdentity(rawJson);
   return primary ? primary.displayLabel : "";
 }
-var _tmpl$$1f = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400"> active`), _tmpl$2$V = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 text-xs font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$F = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$x = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="text-xs font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$n = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-xs font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left text-[11px] font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$f = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
+var _tmpl$$1t = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400"> active`), _tmpl$2$_ = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 text-xs font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$H = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$y = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="text-xs font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$n = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-xs font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left text-[11px] font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$g = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
 const PINNED_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -20617,7 +20942,7 @@ function ConnectedAccountsList(props) {
     return showAll() ? list : list.slice(0, 4);
   };
   return (() => {
-    var _el$ = _tmpl$4$x(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$4$y(), _el$2 = _el$.firstChild;
     _el$2.firstChild;
     var _el$8 = _el$2.nextSibling;
     insert(_el$2, createComponent(Show, {
@@ -20625,7 +20950,7 @@ function ConnectedAccountsList(props) {
         return connectedProviders().length > 0;
       },
       get children() {
-        var _el$4 = _tmpl$$1f(), _el$5 = _el$4.firstChild;
+        var _el$4 = _tmpl$$1t(), _el$5 = _el$4.firstChild;
         insert(_el$4, () => connectedProviders().length, _el$5);
         return _el$4;
       }
@@ -20635,7 +20960,7 @@ function ConnectedAccountsList(props) {
         return ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
       },
       get children() {
-        var _el$6 = _tmpl$2$V(), _el$7 = _el$6.firstChild;
+        var _el$6 = _tmpl$2$_(), _el$7 = _el$6.firstChild;
         _el$7.$$input = (e) => setSearchQuery(e.currentTarget.value);
         createRenderEffect(() => _el$7.value = searchQuery());
         return _el$6;
@@ -20684,7 +21009,7 @@ function ConnectedAccountsList(props) {
       children: (provider) => {
         const isLoading = () => loadingProvider() === provider.id;
         return (() => {
-          var _el$17 = _tmpl$6$f(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild, _el$21 = _el$19.nextSibling, _el$22 = _el$21.firstChild, _el$23 = _el$18.nextSibling;
+          var _el$17 = _tmpl$6$g(), _el$18 = _el$17.firstChild, _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild, _el$21 = _el$19.nextSibling, _el$22 = _el$21.firstChild, _el$23 = _el$18.nextSibling;
           _el$20.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
@@ -20711,7 +21036,7 @@ function ConnectedAccountsList(props) {
         return memo(() => !!!searchQuery())() && ALL_SUPPORTED_PROVIDERS.length - connectedProviders().length > 4;
       },
       get children() {
-        var _el$9 = _tmpl$3$F();
+        var _el$9 = _tmpl$3$H();
         _el$9.$$click = () => setShowAll(!showAll());
         insert(_el$9, (() => {
           var _c$ = memo(() => !!showAll());
@@ -20724,7 +21049,7 @@ function ConnectedAccountsList(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$1e = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs font-normal text-neutral-600">Incognito mode (clears browsing data on exit)</span></label><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Proxy server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700"></div><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700">`), _tmpl$2$U = /* @__PURE__ */ template(`<div class="flex flex-col gap-4 p-1"><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200/90 rounded-xl px-3 py-2 text-xs font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2 pt-0.5"></div></div><div class=pt-0.5><button type=button class="flex items-center gap-1.5 text-xs font-normal text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"><span></span><span>Advanced settings</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$E = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$w = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
+var _tmpl$$1s = /* @__PURE__ */ template(`<div class="space-y-3 pt-2.5 pl-2.5 border-l border-neutral-200 mt-2 ml-1"><label class="flex items-center gap-2 cursor-pointer group"><input type=checkbox class="rounded border-neutral-300 text-neutral-900 focus:ring-0 cursor-pointer"><span class="text-xs font-normal text-neutral-600">Incognito mode (clears browsing data on exit)</span></label><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Proxy server</label><input type=text placeholder="e.g. socks5://127.0.0.1:9050"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700"></div><div class=space-y-1><label class="text-[11px] font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-normal outline-none focus:border-neutral-700">`), _tmpl$2$Z = /* @__PURE__ */ template(`<div class="flex flex-col gap-4 p-1"><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200/90 rounded-xl px-3 py-2 text-xs font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2 pt-0.5"></div></div><div class=pt-0.5><button type=button class="flex items-center gap-1.5 text-xs font-normal text-neutral-400 hover:text-neutral-700 transition-colors cursor-pointer"><span></span><span>Advanced settings</span></button></div><div class="flex items-center justify-between mt-1 pt-3 border-t border-neutral-100"><div></div><div class="flex items-center gap-2"><button type=button class="text-xs font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded-md cursor-pointer">Cancel</button><button type=button class="text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded-md transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$3$G = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$x = /* @__PURE__ */ template(`<button type=button class="text-xs font-medium text-red-500 hover:text-red-700 hover:bg-red-50 px-2.5 py-1.5 rounded-md transition-colors cursor-pointer">Delete`);
 const COLORS = [
   "#e11d48",
   // Rose Red
@@ -20766,7 +21091,7 @@ function ProfileForm(props) {
     });
   };
   return (() => {
-    var _el$ = _tmpl$2$U(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
+    var _el$ = _tmpl$2$Z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$18 = _el$8.nextSibling, _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling, _el$21 = _el$20.firstChild, _el$22 = _el$21.nextSibling;
     _el$4.$$input = (e) => setName(e.currentTarget.value);
     insert(_el$, createComponent(ConnectedAccountsList, {
       get profileId() {
@@ -20777,7 +21102,7 @@ function ProfileForm(props) {
       }
     }), _el$5);
     insert(_el$7, () => COLORS.map((c) => (() => {
-      var _el$23 = _tmpl$3$E();
+      var _el$23 = _tmpl$3$G();
       _el$23.$$click = () => setColor(c);
       setStyleProperty(_el$23, "background-color", c);
       createRenderEffect(() => className(_el$23, `w-6 h-6 rounded-full transition-transform hover:scale-110 cursor-pointer shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] ${color() === c ? "ring-2 ring-offset-2 ring-neutral-900 scale-105" : "border border-black/10"}`));
@@ -20790,7 +21115,7 @@ function ProfileForm(props) {
         return showAdvanced();
       },
       get children() {
-        var _el$1 = _tmpl$$1e(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
+        var _el$1 = _tmpl$$1s(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$10.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling, _el$15 = _el$12.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling;
         _el$11.addEventListener("change", (e) => setIsEphemeral(e.currentTarget.checked));
         _el$14.$$input = (e) => setProxyServer(e.currentTarget.value);
         _el$17.$$input = (e) => setUserAgent(e.currentTarget.value);
@@ -20803,7 +21128,7 @@ function ProfileForm(props) {
     insert(_el$19, (() => {
       var _c$ = memo(() => !!props.onDelete);
       return () => _c$() && (() => {
-        var _el$24 = _tmpl$4$w();
+        var _el$24 = _tmpl$4$x();
         addEventListener(_el$24, "click", props.onDelete, true);
         return _el$24;
       })();
@@ -20816,11 +21141,11 @@ function ProfileForm(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$1d = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$2$T = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$3$D = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$4$v = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$5$m = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono text-neutral-600 truncate mt-0.5 tracking-tight flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$6$e = /* @__PURE__ */ template(`<span class="text-[8.5px] text-neutral-400 font-sans shrink-0 hover:text-neutral-600">+`), _tmpl$7$8 = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate mt-0.5">`);
+var _tmpl$$1r = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$2$Y = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$3$F = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$4$w = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate tracking-tight text-xs font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$5$m = /* @__PURE__ */ template(`<span class="text-[9.5px] font-mono text-neutral-600 truncate mt-0.5 tracking-tight flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$6$f = /* @__PURE__ */ template(`<span class="text-[8.5px] text-neutral-400 font-sans shrink-0 hover:text-neutral-600">+`), _tmpl$7$9 = /* @__PURE__ */ template(`<span class="text-[9px] font-mono text-neutral-400 truncate mt-0.5">`);
 function ProfileMenuItem(props) {
   const sortedIdentities = () => getSortedIdentities(props.profile?.identities_json);
   return (() => {
-    var _el$ = _tmpl$4$v(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$8 = _el$2.nextSibling, _el$0 = _el$8.firstChild;
+    var _el$ = _tmpl$4$w(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$8 = _el$2.nextSibling, _el$0 = _el$8.firstChild;
     _el$.$$click = (e) => {
       e.stopPropagation();
       props.onSelect(props.profile.id);
@@ -20842,7 +21167,7 @@ function ProfileMenuItem(props) {
           });
           insert(_el$11, () => primary.displayLabel);
           insert(_el$1, othersCount > 0 ? (() => {
-            var _el$12 = _tmpl$6$e();
+            var _el$12 = _tmpl$6$f();
             _el$12.firstChild;
             insert(_el$12, othersCount, null);
             createRenderEffect(() => setAttribute(_el$12, "title", `${othersCount} more connected: ${sorted.slice(1).map((s) => s.displayLabel).join(", ")}`));
@@ -20861,7 +21186,7 @@ function ProfileMenuItem(props) {
         })();
       }
       return (() => {
-        var _el$14 = _tmpl$7$8();
+        var _el$14 = _tmpl$7$9();
         insert(_el$14, () => props.profile.is_ephemeral ? "Temporary Session" : "Independent Profile");
         return _el$14;
       })();
@@ -20871,7 +21196,7 @@ function ProfileMenuItem(props) {
         return props.profile.is_ephemeral;
       },
       get children() {
-        return _tmpl$$1d();
+        return _tmpl$$1r();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -20879,7 +21204,7 @@ function ProfileMenuItem(props) {
         return props.isSelected;
       },
       get children() {
-        return _tmpl$2$T();
+        return _tmpl$2$Y();
       }
     }), _el$8);
     insert(_el$8, createComponent(Show, {
@@ -20887,7 +21212,7 @@ function ProfileMenuItem(props) {
         return props.onSplitWithProfile;
       },
       get children() {
-        var _el$9 = _tmpl$3$D();
+        var _el$9 = _tmpl$3$F();
         _el$9.$$click = (e) => {
           e.stopPropagation();
           props.onSplitWithProfile?.(props.profile.id);
@@ -20912,7 +21237,7 @@ function ProfileMenuItem(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$1c = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`);
+var _tmpl$$1q = /* @__PURE__ */ template(`<div tabindex=0 class="flex flex-col outline-none"><div class="px-3 pt-2.5 pb-1.5 border-b border-neutral-100 flex items-center justify-between"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-[0.15em]">Select Profile</span><div class="flex items-center gap-1 opacity-70"><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↑↓</kbd><kbd class="px-1 py-0.5 text-[8px] font-sans font-semibold rounded bg-neutral-100 text-neutral-600 border border-neutral-200/80 leading-none">↵</kbd></div></div><div class="max-h-[50vh] overflow-y-auto p-1"></div><div class="border-t border-neutral-100 p-1.5 bg-neutral-50/60"><button class="w-full flex items-center justify-center gap-1.5 text-xs font-semibold text-neutral-700 hover:text-neutral-900 bg-white hover:bg-neutral-50 active:scale-[0.98] border border-neutral-200/80 py-1.5 rounded-[8px] transition-all shadow-sm"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round><line x1=12 y1=5 x2=12 y2=19></line><line x1=5 y1=12 x2=19 y2=12></line></svg>New Profile`);
 function ProfileMenuList(props) {
   let listRef;
   const initialIndex = () => Math.max(0, layoutStore.profiles.findIndex((p) => p.id === (props.currentProfileId || "main")));
@@ -20941,7 +21266,7 @@ function ProfileMenuList(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$1c(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$$1q(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild;
     _el$.$$keydown = handleKeyDown;
     var _ref$ = listRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : listRef = _el$;
@@ -20974,17 +21299,17 @@ function ProfileMenuList(props) {
   })();
 }
 delegateEvents(["keydown", "click"]);
-var _tmpl$$1b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$S = /* @__PURE__ */ template(`<div class=p-3>`);
+var _tmpl$$1p = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="p-1.5 bg-neutral-200/50 backdrop-blur-xl ring-1 ring-black/5 rounded-[1.25rem] shadow-[0_24px_56px_-12px_rgba(0,0,0,0.15)] animate-in slide-in-from-top-1 fade-in duration-200"><div>`), _tmpl$2$X = /* @__PURE__ */ template(`<div class=p-3>`);
 function ProfilePopoverContent(props) {
   return (() => {
-    var _el$ = _tmpl$$1b(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$1p(), _el$2 = _el$.firstChild;
     insert(_el$2, createComponent(Show, {
       get when() {
         return !props.isFormMode;
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$S();
+          var _el$3 = _tmpl$2$X();
           insert(_el$3, createComponent(ProfileForm, {
             get initialData() {
               const p = layoutStore.profiles.find((item) => item.id === props.ctrl.editingProfileId());
@@ -21045,7 +21370,7 @@ function ProfilePopoverContent(props) {
     return _el$;
   })();
 }
-var _tmpl$$1a = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$3$C = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$4$u = /* @__PURE__ */ template(`<div data-overlay-chrome=true>`), _tmpl$5$l = /* @__PURE__ */ template(`<div>`), _tmpl$6$d = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
+var _tmpl$$1o = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-colors active:scale-95 cursor-pointer"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white text-[9px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0">`), _tmpl$2$W = /* @__PURE__ */ template(`<div class="absolute right-full mr-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none opacity-0 group-hover/profilemenu:opacity-100 transition-opacity"><div class="bg-neutral-900 text-white text-[10px] font-medium px-2 py-0.5 rounded shadow whitespace-nowrap">Profile (<!>)`), _tmpl$3$E = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] pointer-events-auto cursor-default">`), _tmpl$4$v = /* @__PURE__ */ template(`<div data-overlay-chrome=true>`), _tmpl$5$l = /* @__PURE__ */ template(`<div>`), _tmpl$6$e = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-neutral-900 px-1.5 py-1 flex items-center justify-center transition-colors cursor-pointer"><div class="w-[14px] h-[14px] rounded-full flex items-center justify-center text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.15)] shrink-0"></div><span class="text-[8px] opacity-60 ml-1">▼`);
 function ProfileMenu$1(props) {
   let btnRef;
   const [anchorPos, setAnchorPos] = createSignal(null);
@@ -21130,7 +21455,7 @@ function ProfileMenu$1(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$1 = _tmpl$6$d(), _el$10 = _el$1.firstChild;
+            var _el$1 = _tmpl$6$e(), _el$10 = _el$1.firstChild;
             _el$1.$$click = (e) => {
               e.stopPropagation();
               toggleMenu();
@@ -21145,7 +21470,7 @@ function ProfileMenu$1(props) {
       },
       get children() {
         return [(() => {
-          var _el$2 = _tmpl$$1a(), _el$3 = _el$2.firstChild;
+          var _el$2 = _tmpl$$1o(), _el$3 = _el$2.firstChild;
           _el$2.$$click = (e) => {
             e.stopPropagation();
             toggleMenu(e.currentTarget.getBoundingClientRect());
@@ -21162,7 +21487,7 @@ function ProfileMenu$1(props) {
           });
           return _el$2;
         })(), (() => {
-          var _el$4 = _tmpl$2$R(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling;
+          var _el$4 = _tmpl$2$W(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$6.nextSibling;
           _el$8.nextSibling;
           insert(_el$5, () => currentProfile().name, _el$8);
           insert(_el$5, (() => {
@@ -21181,7 +21506,7 @@ function ProfileMenu$1(props) {
         return createComponent(Portal, {
           get children() {
             return [(() => {
-              var _el$9 = _tmpl$3$C();
+              var _el$9 = _tmpl$3$E();
               _el$9.$$pointerdown = (e) => {
                 e.stopPropagation();
                 setFrozenTargetId("");
@@ -21190,7 +21515,7 @@ function ProfileMenu$1(props) {
               };
               return _el$9;
             })(), (() => {
-              var _el$0 = _tmpl$4$u();
+              var _el$0 = _tmpl$4$v();
               insert(_el$0, createComponent(ProfilePopoverContent, {
                 get targetId() {
                   return targetId();
@@ -21246,7 +21571,7 @@ function ProfileMenu$1(props) {
   })();
 }
 delegateEvents(["click", "pointerdown"]);
-var _tmpl$$19 = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1n = /* @__PURE__ */ template(`<div class="flex items-center gap-0.5 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActivePaneActions(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -21256,7 +21581,7 @@ function ActivePaneActions(props) {
   });
   const stableNode = createMemo((prev) => props.node || prev || null);
   return (() => {
-    var _el$ = _tmpl$$19();
+    var _el$ = _tmpl$$1n();
     insert(_el$, createComponent(Show, {
       get when() {
         return stableNode();
@@ -21290,7 +21615,7 @@ function ActivePaneActions(props) {
     return _el$;
   })();
 }
-var _tmpl$$18 = /* @__PURE__ */ template(`<div id=active-pane-bar role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1m = /* @__PURE__ */ template(`<div id=active-pane-bar role=toolbar aria-label="Active Pane Navigation Bar"style=-webkit-app-region:no-drag>`);
 function ActivePaneBar(props) {
   const activeNode = createMemo((prev) => {
     const id = props.ws.activePaneId();
@@ -21327,7 +21652,7 @@ function ActivePaneBar(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$18();
+      var _el$ = _tmpl$$1m();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("top"));
       var _ref$ = props.activeBarRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.activeBarRef = _el$;
@@ -21369,12 +21694,12 @@ function ActivePaneBar(props) {
     }
   });
 }
-var _tmpl$$17 = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
+var _tmpl$$1l = /* @__PURE__ */ template(`<div style=transform:translateY(-50%)><div class="bg-white ring-1 ring-black/[0.08] text-neutral-800 flex flex-col gap-0.5 px-3 py-2 rounded-xl shadow-[0_12px_24px_-8px_rgba(0,0,0,0.15)] whitespace-nowrap"><div class="flex items-center gap-1.5 text-[12px] font-bold tracking-tight"><span></span></div><div class="flex items-center gap-1.5 opacity-70"><div class="w-1.5 h-1.5 rounded-full"></div><span class="text-[9.5px] font-semibold uppercase tracking-widest">`);
 function WorkspaceTooltip(props) {
   const profile = () => layoutStore.profiles.find((p) => p.id === props.ws.default_profile_id);
   return createComponent(Portal, {
     get children() {
-      var _el$ = _tmpl$$17(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+      var _el$ = _tmpl$$1l(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
       insert(_el$3, createComponent(WorkspaceIcon, {
         get icon() {
           return props.ws.icon;
@@ -21406,7 +21731,7 @@ function WorkspaceTooltip(props) {
     }
   });
 }
-var _tmpl$$16 = /* @__PURE__ */ template(`<span class="absolute -bottom-1 -right-1 flex items-end gap-[1.5px] h-3 px-1 py-[1.5px] rounded-[4px] bg-neutral-900 text-white border border-neutral-700/60 shadow-[0_1px_3px_rgba(0,0,0,0.25)] pointer-events-none z-10 transition-transform animate-in fade-in zoom-in-95 duration-200"title="Playing audio in background"><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[8px] bg-white rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-3">`), _tmpl$2$Q = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
+var _tmpl$$1k = /* @__PURE__ */ template(`<span class="absolute -bottom-1 -right-1 flex items-end gap-[1.5px] h-3 px-1 py-[1.5px] rounded-[4px] bg-neutral-900 text-white border border-neutral-700/60 shadow-[0_1px_3px_rgba(0,0,0,0.25)] pointer-events-none z-10 transition-transform animate-in fade-in zoom-in-95 duration-200"title="Playing audio in background"><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-[8px] bg-white rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-[5px] bg-white rounded-full animate-eq-soft-3">`), _tmpl$2$V = /* @__PURE__ */ template(`<div class=relative><div><button class="workspace-dock-button group/ws relative flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/ws:translate-y-[-0.5px] group-hover/ws:translate-x-[0.5px] group-active/ws:scale-[0.94]">`);
 function WorkspaceItem(props) {
   const [isHovered, setIsHovered] = createSignal(false);
   const [hoveredRect, setHoveredRect] = createSignal(null);
@@ -21430,7 +21755,7 @@ function WorkspaceItem(props) {
     return isWorkspaceAudible(props.ws.id, props.appWs);
   };
   return (() => {
-    var _el$ = _tmpl$2$Q(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+    var _el$ = _tmpl$2$V(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
     _el$.addEventListener("mouseleave", () => setIsHovered(false));
     _el$.addEventListener("mouseenter", (e) => {
       setIsHovered(true);
@@ -21457,7 +21782,7 @@ function WorkspaceItem(props) {
         return isAudible();
       },
       get children() {
-        return _tmpl$$16();
+        return _tmpl$$1k();
       }
     }), null);
     insert(_el$, createComponent(WorkspaceTooltip, {
@@ -21491,7 +21816,7 @@ function WorkspaceItem(props) {
   })();
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$15 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$P = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$t = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$k = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$c = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$7 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$4 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
+var _tmpl$$1j = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[100000] pointer-events-auto">`), _tmpl$2$U = /* @__PURE__ */ template(`<button class="absolute right-2 text-neutral-400 hover:text-neutral-700 p-0.5 rounded-full">`), _tmpl$3$D = /* @__PURE__ */ template(`<div class="flex items-center gap-1 px-1 py-1 bg-neutral-50/80 rounded-xl border border-neutral-100">`), _tmpl$4$u = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[100001] pointer-events-auto origin-top-left"><div class="bg-white/95 backdrop-blur-3xl border border-neutral-200/80 ring-1 ring-black/[0.04] rounded-2xl shadow-[0_20px_50px_-12px_rgba(0,0,0,0.18)] w-[290px] p-2.5 flex flex-col gap-2 select-none"><div class="flex items-center gap-1.5"><div class="relative flex-1 flex items-center"><input type=text autofocus placeholder="Search 120+ icons…"class="w-full bg-neutral-100/80 hover:bg-neutral-100 focus:bg-white text-[12px] font-medium text-neutral-800 placeholder-neutral-400 rounded-xl pl-7 pr-7 py-1.5 outline-none ring-1 ring-black/[0.04] focus:ring-2 focus:ring-neutral-900/20 transition-all"></div><button type=button class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-[11px] font-semibold border transition-all duration-200 shrink-0 active:scale-95"><span>Auto</span></button></div><div class="flex items-center gap-1 overflow-x-auto scrollbar-none pb-0.5"></div><div class="grid grid-cols-6 gap-1 max-h-[185px] overflow-y-auto pr-0.5 scrollbar-thin">`), _tmpl$5$k = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-6 h-6 rounded-lg bg-white hover:bg-neutral-900 hover:text-white text-neutral-600 border border-neutral-200/50 shadow-2xs transition-colors">`), _tmpl$6$d = /* @__PURE__ */ template(`<button class="px-2 py-0.5 rounded-lg text-[10px] font-semibold whitespace-nowrap transition-all">`), _tmpl$7$8 = /* @__PURE__ */ template(`<div class="col-span-6 py-6 text-center text-[11px] text-neutral-400">No icons found for "<!>"`), _tmpl$8$5 = /* @__PURE__ */ template(`<button class="group relative flex items-center justify-center h-[34px] w-full rounded-xl transition-all duration-150 active:scale-90">`);
 const RECENT_KEY = "apposition:recent_workspace_icons";
 function IconPickerPopover(props) {
   let popoverRef;
@@ -21574,14 +21899,14 @@ function IconPickerPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$15();
+        var _el$ = _tmpl$$1j();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$t(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
+        var _el$2 = _tmpl$4$u(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$4.nextSibling, _el$10 = _el$1.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$3) : popoverRef = _el$3;
@@ -21599,7 +21924,7 @@ function IconPickerPopover(props) {
             return search();
           },
           get children() {
-            var _el$7 = _tmpl$2$P();
+            var _el$7 = _tmpl$2$U();
             _el$7.$$click = () => setSearch("");
             insert(_el$7, createComponent(X, {
               size: 12
@@ -21616,7 +21941,7 @@ function IconPickerPopover(props) {
             return memo(() => recentIcons().length > 0)() && !search();
           },
           get children() {
-            var _el$0 = _tmpl$3$B();
+            var _el$0 = _tmpl$3$D();
             insert(_el$0, createComponent(Clock, {
               size: 11,
               "class": "text-neutral-400 ml-1 mr-0.5 shrink-0"
@@ -21647,7 +21972,7 @@ function IconPickerPopover(props) {
         insert(_el$1, createComponent(For, {
           each: ICON_CATEGORIES,
           children: (cat) => (() => {
-            var _el$12 = _tmpl$6$c();
+            var _el$12 = _tmpl$6$d();
             _el$12.$$click = () => {
               setSelectedCategory(cat);
               setFocusedIdx(-1);
@@ -21666,7 +21991,7 @@ function IconPickerPopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$7$7(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
+              var _el$13 = _tmpl$7$8(), _el$14 = _el$13.firstChild, _el$16 = _el$14.nextSibling;
               _el$16.nextSibling;
               insert(_el$13, search, _el$16);
               return _el$13;
@@ -21677,7 +22002,7 @@ function IconPickerPopover(props) {
             const isFocused = () => focusedIdx() === idx();
             const Comp = item.component;
             return (() => {
-              var _el$17 = _tmpl$8$4();
+              var _el$17 = _tmpl$8$5();
               _el$17.$$click = () => handlePickIcon(item.id);
               insert(_el$17, createComponent(Comp, {
                 size: 15,
@@ -21725,7 +22050,7 @@ function IconPickerPopover(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$14 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$O = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$A = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$s = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$j = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$b = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$6 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
+var _tmpl$$1i = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$T = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 p-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1">Workspace</span><div class="flex items-center gap-1.5"><button type=button title="Change workspace icon"class="flex items-center justify-center w-8 h-8 rounded-xl bg-neutral-100/80 hover:bg-neutral-900 text-neutral-700 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input type=text autofocus class="w-full text-[13px] font-semibold text-neutral-800 bg-neutral-100/50 hover:bg-neutral-100 focus:bg-white focus:ring-2 focus:ring-neutral-200/60 rounded-xl px-2.5 py-1.5 outline-none transition-all placeholder-neutral-400"placeholder=Name>`), _tmpl$3$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 px-1 pb-1"><span class="text-[9px] font-bold text-neutral-400 uppercase tracking-widest pl-1 mt-1">Isolated Session</span><div class="flex flex-wrap gap-1 bg-neutral-100/80 p-1 rounded-[14px] relative z-0"><div class="absolute bg-white rounded-[10px] shadow-[0_2px_8px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] -z-10">`), _tmpl$4$t = /* @__PURE__ */ template(`<div class="pt-1 px-1"><button class="w-full text-center text-[11px] font-semibold text-red-500 hover:text-white hover:bg-red-500 py-1.5 rounded-xl transition-colors active:scale-95">Delete Workspace`), _tmpl$5$j = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="workspace-dock-popover fixed z-[9999] pointer-events-auto origin-top-left"><div class="bg-white/90 backdrop-blur-3xl ring-1 ring-black/[0.06] rounded-[20px] shadow-[0_20px_60px_-16px_rgba(0,0,0,0.15)] w-[265px] flex flex-col p-2 overflow-hidden gap-1">`), _tmpl$6$c = /* @__PURE__ */ template(`<div class="flex flex-col gap-2 p-3 bg-neutral-50/50 rounded-xl"><div class="text-[12px] font-semibold text-neutral-800">Update current panes?</div><div class="text-[11px] text-neutral-500 leading-relaxed">Switch all active panes to <span class="font-bold text-neutral-800"></span>?</div><div class="flex flex-col gap-1 mt-1"><button class="w-full text-center text-[11px] font-medium bg-neutral-900 text-white py-2 rounded-lg active:scale-[0.98]">Yes, update all panes</button><button class="w-full text-center text-[11px] font-medium text-neutral-500 hover:bg-neutral-200/50 py-2 rounded-lg">No, new panes only`), _tmpl$7$7 = /* @__PURE__ */ template(`<button><div class="flex items-center justify-center w-[16px] h-[16px] rounded-full text-white text-[8px] font-bold shadow-[inset_0_0_0_1px_rgba(0,0,0,0.1)] shrink-0"></div><span class="truncate max-w-[60px]">`);
 gsapWithCSS.registerPlugin(Flip);
 function WorkspacePopover(props) {
   let popoverRef;
@@ -21751,7 +22076,7 @@ function WorkspacePopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$14();
+        var _el$ = _tmpl$$1i();
         _el$.$$click = (e) => {
           e.stopPropagation();
           props.onClose();
@@ -21767,7 +22092,7 @@ function WorkspacePopover(props) {
           },
           get fallback() {
             return (() => {
-              var _el$13 = _tmpl$6$b(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
+              var _el$13 = _tmpl$6$c(), _el$14 = _el$13.firstChild, _el$15 = _el$14.nextSibling, _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling, _el$19 = _el$15.nextSibling, _el$20 = _el$19.firstChild, _el$21 = _el$20.nextSibling;
               insert(_el$18, () => props.cascadePrompt?.profileName);
               _el$20.$$click = (e) => {
                 e.stopPropagation();
@@ -21782,7 +22107,7 @@ function WorkspacePopover(props) {
           },
           get children() {
             return [(() => {
-              var _el$4 = _tmpl$2$O(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+              var _el$4 = _tmpl$2$T(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
               _el$7.$$click = (e) => {
                 e.stopPropagation();
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -21812,7 +22137,7 @@ function WorkspacePopover(props) {
               createRenderEffect(() => _el$8.value = props.ws.name);
               return _el$4;
             })(), (() => {
-              var _el$9 = _tmpl$3$A(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
+              var _el$9 = _tmpl$3$C(), _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$1.firstChild;
               var _ref$2 = flipThumbRef;
               typeof _ref$2 === "function" ? use(_ref$2, _el$10) : flipThumbRef = _el$10;
               insert(_el$1, createComponent(For, {
@@ -21834,7 +22159,7 @@ function WorkspacePopover(props) {
                     }
                   });
                   return (() => {
-                    var _el$22 = _tmpl$7$6(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
+                    var _el$22 = _tmpl$7$7(), _el$23 = _el$22.firstChild, _el$24 = _el$23.nextSibling;
                     _el$22.$$click = (e) => {
                       e.stopPropagation();
                       if (isSelected()) return;
@@ -21868,7 +22193,7 @@ function WorkspacePopover(props) {
               }), null);
               return _el$9;
             })(), (() => {
-              var _el$11 = _tmpl$4$s(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$4$t(), _el$12 = _el$11.firstChild;
               _el$12.$$click = (e) => {
                 e.stopPropagation();
                 if (e.currentTarget.textContent?.includes("Confirm")) {
@@ -21912,7 +22237,7 @@ function WorkspacePopover(props) {
   });
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$13 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$N = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
+var _tmpl$$1h = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$S = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="pointer-events-auto fixed z-[9999] animate-in slide-in-from-left-2 fade-in duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] -translate-y-1/2"><div class="flex items-center gap-1.5 pl-1.5 pr-1.5 py-1 bg-white/90 backdrop-blur-2xl border border-white/60 ring-1 ring-black/[0.04] rounded-[14px] shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)]"><button type=button title="Change icon"class="group/ic flex items-center justify-center w-7 h-7 rounded-lg bg-neutral-100/90 hover:bg-neutral-900 text-neutral-600 hover:text-white transition-all duration-200 border border-neutral-200/50 shadow-xs active:scale-95 shrink-0"></button><input autofocus class="w-[170px] text-[13px] font-medium tracking-tight bg-transparent outline-none placeholder:text-neutral-400 text-neutral-800 px-1.5 py-1.5"placeholder="Workspace name…"><button title=Cancel aria-label=Cancel class="flex items-center justify-center w-6 h-6 rounded-md text-neutral-400 hover:text-neutral-900 hover:bg-black/[0.05] transition-colors"><svg width=10 height=10 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round><path d="M18 6 6 18M6 6l12 12">`);
 function WorkspaceCreateFlyout(props) {
   const [name, setName] = createSignal("");
   const [selectedIcon, setSelectedIcon] = createSignal(null);
@@ -21940,14 +22265,14 @@ function WorkspaceCreateFlyout(props) {
       return createComponent(Portal, {
         get children() {
           return [(() => {
-            var _el$ = _tmpl$$13();
+            var _el$ = _tmpl$$1h();
             _el$.$$click = (e) => {
               e.stopPropagation();
               handleClose();
             };
             return _el$;
           })(), (() => {
-            var _el$2 = _tmpl$2$N(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+            var _el$2 = _tmpl$2$S(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
             _el$2.$$click = (e) => e.stopPropagation();
             _el$4.$$click = (e) => {
               e.stopPropagation();
@@ -22011,7 +22336,7 @@ function WorkspaceCreateFlyout(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$12 = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$M = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$r = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
+var _tmpl$$1g = /* @__PURE__ */ template(`<div aria-hidden=true class="flex items-center justify-center w-[30px] h-[30px] rounded-[8px] bg-white text-neutral-900 shadow-[inset_0_1px_1px_rgba(255,255,255,0.9)] ring-1 ring-neutral-200/60"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`), _tmpl$2$R = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">New Workspace`), _tmpl$3$B = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-between shrink-0 h-full w-full px-1 py-2 select-none pointer-events-none"style=-webkit-app-region:no-drag><div class="pointer-events-auto flex flex-col items-center gap-1 w-full min-h-0 flex-1"><div class="w-1 h-1 rounded-full bg-neutral-300/70 mb-0.5"></div><div class="flex flex-col items-center gap-1 flex-1 min-h-0 overflow-y-auto scrollbar-none"></div><div class="w-5 h-px bg-neutral-200/80 my-1"></div><div class=relative><div>`), _tmpl$4$s = /* @__PURE__ */ template(`<button title="Create Workspace"aria-label="Create Workspace"class="group/create flex items-center justify-center w-[30px] h-[30px] rounded-[8px] transition-all duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] active:scale-[0.92] bg-white/70 text-neutral-500 hover:bg-neutral-900 hover:text-white hover:shadow-[0_4px_14px_-6px_rgba(0,0,0,0.3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/40"><span class="transition-transform duration-500 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover/create:rotate-90 group-active/create:scale-[0.9]"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75 stroke-linecap=round><path d="M12 5v14M5 12h14">`);
 function WorkspaceDock(props) {
   const [isCreatingHover, setIsCreatingHover] = createSignal(false);
   const [configOpenId, setConfigOpenId] = createSignal(null);
@@ -22022,7 +22347,7 @@ function WorkspaceDock(props) {
   onMount(() => {
   });
   return (() => {
-    var _el$ = _tmpl$3$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
+    var _el$ = _tmpl$3$B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild;
     insert(_el$4, createComponent(For, {
       get each() {
         return props.workspaces;
@@ -22065,7 +22390,7 @@ function WorkspaceDock(props) {
       },
       get fallback() {
         return (() => {
-          var _el$0 = _tmpl$4$r();
+          var _el$0 = _tmpl$4$s();
           _el$0.$$click = (e) => {
             const rect = e.currentTarget.getBoundingClientRect();
             setCreatePos({
@@ -22078,7 +22403,7 @@ function WorkspaceDock(props) {
         })();
       },
       get children() {
-        return _tmpl$$12();
+        return _tmpl$$1g();
       }
     }));
     insert(_el$6, createComponent(Show, {
@@ -22086,7 +22411,7 @@ function WorkspaceDock(props) {
         return memo(() => !!isCreatingHover())() && !props.isCreatingWorkspace;
       },
       get children() {
-        return _tmpl$2$M();
+        return _tmpl$2$R();
       }
     }), null);
     insert(_el$, createComponent(Show, {
@@ -22162,14 +22487,14 @@ function WorkspaceDock(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$11 = /* @__PURE__ */ template(`<div id=workspace-dock data-overlay-chrome class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
+var _tmpl$$1f = /* @__PURE__ */ template(`<div id=workspace-dock data-overlay-chrome class="absolute left-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden top-2 max-h-0 opacity-0"><div class="w-full py-1 flex flex-col items-center shrink-0 h-full">`);
 function AppDock(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$$11(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$1f(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
       var _ref$ = props.dockRef;
       typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -22256,19 +22581,19 @@ function AppDock(props) {
     }
   });
 }
-var _tmpl$$10 = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$L = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$y = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$q = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-1 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
+var _tmpl$$1e = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><line x1=2.5 y1=6 x2=9.5 y2=6 stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$2$Q = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 active:bg-neutral-200/80 active:scale-95 flex items-center justify-center text-neutral-500 hover:text-neutral-900 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><rect x=2.5 y=2.5 width=7 height=7 rx=1 stroke=currentColor stroke-width=1.3>`), _tmpl$3$A = /* @__PURE__ */ template(`<button data-overlay-chrome class="w-[28px] h-[28px] rounded-lg hover:bg-rose-500 hover:text-white active:bg-rose-600 active:scale-95 flex items-center justify-center text-neutral-500 transition-all"><svg width=12 height=12 viewBox="0 0 12 12"fill=none><path d="M3 3l6 6M9 3l-6 6"stroke=currentColor stroke-width=1.3 stroke-linecap=round>`), _tmpl$4$r = /* @__PURE__ */ template(`<div id=window-controls data-overlay-chrome class="absolute top-2 right-2 z-[120] h-[40px] flex items-center gap-1 pointer-events-auto bg-white border border-neutral-200/60 px-1.5 rounded-2xl shadow-md select-none"style=-webkit-app-region:no-drag>`);
 function AppWindowControls(props) {
   return createComponent(Show, {
     get when() {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$4$q();
+      var _el$ = _tmpl$4$r();
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
       insert(_el$, createComponent(ActionTooltip, {
         label: "Minimize",
         get children() {
-          var _el$2 = _tmpl$$10();
+          var _el$2 = _tmpl$$1e();
           _el$2.$$click = () => window.api?.minimizeWindow();
           return _el$2;
         }
@@ -22276,7 +22601,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Maximize",
         get children() {
-          var _el$3 = _tmpl$2$L();
+          var _el$3 = _tmpl$2$Q();
           _el$3.$$click = () => window.api?.maximizeWindow();
           return _el$3;
         }
@@ -22284,7 +22609,7 @@ function AppWindowControls(props) {
       insert(_el$, createComponent(ActionTooltip, {
         label: "Close",
         get children() {
-          var _el$4 = _tmpl$3$y();
+          var _el$4 = _tmpl$3$A();
           _el$4.$$click = () => window.api?.closeWindow();
           return _el$4;
         }
@@ -22294,7 +22619,7 @@ function AppWindowControls(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$$ = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$K = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$p = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$a = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$5 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
+var _tmpl$$1d = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$2$P = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 right-0 h-3 z-[100]">`), _tmpl$3$z = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 bottom-0 w-3 z-[100]">`), _tmpl$4$q = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 right-0 h-3 z-[100]">`), _tmpl$5$i = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 top-0 w-8 h-8 z-[110]">`), _tmpl$6$b = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 top-0 w-8 h-8 z-[110]">`), _tmpl$7$6 = /* @__PURE__ */ template(`<div class="wake-region absolute left-0 bottom-0 w-8 h-8 z-[110]">`), _tmpl$8$4 = /* @__PURE__ */ template(`<div class="wake-region absolute right-0 bottom-0 w-8 h-8 z-[110]">`);
 function AppEdgeZones(props) {
   return createComponent(Show, {
     get when() {
@@ -22302,19 +22627,19 @@ function AppEdgeZones(props) {
     },
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$$();
+        var _el$ = _tmpl$$1d();
         _el$.addEventListener("mouseenter", () => props.onZoneEnter("left"));
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$K();
+        var _el$2 = _tmpl$2$P();
         _el$2.addEventListener("mouseenter", () => props.onZoneEnter("top"));
         return _el$2;
       })(), (() => {
-        var _el$3 = _tmpl$3$x();
+        var _el$3 = _tmpl$3$z();
         _el$3.addEventListener("mouseenter", () => props.onZoneEnter("right"));
         return _el$3;
       })(), (() => {
-        var _el$4 = _tmpl$4$p();
+        var _el$4 = _tmpl$4$q();
         _el$4.addEventListener("mouseenter", () => props.onZoneEnter("bottom"));
         return _el$4;
       })(), (() => {
@@ -22322,15 +22647,15 @@ function AppEdgeZones(props) {
         _el$5.addEventListener("mouseenter", () => props.onZoneEnter("topLeft"));
         return _el$5;
       })(), (() => {
-        var _el$6 = _tmpl$6$a();
+        var _el$6 = _tmpl$6$b();
         _el$6.addEventListener("mouseenter", () => props.onZoneEnter("topRight"));
         return _el$6;
       })(), (() => {
-        var _el$7 = _tmpl$7$5();
+        var _el$7 = _tmpl$7$6();
         _el$7.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
         return _el$7;
       })(), (() => {
-        var _el$8 = _tmpl$8$3();
+        var _el$8 = _tmpl$8$4();
         _el$8.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
         return _el$8;
       })()];
@@ -22403,7 +22728,7 @@ function useFeaturebase() {
   };
   return { openFeedback, openUpdates, hasUnread };
 }
-var _tmpl$$_ = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99998] pointer-events-auto bg-transparent">`), _tmpl$2$J = /* @__PURE__ */ template(`<div data-overlay-chrome role=dialog aria-modal=true class="fixed z-[99999] w-80 bg-white border border-neutral-200/80 rounded-2xl shadow-[0_24px_64px_-16px_rgba(0,0,0,0.22)] p-3 flex flex-col gap-2.5 pointer-events-auto select-none animate-in zoom-in-95 duration-200"style=-webkit-app-region:no-drag><div class="flex items-center justify-between border-b border-neutral-100 pb-2"><div class="flex items-center gap-2"><span class="flex items-end gap-[1.5px] h-3 pb-0.5 text-neutral-800"><span class="w-[1.5px] h-2 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-3 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-1.5 bg-current rounded-full animate-eq-soft-3"></span></span><h3 class="text-xs font-semibold text-neutral-900 tracking-tight">Audio</h3><span class="text-[10px] font-mono font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.5 rounded-md border border-neutral-200/50"></span></div><button class="text-[11px] font-medium px-2.5 py-1 rounded-lg bg-neutral-100 hover:bg-neutral-200/80 text-neutral-700 transition-colors border border-neutral-200/50 active:scale-95 flex items-center gap-1 shadow-sm"></button></div><div class="flex flex-col gap-1.5 max-h-60 overflow-y-auto pr-0.5">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="py-4 text-center text-xs font-medium text-neutral-400 italic">No active audio streams`), _tmpl$4$o = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$5$h = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl bg-neutral-50/80 hover:bg-neutral-100/80 border border-neutral-200/40 transition-all"><div class="flex flex-col min-w-0 flex-1 mr-2 cursor-pointer"title="Click to jump to stream"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-400 truncate"></span></div><div class="flex items-center gap-1 shrink-0"><button>`), _tmpl$6$9 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
+var _tmpl$$1c = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99998] pointer-events-auto bg-transparent">`), _tmpl$2$O = /* @__PURE__ */ template(`<div data-overlay-chrome role=dialog aria-modal=true class="fixed z-[99999] w-80 bg-white border border-neutral-200/80 rounded-2xl shadow-[0_24px_64px_-16px_rgba(0,0,0,0.22)] p-3 flex flex-col gap-2.5 pointer-events-auto select-none animate-in zoom-in-95 duration-200"style=-webkit-app-region:no-drag><div class="flex items-center justify-between border-b border-neutral-100 pb-2"><div class="flex items-center gap-2"><span class="flex items-end gap-[1.5px] h-3 pb-0.5 text-neutral-800"><span class="w-[1.5px] h-2 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[1.5px] h-3 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[1.5px] h-1.5 bg-current rounded-full animate-eq-soft-3"></span></span><h3 class="text-xs font-semibold text-neutral-900 tracking-tight">Audio</h3><span class="text-[10px] font-mono font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.5 rounded-md border border-neutral-200/50"></span></div><button class="text-[11px] font-medium px-2.5 py-1 rounded-lg bg-neutral-100 hover:bg-neutral-200/80 text-neutral-700 transition-colors border border-neutral-200/50 active:scale-95 flex items-center gap-1 shadow-sm"></button></div><div class="flex flex-col gap-1.5 max-h-60 overflow-y-auto pr-0.5">`), _tmpl$3$y = /* @__PURE__ */ template(`<div class="py-4 text-center text-xs font-medium text-neutral-400 italic">No active audio streams`), _tmpl$4$p = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`), _tmpl$5$h = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl bg-neutral-50/80 hover:bg-neutral-100/80 border border-neutral-200/40 transition-all"><div class="flex flex-col min-w-0 flex-1 mr-2 cursor-pointer"title="Click to jump to stream"><span class="text-xs font-medium text-neutral-800 truncate"></span><span class="text-[10px] font-mono text-neutral-400 truncate"></span></div><div class="flex items-center gap-1 shrink-0"><button>`), _tmpl$6$a = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`);
 function OmniSoundPopover(props) {
   const sources = () => getAllAudioSources();
   const safeHost = (url) => {
@@ -22483,7 +22808,7 @@ function OmniSoundPopover(props) {
     },
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$_();
+        var _el$ = _tmpl$$1c();
         _el$.$$mousedown = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -22491,7 +22816,7 @@ function OmniSoundPopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$J(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$3.nextSibling;
+        var _el$2 = _tmpl$2$O(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling, _el$8 = _el$4.nextSibling, _el$9 = _el$3.nextSibling;
         _el$2.$$mousedown = (e) => e.stopPropagation();
         insert(_el$7, () => sources().length);
         _el$8.$$click = () => toggleMasterMute();
@@ -22501,7 +22826,7 @@ function OmniSoundPopover(props) {
             return sources();
           },
           get fallback() {
-            return _tmpl$3$w();
+            return _tmpl$3$y();
           },
           children: (source) => (() => {
             var _el$1 = _tmpl$5$h(), _el$10 = _el$1.firstChild, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$10.nextSibling, _el$14 = _el$13.firstChild;
@@ -22514,10 +22839,10 @@ function OmniSoundPopover(props) {
                 return !source.isMuted;
               },
               get fallback() {
-                return _tmpl$6$9();
+                return _tmpl$6$a();
               },
               get children() {
-                return _tmpl$4$o();
+                return _tmpl$4$p();
               }
             }));
             createRenderEffect((_p$) => {
@@ -22541,7 +22866,7 @@ function OmniSoundPopover(props) {
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$Z = /* @__PURE__ */ template(`<span class="flex items-end gap-[2px] h-4 pb-0.5"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-4 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$I = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded-full bg-neutral-900 text-white font-mono text-[8px] font-bold shadow-[0_1px_3px_rgba(0,0,0,0.3)]">`), _tmpl$3$v = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">`), _tmpl$4$n = /* @__PURE__ */ template(`<div data-overlay-chrome class="relative flex items-center justify-center shrink-0"><button>`), _tmpl$5$g = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`), _tmpl$6$8 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`);
+var _tmpl$$1b = /* @__PURE__ */ template(`<span class="flex items-end gap-[2px] h-4 pb-0.5"><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-1"></span><span class="w-[2px] h-4 bg-current rounded-full animate-eq-soft-2"></span><span class="w-[2px] h-2.5 bg-current rounded-full animate-eq-soft-3">`), _tmpl$2$N = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded-full bg-neutral-900 text-white font-mono text-[8px] font-bold shadow-[0_1px_3px_rgba(0,0,0,0.3)]">`), _tmpl$3$x = /* @__PURE__ */ template(`<div class="absolute left-full ml-3 top-1/2 -translate-y-1/2 z-[70] pointer-events-none"><div class="bg-neutral-900 text-white text-[11px] font-medium tracking-tight px-2.5 py-1 rounded-lg shadow-[0_8px_24px_-8px_rgba(0,0,0,0.4)] whitespace-nowrap">`), _tmpl$4$o = /* @__PURE__ */ template(`<div data-overlay-chrome class="relative flex items-center justify-center shrink-0"><button>`), _tmpl$5$g = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1=23 y1=9 x2=17 y2=15></line><line x1=17 y1=9 x2=23 y2=15>`), _tmpl$6$9 = /* @__PURE__ */ template(`<svg width=15 height=15 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.2 stroke-linecap=round stroke-linejoin=round><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14">`);
 function GlobalAudioMasterPill(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [isHovered, setIsHovered] = createSignal(false);
@@ -22557,7 +22882,7 @@ function GlobalAudioMasterPill(props) {
       return shouldShow();
     },
     get children() {
-      var _el$ = _tmpl$4$n(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$4$o(), _el$2 = _el$.firstChild;
       _el$.addEventListener("mouseleave", () => setIsHovered(false));
       _el$.addEventListener("mouseenter", () => setIsHovered(true));
       _el$2.$$contextmenu = (e) => {
@@ -22582,10 +22907,10 @@ function GlobalAudioMasterPill(props) {
               return getActiveAudioSources().length > 0;
             },
             get fallback() {
-              return _tmpl$6$8();
+              return _tmpl$6$9();
             },
             get children() {
-              return _tmpl$$Z();
+              return _tmpl$$1b();
             }
           });
         }
@@ -22595,7 +22920,7 @@ function GlobalAudioMasterPill(props) {
           return sourceCount() > 1;
         },
         get children() {
-          var _el$4 = _tmpl$2$I();
+          var _el$4 = _tmpl$2$N();
           insert(_el$4, sourceCount);
           return _el$4;
         }
@@ -22605,7 +22930,7 @@ function GlobalAudioMasterPill(props) {
           return memo(() => !!isHovered())() && !isOpen();
         },
         get children() {
-          var _el$5 = _tmpl$3$v(), _el$6 = _el$5.firstChild;
+          var _el$5 = _tmpl$3$x(), _el$6 = _el$5.firstChild;
           insert(_el$6, (() => {
             var _c$ = memo(() => !!isMasterMuted());
             return () => _c$() ? "Audio Muted" : `Audio (${sourceCount()} active)`;
@@ -22639,7 +22964,7 @@ function GlobalAudioMasterPill(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-var _tmpl$$Y = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$H = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$u = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$f = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$7 = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="relative z-30 mb-2"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
+var _tmpl$$1a = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-700 hover:bg-neutral-100 active:scale-[0.92] cursor-pointer"><div class="w-5 h-5 rounded-full flex items-center justify-center text-white text-[10px] font-bold shadow-xs">`), _tmpl$2$M = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class="transition-transform duration-500 group-hover/settings:rotate-45"><circle cx=12 cy=12 r=3></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z">`), _tmpl$3$w = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$4$n = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$5$f = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$6$8 = /* @__PURE__ */ template(`<div id=support-cluster data-overlay-chrome class="absolute bottom-2 left-2 z-[120] pointer-events-auto flex flex-col-reverse group/cluster"style=-webkit-app-region:no-drag><div class="relative group/profile z-30"></div><div class="relative z-30 mb-2"></div><div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/settings"></div><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportCluster(props) {
   const {
     hasUnread
@@ -22715,7 +23040,7 @@ function SupportCluster(props) {
       return !props.isMaximized;
     },
     get children() {
-      var _el$ = _tmpl$6$7(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$11 = _el$9.nextSibling;
+      var _el$ = _tmpl$6$8(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$11 = _el$9.nextSibling;
       _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomLeft"));
       insert(_el$2, createComponent(ActionTooltip, {
         get label() {
@@ -22726,7 +23051,7 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$3 = _tmpl$$Y(), _el$4 = _el$3.firstChild;
+          var _el$3 = _tmpl$$1a(), _el$4 = _el$3.firstChild;
           _el$3.$$click = handleOpenProfiles;
           insert(_el$4, () => (activeProfile().name || "M").charAt(0).toUpperCase());
           createRenderEffect((_$p) => setStyleProperty(_el$4, "background-color", activeProfile().color || "#4a4a49"));
@@ -22748,7 +23073,7 @@ function SupportCluster(props) {
         },
         placement: "right",
         get children() {
-          var _el$8 = _tmpl$2$H();
+          var _el$8 = _tmpl$2$M();
           _el$8.$$click = handleOpenSettings;
           return _el$8;
         }
@@ -22757,7 +23082,7 @@ function SupportCluster(props) {
         label: "Release Notes",
         placement: "right",
         get children() {
-          var _el$0 = _tmpl$4$m();
+          var _el$0 = _tmpl$4$n();
           _el$0.firstChild;
           _el$0.$$click = handleOpenUpdates;
           insert(_el$0, createComponent(Show, {
@@ -22765,7 +23090,7 @@ function SupportCluster(props) {
               return layoutStore.hasUnreadRelease || hasUnread();
             },
             get children() {
-              return _tmpl$3$u();
+              return _tmpl$3$w();
             }
           }), null);
           return _el$0;
@@ -22785,7 +23110,7 @@ function SupportCluster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$X = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$G = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$t = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$l = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$e = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
+var _tmpl$$19 = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◧`), _tmpl$2$L = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">◨`), _tmpl$3$v = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬒`), _tmpl$4$m = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><span class="text-sm leading-none font-semibold">⬓`), _tmpl$5$e = /* @__PURE__ */ template(`<div id=action-split-bar class="absolute bottom-2 right-2 z-[60] h-[40px] pointer-events-auto flex items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-w-0 opacity-0 px-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag>`);
 function ActionClusterSplitBar(props) {
   return (() => {
     var _el$ = _tmpl$5$e();
@@ -22800,7 +23125,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$2 = _tmpl$$X();
+        var _el$2 = _tmpl$$19();
         _el$2.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$2.addEventListener("mouseenter", () => props.onSplitHover?.("left"));
         _el$2.$$click = (e) => props.onSplit("left", e);
@@ -22814,7 +23139,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$3 = _tmpl$2$G();
+        var _el$3 = _tmpl$2$L();
         _el$3.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$3.addEventListener("mouseenter", () => props.onSplitHover?.("right"));
         _el$3.$$click = (e) => props.onSplit("right", e);
@@ -22828,7 +23153,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$3$t();
+        var _el$4 = _tmpl$3$v();
         _el$4.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$4.addEventListener("mouseenter", () => props.onSplitHover?.("top"));
         _el$4.$$click = (e) => props.onSplit("top", e);
@@ -22842,7 +23167,7 @@ function ActionClusterSplitBar(props) {
       },
       placement: "top",
       get children() {
-        var _el$5 = _tmpl$4$l();
+        var _el$5 = _tmpl$4$m();
         _el$5.addEventListener("mouseleave", () => props.onSplitLeave?.());
         _el$5.addEventListener("mouseenter", () => props.onSplitHover?.("bottom"));
         _el$5.$$click = (e) => props.onSplit("bottom", e);
@@ -22853,11 +23178,11 @@ function ActionClusterSplitBar(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$W = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$F = /* @__PURE__ */ template(`<button>`), _tmpl$3$s = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$k = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$d = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$18 = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$2$K = /* @__PURE__ */ template(`<button>`), _tmpl$3$u = /* @__PURE__ */ template(`<button class="w-[28px] h-[28px] rounded-lg hover:bg-neutral-100 flex items-center justify-center text-neutral-600 hover:text-neutral-900 transition-all active:scale-95 active:shadow-double-bezel-active"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"></path><path d="M12 8v8"></path><path d="M8 12h8">`), _tmpl$4$l = /* @__PURE__ */ template(`<div id=action-dock class="absolute bottom-2 right-2 z-[60] w-[40px] pointer-events-auto flex flex-col items-center bg-white border border-neutral-200/60 rounded-2xl shadow-md overflow-hidden max-h-0 opacity-0 py-1.5 gap-1 shrink-0"style=-webkit-app-region:no-drag><div class=shrink-0>`), _tmpl$5$d = /* @__PURE__ */ template(`<svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function ActionClusterVerticalDock(props) {
   const isMaximized = () => !!layoutStore.maximizedPaneId;
   return (() => {
-    var _el$ = _tmpl$4$k(), _el$5 = _el$.firstChild;
+    var _el$ = _tmpl$4$l(), _el$5 = _el$.firstChild;
     _el$.addEventListener("mouseenter", () => props.onZoneEnter("bottomRight"));
     var _ref$ = props.dockRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.dockRef = _el$;
@@ -22870,7 +23195,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$2 = _tmpl$2$F();
+        var _el$2 = _tmpl$2$K();
         addEventListener(_el$2, "click", props.onToggleMaximize, true);
         insert(_el$2, createComponent(Show, {
           get when() {
@@ -22880,7 +23205,7 @@ function ActionClusterVerticalDock(props) {
             return _tmpl$5$d();
           },
           get children() {
-            return _tmpl$$W();
+            return _tmpl$$18();
           }
         }));
         createRenderEffect(() => className(_el$2, `w-[28px] h-[28px] rounded-lg flex items-center justify-center transition-all active:scale-95 active:shadow-double-bezel-active ${isMaximized() ? "bg-neutral-100 text-neutral-900 shadow-inner ring-1 ring-neutral-300/40" : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -22894,7 +23219,7 @@ function ActionClusterVerticalDock(props) {
       },
       placement: "left",
       get children() {
-        var _el$4 = _tmpl$3$s();
+        var _el$4 = _tmpl$3$u();
         addEventListener(_el$4, "click", props.onCreateTab, true);
         return _el$4;
       }
@@ -23138,7 +23463,7 @@ const commActions = {
     setCommStore("notifications", (prev) => [item, ...prev].slice(0, 50));
   }
 };
-var _tmpl$$V = /* @__PURE__ */ template(`<span>`), _tmpl$2$E = /* @__PURE__ */ template(`<button id=communicator-trigger data-overlay-chrome=true title="Communicator (Ctrl+Shift+C)"style=-webkit-app-region:no-drag>`);
+var _tmpl$$17 = /* @__PURE__ */ template(`<span>`), _tmpl$2$J = /* @__PURE__ */ template(`<button id=communicator-trigger data-overlay-chrome=true title="Communicator (Ctrl+Shift+C)"style=-webkit-app-region:no-drag>`);
 function CommunicatorTrigger(props) {
   const totalUnread = () => commStore.stacks.flatMap((s) => s.apps).reduce((sum, a) => sum + a.unreadCount, 0);
   const handleMouseEnter = () => {
@@ -23183,7 +23508,7 @@ function CommunicatorTrigger(props) {
   const isPinnedActive = () => commStore.isOpen && commStore.isPinned && !commStore.isFloating;
   const isPeekActive = () => commStore.isOpen && !commStore.isPinned && !commStore.isFloating;
   return (() => {
-    var _el$ = _tmpl$2$E();
+    var _el$ = _tmpl$2$J();
     _el$.addEventListener("mouseenter", handleMouseEnter);
     _el$.$$click = handleClick;
     var _ref$ = props.hubRef;
@@ -23196,7 +23521,7 @@ function CommunicatorTrigger(props) {
         return totalUnread() > 0;
       },
       get children() {
-        var _el$2 = _tmpl$$V();
+        var _el$2 = _tmpl$$17();
         insert(_el$2, (() => {
           var _c$ = memo(() => totalUnread() > 99);
           return () => _c$() ? "99+" : totalUnread();
@@ -23210,7 +23535,7 @@ function CommunicatorTrigger(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$U = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$D = /* @__PURE__ */ template(`<button><span>`), _tmpl$3$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[240px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">Stack Preset</span></div><div class="flex gap-2"><div class="w-12 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Icon</span><input type=text maxlength=2 class="text-xs font-bold text-center px-1 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex-1 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900">`);
+var _tmpl$$16 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$I = /* @__PURE__ */ template(`<button><span>`), _tmpl$3$t = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[240px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">Stack Preset</span></div><div class="flex gap-2"><div class="w-12 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Icon</span><input type=text maxlength=2 class="text-xs font-bold text-center px-1 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex-1 flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900">`);
 function CommunicatorStackPopover(props) {
   let popoverRef;
   const [name, setName] = createSignal(props.stack.name);
@@ -23263,7 +23588,7 @@ function CommunicatorStackPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$U();
+        var _el$ = _tmpl$$16();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -23282,7 +23607,7 @@ function CommunicatorStackPopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$3$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+        var _el$2 = _tmpl$3$t(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
@@ -23298,7 +23623,7 @@ function CommunicatorStackPopover(props) {
             return commStore.stacks.length > 1;
           },
           get children() {
-            var _el$1 = _tmpl$2$D(), _el$10 = _el$1.firstChild;
+            var _el$1 = _tmpl$2$I(), _el$10 = _el$1.firstChild;
             _el$1.$$click = handleDelete;
             insert(_el$1, createComponent(Trash2, {
               "class": "w-3.5 h-3.5"
@@ -23325,7 +23650,7 @@ function CommunicatorStackPopover(props) {
   });
 }
 delegateEvents(["pointerdown", "click", "contextmenu", "input", "keydown"]);
-var _tmpl$$T = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$C = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 max-h-[160px] overflow-y-auto no-scrollbar pr-0.5">`), _tmpl$3$q = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[260px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="w-3 h-3 rounded-full"></span><span class="text-xs font-bold text-neutral-800 dark:text-neutral-200 truncate"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)</span></div><p class="text-[11px] text-neutral-500 dark:text-neutral-400">Session partition: <span class="font-mono font-medium text-neutral-800 dark:text-neutral-200">persist:</span></p><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Assigned Apps</span></div><button class="w-full py-1.5 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-semibold flex items-center justify-center gap-1.5 hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5"><span>Add App to Profile`), _tmpl$4$j = /* @__PURE__ */ template(`<div class="py-2 px-1 text-center text-[11px] text-neutral-400 dark:text-neutral-500 rounded-xl bg-neutral-100/60 dark:bg-neutral-800/60 border border-dashed border-neutral-200 dark:border-neutral-800">No apps in this profile`), _tmpl$5$c = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white shrink-0">`), _tmpl$6$6 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-left group/item cursor-pointer border border-transparent hover:border-neutral-200/60 dark:hover:border-neutral-700/60"><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate flex-1"></span><span class="text-[10px] font-mono text-neutral-400 group-hover/item:text-neutral-600 dark:group-hover/item:text-neutral-300 shrink-0">`);
+var _tmpl$$15 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$H = /* @__PURE__ */ template(`<div class="flex flex-col gap-1 max-h-[160px] overflow-y-auto no-scrollbar pr-0.5">`), _tmpl$3$s = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-left w-[260px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="w-3 h-3 rounded-full"></span><span class="text-xs font-bold text-neutral-800 dark:text-neutral-200 truncate"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)</span></div><p class="text-[11px] text-neutral-500 dark:text-neutral-400">Session partition: <span class="font-mono font-medium text-neutral-800 dark:text-neutral-200">persist:</span></p><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Assigned Apps</span></div><button class="w-full py-1.5 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-[11px] font-semibold flex items-center justify-center gap-1.5 hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5"><span>Add App to Profile`), _tmpl$4$k = /* @__PURE__ */ template(`<div class="py-2 px-1 text-center text-[11px] text-neutral-400 dark:text-neutral-500 rounded-xl bg-neutral-100/60 dark:bg-neutral-800/60 border border-dashed border-neutral-200 dark:border-neutral-800">No apps in this profile`), _tmpl$5$c = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white shrink-0">`), _tmpl$6$7 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 p-1.5 rounded-xl hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors text-left group/item cursor-pointer border border-transparent hover:border-neutral-200/60 dark:hover:border-neutral-700/60"><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate flex-1"></span><span class="text-[10px] font-mono text-neutral-400 group-hover/item:text-neutral-600 dark:group-hover/item:text-neutral-300 shrink-0">`);
 function CommunicatorProfilePopover(props) {
   let popoverRef;
   const profileApps = () => commStore.stacks.flatMap((s) => s.apps).filter((a) => a.profileId === props.profile.id);
@@ -23360,7 +23685,7 @@ function CommunicatorProfilePopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$T();
+        var _el$ = _tmpl$$15();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -23376,7 +23701,7 @@ function CommunicatorProfilePopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$3$q(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+        var _el$2 = _tmpl$3$s(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
         _el$9.nextSibling;
         var _el$0 = _el$3.nextSibling, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling;
         _el$10.firstChild;
@@ -23395,10 +23720,10 @@ function CommunicatorProfilePopover(props) {
             return profileApps().length > 0;
           },
           get fallback() {
-            return _tmpl$4$j();
+            return _tmpl$4$k();
           },
           get children() {
-            var _el$14 = _tmpl$2$C();
+            var _el$14 = _tmpl$2$H();
             insert(_el$14, createComponent(For, {
               get each() {
                 return profileApps();
@@ -23406,7 +23731,7 @@ function CommunicatorProfilePopover(props) {
               children: (app) => {
                 const stackName = () => commStore.stacks.find((s) => s.id === app.stackId)?.name || "Stack";
                 return (() => {
-                  var _el$18 = _tmpl$6$6(), _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
+                  var _el$18 = _tmpl$6$7(), _el$19 = _el$18.firstChild, _el$20 = _el$19.nextSibling;
                   _el$18.$$click = () => {
                     commActions.setProfile(props.profile.id);
                     commActions.setTab(app.id);
@@ -23464,7 +23789,7 @@ function CommunicatorProfilePopover(props) {
   });
 }
 delegateEvents(["pointerdown", "click", "contextmenu"]);
-var _tmpl$$S = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$B = /* @__PURE__ */ template(`<button>`), _tmpl$3$p = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$i = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$5 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$4 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$2 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
+var _tmpl$$14 = /* @__PURE__ */ template(`<div class="w-7 h-4 rounded-md hover:bg-neutral-200/80 dark:hover:bg-neutral-800/80 flex items-center justify-center cursor-grab active:cursor-grabbing transition-colors text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$2$G = /* @__PURE__ */ template(`<button>`), _tmpl$3$r = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl border border-dashed border-neutral-300 dark:border-neutral-700 text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$4$j = /* @__PURE__ */ template(`<button class="w-8 h-8 rounded-xl text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 flex items-center justify-center transition-colors cursor-pointer">`), _tmpl$5$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="w-[46px] shrink-0 border-r border-neutral-200/80 dark:border-neutral-800 bg-[#f4f4f2] dark:bg-[#18181b] flex flex-col items-center py-2 gap-2 select-none z-10 pointer-events-auto rounded-l-2xl"><div class="flex flex-col gap-1 p-0.5 bg-neutral-200/60 dark:bg-neutral-800/60 rounded-xl border border-neutral-300/40 dark:border-neutral-700/40"></div><div class="w-6 h-[1px] bg-neutral-200 dark:bg-neutral-800 my-0.5"></div><div class="flex-1 w-full flex flex-col items-center gap-2 overflow-y-auto no-scrollbar">`), _tmpl$6$6 = /* @__PURE__ */ template(`<span class="absolute -top-1 -right-1 min-w-[14px] h-[14px] px-0.5 rounded-full text-[8px] font-mono font-bold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 border border-white dark:border-neutral-900 flex items-center justify-center">`), _tmpl$7$5 = /* @__PURE__ */ template(`<button><span>`), _tmpl$8$3 = /* @__PURE__ */ template(`<form class="flex flex-col items-center gap-1 w-full px-1"><input type=text autofocus placeholder=Name class="w-full text-[9px] px-1 py-0.5 rounded bg-white dark:bg-neutral-800 border border-neutral-300 dark:border-neutral-700 text-center focus:outline-none">`);
 function CommunicatorStackRail(props) {
   const [isAddingStack, setIsAddingStack] = createSignal(false);
   const [newStackName, setNewStackName] = createSignal("");
@@ -23493,7 +23818,7 @@ function CommunicatorStackRail(props) {
       label: "Drag to float (Double-click to dock)",
       placement: "right",
       get children() {
-        var _el$2 = _tmpl$$S();
+        var _el$2 = _tmpl$$14();
         addEventListener(_el$2, "dblclick", props.onResetPosition, true);
         addEventListener(_el$2, "mousedown", props.onDragStart, true);
         insert(_el$2, createComponent(GripHorizontal, {
@@ -23506,7 +23831,7 @@ function CommunicatorStackRail(props) {
       label: "Stack Lens",
       placement: "right",
       get children() {
-        var _el$4 = _tmpl$2$B();
+        var _el$4 = _tmpl$2$G();
         _el$4.$$click = () => commActions.setLens("stack");
         insert(_el$4, createComponent(Layers, {
           "class": "w-3.5 h-3.5"
@@ -23519,7 +23844,7 @@ function CommunicatorStackRail(props) {
       label: "Profile Lens",
       placement: "right",
       get children() {
-        var _el$5 = _tmpl$2$B();
+        var _el$5 = _tmpl$2$G();
         _el$5.$$click = () => commActions.setLens("profile");
         insert(_el$5, createComponent(User, {
           "class": "w-3.5 h-3.5"
@@ -23546,7 +23871,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$0 = _tmpl$7$4(), _el$1 = _el$0.firstChild;
+                var _el$0 = _tmpl$7$5(), _el$1 = _el$0.firstChild;
                 _el$0.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveStackPopover({
@@ -23578,7 +23903,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$10 = _tmpl$6$5();
+                    var _el$10 = _tmpl$6$6();
                     insert(_el$10, (() => {
                       var _c$ = memo(() => unread() > 9);
                       return () => _c$() ? "9+" : unread();
@@ -23597,7 +23922,7 @@ function CommunicatorStackRail(props) {
           },
           get fallback() {
             return (() => {
-              var _el$11 = _tmpl$8$2(), _el$12 = _el$11.firstChild;
+              var _el$11 = _tmpl$8$3(), _el$12 = _el$11.firstChild;
               _el$11.addEventListener("submit", handleCreateStack);
               _el$12.$$keydown = (e) => e.key === "Escape" && setIsAddingStack(false);
               _el$12.$$input = (e) => setNewStackName(e.currentTarget.value);
@@ -23610,7 +23935,7 @@ function CommunicatorStackRail(props) {
               label: "New Stack Preset",
               placement: "right",
               get children() {
-                var _el$8 = _tmpl$3$p();
+                var _el$8 = _tmpl$3$r();
                 _el$8.$$click = () => setIsAddingStack(true);
                 insert(_el$8, createComponent(Plus, {
                   "class": "w-3.5 h-3.5"
@@ -23640,7 +23965,7 @@ function CommunicatorStackRail(props) {
               },
               placement: "right",
               get children() {
-                var _el$13 = _tmpl$7$4(), _el$14 = _el$13.firstChild;
+                var _el$13 = _tmpl$7$5(), _el$14 = _el$13.firstChild;
                 _el$13.$$contextmenu = (e) => {
                   e.preventDefault();
                   setActiveProfilePopover({
@@ -23672,7 +23997,7 @@ function CommunicatorStackRail(props) {
                     return unread() > 0;
                   },
                   get children() {
-                    var _el$15 = _tmpl$6$5();
+                    var _el$15 = _tmpl$6$6();
                     insert(_el$15, (() => {
                       var _c$2 = memo(() => unread() > 9);
                       return () => _c$2() ? "9+" : unread();
@@ -23692,7 +24017,7 @@ function CommunicatorStackRail(props) {
       label: "Configure Communicator",
       placement: "right",
       get children() {
-        var _el$9 = _tmpl$4$i();
+        var _el$9 = _tmpl$4$j();
         _el$9.$$click = (e) => props.onOpenConfig(e);
         insert(_el$9, createComponent(Settings, {
           "class": "w-3.5 h-3.5"
@@ -23739,7 +24064,7 @@ function CommunicatorStackRail(props) {
   })();
 }
 delegateEvents(["mousedown", "dblclick", "click", "contextmenu", "input", "keydown"]);
-var _tmpl$$R = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[280px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">App Settings</span></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">URL</span><input type=text class="text-xs px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Session Profile</span><div class="flex flex-wrap gap-1 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-xl"></div></div><button><span>`), _tmpl$3$o = /* @__PURE__ */ template(`<button><span class="w-2 h-2 rounded-full"></span><span class="truncate max-w-[60px]">`);
+var _tmpl$$13 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] pointer-events-auto">`), _tmpl$2$F = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[280px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_40px_-8px_rgba(0,0,0,0.25)] p-3 flex flex-col gap-2.5 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center gap-2 pb-1 border-b border-neutral-200/70 dark:border-neutral-800"><span class="text-[11px] font-mono uppercase tracking-wider text-neutral-400 font-bold">App Settings</span></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Name</span><input type=text class="text-xs font-semibold px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">URL</span><input type=text class="text-xs px-2.5 py-1.5 rounded-xl bg-neutral-100 dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-700 focus:outline-none focus:bg-white dark:focus:bg-neutral-900"></div><div class="flex flex-col gap-1"><span class="text-[9px] font-mono uppercase tracking-widest text-neutral-400">Session Profile</span><div class="flex flex-wrap gap-1 bg-neutral-100 dark:bg-neutral-900 p-1 rounded-xl"></div></div><button><span>`), _tmpl$3$q = /* @__PURE__ */ template(`<button><span class="w-2 h-2 rounded-full"></span><span class="truncate max-w-[60px]">`);
 function CommunicatorTabPopover(props) {
   let popoverRef;
   const [name, setName] = createSignal(props.app.name);
@@ -23811,7 +24136,7 @@ function CommunicatorTabPopover(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$R();
+        var _el$ = _tmpl$$13();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -23827,7 +24152,7 @@ function CommunicatorTabPopover(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$2$A(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$8.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling, _el$12 = _el$1.nextSibling, _el$13 = _el$12.firstChild;
+        var _el$2 = _tmpl$2$F(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$8.nextSibling, _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling, _el$12 = _el$1.nextSibling, _el$13 = _el$12.firstChild;
         _el$2.$$click = (e) => e.stopPropagation();
         _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
@@ -23852,7 +24177,7 @@ function CommunicatorTabPopover(props) {
           children: (p) => {
             const isSelected = () => (props.app.profileId || "main") === p.id;
             return (() => {
-              var _el$14 = _tmpl$3$o(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+              var _el$14 = _tmpl$3$q(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
               _el$14.$$click = () => handleSelectProfile(p.id);
               insert(_el$16, () => p.name);
               createRenderEffect((_p$) => {
@@ -23892,7 +24217,7 @@ function CommunicatorTabPopover(props) {
   });
 }
 delegateEvents(["pointerdown", "click", "contextmenu", "input", "keydown"]);
-var _tmpl$$Q = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$z = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$n = /* @__PURE__ */ template(`<button>`), _tmpl$4$h = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$a = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$4 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
+var _tmpl$$12 = /* @__PURE__ */ template(`<span class="px-1 rounded-full text-[9px] font-mono bg-neutral-700 text-white dark:bg-neutral-300 dark:text-neutral-900">`), _tmpl$2$E = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-800 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors shrink-0 cursor-pointer">`), _tmpl$3$p = /* @__PURE__ */ template(`<button>`), _tmpl$4$i = /* @__PURE__ */ template(`<button class="p-1.5 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/50 dark:hover:bg-neutral-800 transition-colors cursor-pointer">`), _tmpl$5$a = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="px-2.5 py-2 border-b border-neutral-200/80 dark:border-neutral-800 flex items-center justify-between bg-[#fafaf9] dark:bg-[#141415] select-none cursor-move group/header pointer-events-auto rounded-tr-2xl"><div class="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 max-w-[480px]"data-no-drag><button><span>Feed</span></button></div><div class=flex-1></div><div class="flex items-center gap-0.5 shrink-0 pl-1"data-no-drag>`), _tmpl$6$5 = /* @__PURE__ */ template(`<span class="w-1.5 h-1.5 rounded-full bg-neutral-900 dark:bg-white">`), _tmpl$7$4 = /* @__PURE__ */ template(`<div class="relative group/tab flex items-center shrink-0"><button><span class="max-w-[80px] truncate text-[11px] font-medium">`);
 function CommunicatorHeader(props) {
   const [isReloading, setIsReloading] = createSignal(false);
   const [activeTabPopover, setActiveTabPopover] = createSignal(null);
@@ -23911,7 +24236,7 @@ function CommunicatorHeader(props) {
         return props.totalUnread() > 0;
       },
       get children() {
-        var _el$5 = _tmpl$$Q();
+        var _el$5 = _tmpl$$12();
         insert(_el$5, () => props.totalUnread());
         return _el$5;
       }
@@ -23923,7 +24248,7 @@ function CommunicatorHeader(props) {
       children: (app) => {
         const isActive = () => commStore.activeTab === app.id;
         return (() => {
-          var _el$12 = _tmpl$7$3(), _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild;
+          var _el$12 = _tmpl$7$4(), _el$13 = _el$12.firstChild, _el$14 = _el$13.firstChild;
           _el$13.$$contextmenu = (e) => {
             e.preventDefault();
             const rect = e.currentTarget.getBoundingClientRect();
@@ -23966,7 +24291,7 @@ function CommunicatorHeader(props) {
               return app.unreadCount > 0;
             },
             get children() {
-              return _tmpl$6$4();
+              return _tmpl$6$5();
             }
           }), null);
           createRenderEffect(() => className(_el$13, `p-1.5 rounded-lg text-xs font-medium transition-all flex items-center gap-1.5 cursor-pointer ${isActive() ? "bg-neutral-200/90 dark:bg-neutral-700 shadow-sm text-neutral-900 dark:text-white" : "hover:bg-neutral-200/50 dark:hover:bg-neutral-800 text-neutral-600 dark:text-neutral-400"}`));
@@ -23978,7 +24303,7 @@ function CommunicatorHeader(props) {
       label: "Add App",
       placement: "bottom",
       get children() {
-        var _el$6 = _tmpl$2$z();
+        var _el$6 = _tmpl$2$E();
         _el$6.$$click = (e) => props.onAddApp(e);
         insert(_el$6, createComponent(Plus, {
           "class": "w-3.5 h-3.5"
@@ -23992,7 +24317,7 @@ function CommunicatorHeader(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$9 = _tmpl$3$n();
+        var _el$9 = _tmpl$3$p();
         _el$9.$$click = () => commActions.togglePin();
         insert(_el$9, createComponent(Pin, {
           get ["class"]() {
@@ -24009,7 +24334,7 @@ function CommunicatorHeader(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$0 = _tmpl$3$n();
+        var _el$0 = _tmpl$3$p();
         _el$0.$$click = () => commActions.toggleExpand();
         insert(_el$0, createComponent(Show, {
           get when() {
@@ -24039,7 +24364,7 @@ function CommunicatorHeader(props) {
           label: "Reload App",
           placement: "bottom",
           get children() {
-            var _el$1 = _tmpl$4$h();
+            var _el$1 = _tmpl$4$i();
             _el$1.$$click = () => {
               setIsReloading(true);
               commActions.reloadActiveApp();
@@ -24056,7 +24381,7 @@ function CommunicatorHeader(props) {
           label: "Expand to Workspace Split",
           placement: "bottom",
           get children() {
-            var _el$10 = _tmpl$4$h();
+            var _el$10 = _tmpl$4$i();
             _el$10.$$click = () => {
               const current = props.currentApps().find((a) => a.id === commStore.activeTab);
               if (current) props.onExpandToSplit(current.url, current.name);
@@ -24073,7 +24398,7 @@ function CommunicatorHeader(props) {
       label: "Dismiss (Esc)",
       placement: "bottom",
       get children() {
-        var _el$11 = _tmpl$4$h();
+        var _el$11 = _tmpl$4$i();
         addEventListener(_el$11, "click", commActions.close, true);
         insert(_el$11, createComponent(X, {
           "class": "w-3.5 h-3.5"
@@ -24102,17 +24427,17 @@ function CommunicatorHeader(props) {
   })();
 }
 delegateEvents(["mousedown", "click", "contextmenu"]);
-var _tmpl$$P = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$y = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$m = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$g = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
+var _tmpl$$11 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2">`), _tmpl$2$D = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto p-3 flex flex-col bg-[#fafaf9] dark:bg-[#141415] select-none">`), _tmpl$3$o = /* @__PURE__ */ template(`<div class="flex-1 flex flex-col items-center justify-center text-center p-6 animate-in fade-in duration-150"><div class="w-10 h-10 rounded-2xl bg-neutral-200/50 dark:bg-neutral-800/50 border border-neutral-300/50 dark:border-neutral-700/50 flex items-center justify-center mb-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.8)]"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">All caught up</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Incoming notifications across all your communication apps will appear here in real time.`), _tmpl$4$h = /* @__PURE__ */ template(`<div class="p-2.5 rounded-xl border border-neutral-200/70 dark:border-neutral-800 bg-white/70 dark:bg-neutral-900/70 hover:bg-neutral-100/90 dark:hover:bg-neutral-800/90 transition-all cursor-pointer group shadow-[0_1px_3px_rgba(0,0,0,0.04)] active:scale-[0.99]"><div class="flex items-center justify-between mb-1"><span class="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500"></span><span class="text-[10px] font-mono text-neutral-400"></span></div><h5 class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 truncate"></h5><p class="text-[11px] text-neutral-500 dark:text-neutral-400 line-clamp-2 mt-0.5">`);
 function CommunicatorFeed() {
   return (() => {
-    var _el$ = _tmpl$2$y();
+    var _el$ = _tmpl$2$D();
     insert(_el$, createComponent(Show, {
       get when() {
         return commStore.notifications.length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$3$m(), _el$4 = _el$3.firstChild;
+          var _el$3 = _tmpl$3$o(), _el$4 = _el$3.firstChild;
           insert(_el$4, createComponent(Inbox, {
             "class": "w-5 h-5 text-neutral-400 dark:text-neutral-500"
           }));
@@ -24120,13 +24445,13 @@ function CommunicatorFeed() {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$P();
+        var _el$2 = _tmpl$$11();
         insert(_el$2, createComponent(For, {
           get each() {
             return commStore.notifications;
           },
           children: (item) => (() => {
-            var _el$5 = _tmpl$4$g(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
+            var _el$5 = _tmpl$4$h(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.nextSibling;
             _el$5.$$click = () => commActions.setTab(item.appId);
             insert(_el$7, () => item.appName);
             insert(_el$8, () => new Date(item.timestamp).toLocaleTimeString([], {
@@ -24145,16 +24470,16 @@ function CommunicatorFeed() {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$O = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$2$x = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left cursor-pointer"><span class="text-[11px] font-medium truncate">`);
+var _tmpl$$10 = /* @__PURE__ */ template(`<div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Popular Providers</span><div class="grid grid-cols-3 gap-1.5 mt-1 max-h-[110px] overflow-y-auto pr-0.5">`), _tmpl$2$C = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 p-1.5 rounded-xl border border-neutral-200/60 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900 hover:border-neutral-400 dark:hover:border-neutral-600 transition-all text-left cursor-pointer"><span class="text-[11px] font-medium truncate">`);
 function PopularProvidersGrid(props) {
   return (() => {
-    var _el$ = _tmpl$$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$10(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     insert(_el$3, createComponent(For, {
       get each() {
         return commStore.providers;
       },
       children: (prov) => (() => {
-        var _el$4 = _tmpl$2$x(), _el$5 = _el$4.firstChild;
+        var _el$4 = _tmpl$2$C(), _el$5 = _el$4.firstChild;
         _el$4.$$click = () => props.onSelect(prov);
         insert(_el$4, createComponent(Favicon, {
           get url() {
@@ -24171,10 +24496,10 @@ function PopularProvidersGrid(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$N = /* @__PURE__ */ template(`<div class="flex flex-col gap-3"><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Drawer Size</span><div class="grid grid-cols-2 gap-2 mt-1"><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Standard</span></div><span>660 × 680 px</span></button><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Expanded</span></div><span>920 × Full Height</span></button></div></div><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Stacks</span><div class="flex flex-col gap-1.5 mt-1 max-h-[160px] overflow-y-auto pr-0.5">`), _tmpl$2$w = /* @__PURE__ */ template(`<button class="p-1 rounded-lg text-neutral-400 hover:text-red-500 transition-colors cursor-pointer"title="Delete Stack">`), _tmpl$3$l = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900"><div class="flex items-center gap-2"><span class="w-6 h-6 rounded-lg bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center text-xs font-semibold"></span><span class="text-xs font-medium"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)`);
+var _tmpl$$$ = /* @__PURE__ */ template(`<div class="flex flex-col gap-3"><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Drawer Size</span><div class="grid grid-cols-2 gap-2 mt-1"><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Standard</span></div><span>660 × 680 px</span></button><button type=button><div class="flex items-center justify-between"><span class="text-xs font-semibold">Expanded</span></div><span>920 × Full Height</span></button></div></div><div><span class="text-[10px] uppercase font-mono tracking-wider text-neutral-400">Stacks</span><div class="flex flex-col gap-1.5 mt-1 max-h-[160px] overflow-y-auto pr-0.5">`), _tmpl$2$B = /* @__PURE__ */ template(`<button class="p-1 rounded-lg text-neutral-400 hover:text-red-500 transition-colors cursor-pointer"title="Delete Stack">`), _tmpl$3$n = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-neutral-50 dark:bg-neutral-900"><div class="flex items-center gap-2"><span class="w-6 h-6 rounded-lg bg-neutral-200 dark:bg-neutral-800 flex items-center justify-center text-xs font-semibold"></span><span class="text-xs font-medium"></span><span class="text-[10px] font-mono text-neutral-400">(<!> apps)`);
 function CommunicatorManageStacks() {
   return (() => {
-    var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
+    var _el$ = _tmpl$$$(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
     _el$6.firstChild;
     var _el$8 = _el$6.nextSibling, _el$9 = _el$5.nextSibling, _el$0 = _el$9.firstChild;
     _el$0.firstChild;
@@ -24192,7 +24517,7 @@ function CommunicatorManageStacks() {
         return commStore.stacks;
       },
       children: (st) => (() => {
-        var _el$14 = _tmpl$3$l(), _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$18 = _el$17.nextSibling, _el$19 = _el$18.firstChild, _el$21 = _el$19.nextSibling;
+        var _el$14 = _tmpl$3$n(), _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$18 = _el$17.nextSibling, _el$19 = _el$18.firstChild, _el$21 = _el$19.nextSibling;
         _el$21.nextSibling;
         insert(_el$16, () => st.icon);
         insert(_el$17, () => st.name);
@@ -24202,7 +24527,7 @@ function CommunicatorManageStacks() {
             return commStore.stacks.length > 1;
           },
           get children() {
-            var _el$22 = _tmpl$2$w();
+            var _el$22 = _tmpl$2$B();
             _el$22.$$click = () => commActions.deleteStack(st.id);
             insert(_el$22, createComponent(Trash2, {
               "class": "w-3.5 h-3.5"
@@ -24230,7 +24555,7 @@ function CommunicatorManageStacks() {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$M = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] bg-transparent pointer-events-auto">`), _tmpl$2$v = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$3$k = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5"><div class="flex flex-col gap-1.5"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5">`), _tmpl$4$f = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[390px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.25)] p-3.5 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Settings</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$5$9 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$$_ = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed inset-0 z-[9998] bg-transparent pointer-events-auto">`), _tmpl$2$A = /* @__PURE__ */ template(`<label class="flex items-center gap-2 text-[11px] text-neutral-500 cursor-pointer"><input type=checkbox class="rounded border-neutral-300 dark:border-neutral-700"><span>Save as reusable custom provider template`), _tmpl$3$m = /* @__PURE__ */ template(`<form class="flex flex-col gap-2.5"><div class="flex flex-col gap-1.5"><input type=text placeholder="App Name (e.g. Work Slack)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"><input type=text placeholder="URL (e.g. app.slack.com/client)"class="text-xs px-3 py-1.5 rounded-xl bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 focus:outline-none"></div><div class="grid grid-cols-2 gap-2 text-xs"><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Profile Partition</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"><option value=main>Main (Default)</option></select></div><div class="flex flex-col gap-1"><span class="text-[10px] font-mono text-neutral-400 uppercase">Target Stack</span><select class="bg-neutral-50 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-xl px-2 py-1.5 text-xs focus:outline-none"></select></div></div><button type=submit class="w-full py-2 rounded-xl bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 text-xs font-semibold hover:opacity-90 active:scale-[0.97] transition-all cursor-pointer shadow-sm mt-0.5">`), _tmpl$4$g = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-communicator=true class="fixed z-[9999] pointer-events-auto cursor-default origin-top-left w-[390px] bg-white dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.25)] p-3.5 flex flex-col gap-3 text-neutral-900 dark:text-neutral-100 select-none font-sans"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-2"><div class="flex items-center gap-2"><button></button><button>Settings</button></div><button class="p-1 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200">`), _tmpl$5$9 = /* @__PURE__ */ template(`<option>`);
 function AppConfigModal(props) {
   let popoverRef;
   const [activeTab, setActiveTab] = createSignal(props.initialTab || "addApp");
@@ -24314,7 +24639,7 @@ function AppConfigModal(props) {
   return createComponent(Portal, {
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$M();
+        var _el$ = _tmpl$$_();
         _el$.$$contextmenu = (e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -24330,7 +24655,7 @@ function AppConfigModal(props) {
         };
         return _el$;
       })(), (() => {
-        var _el$2 = _tmpl$4$f(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
+        var _el$2 = _tmpl$4$g(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling;
         _el$2.$$click = (e) => e.stopPropagation();
         _el$2.$$pointerdown = (e) => e.stopPropagation();
         var _ref$ = popoverRef;
@@ -24347,7 +24672,7 @@ function AppConfigModal(props) {
             return activeTab() === "addApp";
           },
           get children() {
-            var _el$8 = _tmpl$3$k(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$9.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
+            var _el$8 = _tmpl$3$m(), _el$9 = _el$8.firstChild, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling, _el$10 = _el$9.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling;
             _el$13.firstChild;
             var _el$15 = _el$11.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$20 = _el$10.nextSibling;
             _el$8.addEventListener("submit", handleSaveApp);
@@ -24392,7 +24717,7 @@ function AppConfigModal(props) {
                 return !props.editApp;
               },
               get children() {
-                var _el$18 = _tmpl$2$v(), _el$19 = _el$18.firstChild;
+                var _el$18 = _tmpl$2$A(), _el$19 = _el$18.firstChild;
                 _el$19.addEventListener("change", (e) => setSaveAsTemplate(e.currentTarget.checked));
                 createRenderEffect(() => _el$19.checked = saveAsTemplate());
                 return _el$18;
@@ -24583,7 +24908,7 @@ function useCommunicatorBounds(getContainerRef, isDragging) {
   });
   return { syncBounds: scheduleSync };
 }
-var _tmpl$$L = /* @__PURE__ */ template(`<div class="w-full h-full pointer-events-auto"data-overlay-chrome=true>`), _tmpl$2$u = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-[#fafaf9] dark:bg-[#141415] select-none pointer-events-auto"><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">No apps in this stack</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Click "+" above to add an app.`), _tmpl$3$j = /* @__PURE__ */ template(`<img alt="App Snapshot"class="absolute inset-0 w-full h-full object-cover object-top pointer-events-none rounded-br-2xl select-none z-10">`), _tmpl$4$e = /* @__PURE__ */ template(`<div id=communicator-drawer data-communicator=true><div class="flex-1 flex flex-col min-w-0 h-full pointer-events-none"><div class="flex-1 w-full h-full relative overflow-hidden bg-transparent pointer-events-none rounded-br-2xl"><div class="absolute bottom-0 right-0 w-3.5 h-3.5 pointer-events-none z-20 overflow-hidden"><svg class="w-full h-full fill-[#f4f4f2] dark:fill-[#121212]"viewBox="0 0 16 16"><path d="M16,0 L16,16 L0,16 C8.836,16 16,8.836 16,0 Z">`);
+var _tmpl$$Z = /* @__PURE__ */ template(`<div class="w-full h-full pointer-events-auto"data-overlay-chrome=true>`), _tmpl$2$z = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col items-center justify-center p-6 text-center bg-[#fafaf9] dark:bg-[#141415] select-none pointer-events-auto"><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200">No apps in this stack</p><p class="text-[11px] text-neutral-400 dark:text-neutral-500 mt-1 max-w-[200px]">Click "+" above to add an app.`), _tmpl$3$l = /* @__PURE__ */ template(`<img alt="App Snapshot"class="absolute inset-0 w-full h-full object-cover object-top pointer-events-none rounded-br-2xl select-none z-10">`), _tmpl$4$f = /* @__PURE__ */ template(`<div id=communicator-drawer data-communicator=true><div class="flex-1 flex flex-col min-w-0 h-full pointer-events-none"><div class="flex-1 w-full h-full relative overflow-hidden bg-transparent pointer-events-none rounded-br-2xl"><div class="absolute bottom-0 right-0 w-3.5 h-3.5 pointer-events-none z-20 overflow-hidden"><svg class="w-full h-full fill-[#f4f4f2] dark:fill-[#121212]"viewBox="0 0 16 16"><path d="M16,0 L16,16 L0,16 C8.836,16 16,8.836 16,0 Z">`);
 function CommunicatorDrawer(props) {
   let drawerRef;
   let containerRef;
@@ -24666,7 +24991,7 @@ function CommunicatorDrawer(props) {
       return commStore.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$4$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.firstChild;
+      var _el$ = _tmpl$4$f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$7 = _el$3.firstChild;
       addEventListener(_el$, "mouseenter", commActions.keepOpen);
       addEventListener(_el$, "transitionend", syncBounds);
       var _ref$ = drawerRef;
@@ -24703,7 +25028,7 @@ function CommunicatorDrawer(props) {
           return commStore.activeTab === "all";
         },
         get children() {
-          var _el$4 = _tmpl$$L();
+          var _el$4 = _tmpl$$Z();
           insert(_el$4, createComponent(CommunicatorFeed, {}));
           return _el$4;
         }
@@ -24713,7 +25038,7 @@ function CommunicatorDrawer(props) {
           return memo(() => commStore.activeTab !== "all")() && currentApps().length === 0;
         },
         get children() {
-          return _tmpl$2$u();
+          return _tmpl$2$z();
         }
       }), _el$7);
       insert(_el$3, createComponent(Show, {
@@ -24721,7 +25046,7 @@ function CommunicatorDrawer(props) {
           return memo(() => !!isDragging())() && dragSnapshot();
         },
         get children() {
-          var _el$6 = _tmpl$3$j();
+          var _el$6 = _tmpl$3$l();
           createRenderEffect(() => setAttribute(_el$6, "src", dragSnapshot()));
           return _el$6;
         }
@@ -24772,7 +25097,7 @@ function CommunicatorDrawer(props) {
     }
   });
 }
-var _tmpl$$K = /* @__PURE__ */ template(`<svg id=communicator-safe-bridge class="fixed inset-0 w-full h-full pointer-events-none z-[125]"style=fill:transparent><polygon class=pointer-events-auto data-overlay-chrome=true>`);
+var _tmpl$$Y = /* @__PURE__ */ template(`<svg id=communicator-safe-bridge class="fixed inset-0 w-full h-full pointer-events-none z-[125]"style=fill:transparent><polygon class=pointer-events-auto data-overlay-chrome=true>`);
 function SafeBridgeOverlay(props) {
   const pointsString = () => props.polygon().map((p) => `${p.x},${p.y}`).join(" ");
   return createComponent(Show, {
@@ -24780,7 +25105,7 @@ function SafeBridgeOverlay(props) {
       return memo(() => !!(commStore.isOpen && !commStore.isFloating))() && props.polygon().length > 0;
     },
     get children() {
-      var _el$ = _tmpl$$K(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$Y(), _el$2 = _el$.firstChild;
       addEventListener(_el$, "mousemove", commActions.keepOpen, true);
       addEventListener(_el$, "mouseenter", commActions.keepOpen);
       createRenderEffect(() => setAttribute(_el$2, "points", pointsString()));
@@ -24868,7 +25193,7 @@ function useCommunicatorIntent() {
     handleTriggerEnter
   };
 }
-var _tmpl$$J = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
+var _tmpl$$X = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`);
 function ActionCluster(props) {
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
   const [isSpinning, setIsSpinning] = createSignal(false);
@@ -24921,7 +25246,7 @@ function ActionCluster(props) {
           return showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$J();
+          var _el$ = _tmpl$$X();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             setShowProfileMenu(false);
@@ -24977,7 +25302,7 @@ function ActionCluster(props) {
   });
 }
 delegateEvents(["pointerdown"]);
-var _tmpl$$I = /* @__PURE__ */ template(`<div><div>`);
+var _tmpl$$W = /* @__PURE__ */ template(`<div><div>`);
 const STYLE_MAP = {
   md: {
     outer: "rounded-xl p-[3px]",
@@ -25027,7 +25352,7 @@ function DoubleBezel(rawProps) {
   const innerBorder = isLightOnDark ? "border-transparent" : isDark ? local.elevation === "active" ? "border-white/20" : "border-white/10" : local.elevation === "active" ? "border-neutral-300" : "border-neutral-200";
   const innerShadow = isDark ? "shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]" : "shadow-[inset_0_1px_1px_rgba(255,255,255,1)]";
   return (() => {
-    var _el$ = _tmpl$$I(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$W(), _el$2 = _el$.firstChild;
     spread(_el$, mergeProps({
       get ["class"]() {
         return `${outerBg} ${outerBorder} overflow-hidden flex flex-col transition-all duration-300 ${sizeClasses.outer} ${elevationClasses} ${interactiveClasses} ${local.outerClass || ""} ${local.class || ""}`;
@@ -25046,7 +25371,7 @@ function DoubleBezel(rawProps) {
     return _el$;
   })();
 }
-var _tmpl$$H = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$t = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$i = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$d = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
+var _tmpl$$V = /* @__PURE__ */ template(`<div class="mr-4 text-neutral-400 shrink-0">`), _tmpl$2$y = /* @__PURE__ */ template(`<input type=text autocomplete=off autocorrect=off class="flex-1 w-full bg-transparent text-sm text-neutral-900 placeholder:text-neutral-500 outline-none border-none focus:ring-0 focus:outline-none"style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto>`), _tmpl$3$k = /* @__PURE__ */ template(`<div class="shrink-0 pl-4 ml-3 border-l border-neutral-200/60 flex items-center">`), _tmpl$4$e = /* @__PURE__ */ template(`<div class="flex items-center text-neutral-400 mr-3 shrink-0"><svg class="w-5 h-5 transition-colors duration-300"fill=none stroke=currentColor viewBox="0 0 24 24"xmlns=http://www.w3.org/2000/svg><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z">`);
 function CommandBar(props) {
   const [isFocused, setIsFocused] = createSignal(false);
   let inputEl;
@@ -25083,7 +25408,7 @@ function CommandBar(props) {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$4$d(), _el$5 = _el$4.firstChild;
+            var _el$4 = _tmpl$4$e(), _el$5 = _el$4.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = !!isFocused(), _v$5 = !isFocused();
               _v$4 !== _p$.e && _el$5.classList.toggle("text-neutral-600", _p$.e = _v$4);
@@ -25097,12 +25422,12 @@ function CommandBar(props) {
           })();
         },
         get children() {
-          var _el$ = _tmpl$$H();
+          var _el$ = _tmpl$$V();
           insert(_el$, () => props.icon);
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$2$t();
+        var _el$2 = _tmpl$2$y();
         _el$2.addEventListener("blur", handleBlur);
         _el$2.addEventListener("focus", handleFocus);
         addEventListener(_el$2, "keydown", props.onKeyDown, true);
@@ -25134,7 +25459,7 @@ function CommandBar(props) {
           return props.rightElement;
         },
         get children() {
-          var _el$3 = _tmpl$3$i();
+          var _el$3 = _tmpl$3$k();
           insert(_el$3, () => props.rightElement);
           return _el$3;
         }
@@ -25143,7 +25468,7 @@ function CommandBar(props) {
   });
 }
 delegateEvents(["input", "keydown"]);
-var _tmpl$$G = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"><div>`);
+var _tmpl$$U = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"><div>`);
 function ModalShell$1(props) {
   onMount(() => {
     const onKeyDown = (e) => {
@@ -25161,7 +25486,7 @@ function ModalShell$1(props) {
     get children() {
       return createComponent(Portal, {
         get children() {
-          var _el$ = _tmpl$$G(), _el$2 = _el$.firstChild;
+          var _el$ = _tmpl$$U(), _el$2 = _el$.firstChild;
           _el$.$$click = (e) => {
             if (e.target === e.currentTarget) props.onClose();
           };
@@ -25424,11 +25749,11 @@ class CatalogSearchEngine {
   }
 }
 const catalogSearch = new CatalogSearchEngine();
-var _tmpl$$F = /* @__PURE__ */ template(`<img class="w-4 h-4 object-contain rounded"alt loading=lazy>`, true, false, false), _tmpl$2$s = /* @__PURE__ */ template(`<div class="flex items-center gap-1">`), _tmpl$3$h = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded flex items-center justify-center shrink-0"></div><span class=font-medium></span><span class="text-[10px] font-mono opacity-60 uppercase">[<!>]`), _tmpl$4$c = /* @__PURE__ */ template(`<span class="text-xs font-bold uppercase">`), _tmpl$5$8 = /* @__PURE__ */ template(`<button class="px-1.5 py-0.5 text-[9px] font-mono rounded bg-white/20 hover:bg-white/30 text-current">`);
+var _tmpl$$T = /* @__PURE__ */ template(`<img class="w-4 h-4 object-contain rounded"alt loading=lazy>`, true, false, false), _tmpl$2$x = /* @__PURE__ */ template(`<div class="flex items-center gap-1">`), _tmpl$3$j = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><div class="w-6 h-6 rounded flex items-center justify-center shrink-0"></div><span class=font-medium></span><span class="text-[10px] font-mono opacity-60 uppercase">[<!>]`), _tmpl$4$d = /* @__PURE__ */ template(`<span class="text-xs font-bold uppercase">`), _tmpl$5$8 = /* @__PURE__ */ template(`<button class="px-1.5 py-0.5 text-[9px] font-mono rounded bg-white/20 hover:bg-white/30 text-current">`);
 function CommandPaletteAppItem(props) {
   const favicon = () => getFaviconUrl(props.app.domain || props.app.url, 32);
   return (() => {
-    var _el$ = _tmpl$3$h(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+    var _el$ = _tmpl$3$j(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$5 = _el$3.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
     _el$9.nextSibling;
     addEventListener(_el$, "mouseenter", props.onHover);
     _el$.$$click = () => props.onSelect(props.app);
@@ -25438,13 +25763,13 @@ function CommandPaletteAppItem(props) {
       },
       get fallback() {
         return (() => {
-          var _el$1 = _tmpl$4$c();
+          var _el$1 = _tmpl$4$d();
           insert(_el$1, () => props.app.name.charAt(0));
           return _el$1;
         })();
       },
       get children() {
-        var _el$4 = _tmpl$$F();
+        var _el$4 = _tmpl$$T();
         createRenderEffect(() => setAttribute(_el$4, "src", favicon()));
         return _el$4;
       }
@@ -25456,7 +25781,7 @@ function CommandPaletteAppItem(props) {
         return memo(() => !!props.app.actions)() && props.app.actions.length > 0;
       },
       get children() {
-        var _el$0 = _tmpl$2$s();
+        var _el$0 = _tmpl$2$x();
         insert(_el$0, createComponent(For, {
           get each() {
             return props.app.actions?.slice(0, 2);
@@ -25479,7 +25804,7 @@ function CommandPaletteAppItem(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$E = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 dark:border-neutral-800 cursor-text"><svg class="w-5 h-5 text-neutral-400 mr-3 shrink-0"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg><input type=text placeholder="Search apps, saved presets, sub-routes, or workspaces…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-500 outline-none border-none focus:ring-0">`), _tmpl$2$r = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">My Presets`), _tmpl$3$g = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Web Applications`), _tmpl$4$b = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Workspaces`), _tmpl$5$7 = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto no-scrollbar">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-200 select-none">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2"><span class=text-xs>◫</span><span class=font-medium></span><span class="text-[10px] font-mono opacity-60">(<!>)</span></div><span class="text-[10px] font-mono opacity-60">Layout`), _tmpl$8$1 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
+var _tmpl$$S = /* @__PURE__ */ template(`<div class="flex items-center px-3 h-12 border-b border-neutral-200 dark:border-neutral-800 cursor-text"><svg class="w-5 h-5 text-neutral-400 mr-3 shrink-0"fill=none stroke=currentColor viewBox="0 0 24 24"><path stroke-linecap=round stroke-linejoin=round stroke-width=2.5 d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg><input type=text placeholder="Search apps, saved presets, sub-routes, or workspaces…"class="flex-1 w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-500 outline-none border-none focus:ring-0">`), _tmpl$2$w = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">My Presets`), _tmpl$3$i = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Web Applications`), _tmpl$4$c = /* @__PURE__ */ template(`<div><div class="px-3 py-1 text-[10px] font-mono font-bold text-neutral-400 uppercase tracking-wider">Workspaces`), _tmpl$5$7 = /* @__PURE__ */ template(`<div class="p-3 flex flex-col gap-2 max-h-[400px] overflow-y-auto no-scrollbar">`), _tmpl$6$4 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-50 flex justify-center pt-[15vh] bg-neutral-900/60 animate-in fade-in duration-200 select-none">`), _tmpl$7$3 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2"><span class=text-xs>◫</span><span class=font-medium></span><span class="text-[10px] font-mono opacity-60">(<!>)</span></div><span class="text-[10px] font-mono opacity-60">Layout`), _tmpl$8$2 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5"><span class=font-medium></span></div><span class="text-[11px] font-mono opacity-60">Switch`);
 function CommandPalette(props) {
   const [isOpen, setIsOpen] = createSignal(false);
   const [query, setQuery] = createSignal("");
@@ -25583,7 +25908,7 @@ function CommandPalette(props) {
       return isOpen();
     },
     get children() {
-      var _el$ = _tmpl$6$3();
+      var _el$ = _tmpl$6$4();
       _el$.$$click = () => setIsOpen(false);
       insert(_el$, createComponent(DoubleBezel, {
         size: "lg",
@@ -25593,7 +25918,7 @@ function CommandPalette(props) {
         onClick: (e) => e.stopPropagation(),
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$E(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$S(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$4.$$keydown = handleKeyDown;
             _el$4.$$input = (e) => {
               setQuery(e.currentTarget.value);
@@ -25610,14 +25935,14 @@ function CommandPalette(props) {
                 return matchingPresets().length > 0;
               },
               get children() {
-                var _el$6 = _tmpl$2$r();
+                var _el$6 = _tmpl$2$w();
                 _el$6.firstChild;
                 insert(_el$6, createComponent(For, {
                   get each() {
                     return matchingPresets();
                   },
                   children: (preset, idx) => (() => {
-                    var _el$10 = _tmpl$7$2(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.nextSibling, _el$15 = _el$14.firstChild, _el$17 = _el$15.nextSibling;
+                    var _el$10 = _tmpl$7$3(), _el$11 = _el$10.firstChild, _el$12 = _el$11.firstChild, _el$13 = _el$12.nextSibling, _el$14 = _el$13.nextSibling, _el$15 = _el$14.firstChild, _el$17 = _el$15.nextSibling;
                     _el$17.nextSibling;
                     _el$10.addEventListener("mouseenter", () => setActiveIdx(matchingWorkspaces().length + idx()));
                     _el$10.$$click = () => handleSelectPreset(preset);
@@ -25635,7 +25960,7 @@ function CommandPalette(props) {
                 return matchingApps().length > 0;
               },
               get children() {
-                var _el$8 = _tmpl$3$g();
+                var _el$8 = _tmpl$3$i();
                 _el$8.firstChild;
                 insert(_el$8, createComponent(For, {
                   get each() {
@@ -25658,14 +25983,14 @@ function CommandPalette(props) {
                 return matchingWorkspaces().length > 0;
               },
               get children() {
-                var _el$0 = _tmpl$4$b();
+                var _el$0 = _tmpl$4$c();
                 _el$0.firstChild;
                 insert(_el$0, createComponent(For, {
                   get each() {
                     return matchingWorkspaces();
                   },
                   children: (ws, idx) => (() => {
-                    var _el$18 = _tmpl$8$1(), _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild;
+                    var _el$18 = _tmpl$8$2(), _el$19 = _el$18.firstChild, _el$20 = _el$19.firstChild;
                     _el$18.addEventListener("mouseenter", () => setActiveIdx(idx()));
                     _el$18.$$click = () => handleSelectWorkspace(ws.id);
                     insert(_el$19, createComponent(WorkspaceIcon, {
@@ -25695,7 +26020,7 @@ function CommandPalette(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$D = /* @__PURE__ */ template(`<div><div></div><div>`);
+var _tmpl$$R = /* @__PURE__ */ template(`<div><div></div><div>`);
 function Resizer(props) {
   const onPointerDown = (e) => {
     e.preventDefault();
@@ -25771,7 +26096,7 @@ function Resizer(props) {
     window.addEventListener("mouseleave", onPointerUp);
   };
   return (() => {
-    var _el$ = _tmpl$$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$R(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$.$$pointerdown = onPointerDown;
     createRenderEffect((_p$) => {
       var _v$ = `relative flex items-center justify-center bg-transparent z-20 group pointer-events-auto shrink-0 ${props.isHorizontal ? "w-3 cursor-col-resize -mx-1.5" : "h-3 cursor-row-resize -my-1.5"}`, _v$2 = `bg-transparent group-hover:bg-neutral-400/60 group-active:bg-neutral-800 transition-colors duration-150 ${props.isHorizontal ? "w-[1px] h-full" : "h-[1px] w-full"}`, _v$3 = `absolute rounded-full bg-neutral-200 border border-neutral-400/50 shadow-sm opacity-0 group-hover:opacity-100 group-active:scale-95 transition-all duration-150 ${props.isHorizontal ? "w-1 h-6" : "h-1 w-6"}`;
@@ -25909,7 +26234,7 @@ function computeSpatialPadding(tree, config3 = DEFAULT_SPATIAL_CONFIG, maximized
   traverse(tree.rootId, { x0: 0, x1: 1, y0: 0, y1: 1 });
   return result;
 }
-var _tmpl$$C = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$q = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$f = /* @__PURE__ */ template(`<button>`), _tmpl$4$a = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div data-overlay-chrome=true><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$1 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
+var _tmpl$$Q = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[85] pointer-events-auto cursor-default">`), _tmpl$2$v = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="4 14 10 14 10 20"></polyline><polyline points="20 10 14 10 14 4"></polyline><line x1=14 y1=10 x2=21 y2=3></line><line x1=3 y1=21 x2=10 y2=14>`), _tmpl$3$h = /* @__PURE__ */ template(`<button>`), _tmpl$4$b = /* @__PURE__ */ template(`<div class="text-neutral-500 hover:text-neutral-900 transition-colors w-7 h-7 cursor-grab active:cursor-grabbing rounded-[10px] hover:bg-neutral-100 flex items-center justify-center shrink-0"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><polyline points="5 9 2 12 5 15"></polyline><polyline points="9 5 12 2 15 5"></polyline><polyline points="19 9 22 12 19 15"></polyline><polyline points="9 19 12 22 15 19">`), _tmpl$5$6 = /* @__PURE__ */ template(`<button class="text-neutral-500 hover:text-white hover:bg-red-500/90 rounded-[10px] w-7 h-7 flex items-center justify-center transition-colors shrink-0 active:scale-95"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5><path d="M18 6L6 18M6 6l12 12">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="absolute left-1/2 -translate-x-1/2 pointer-events-none z-[90] group/island flex justify-center items-start transition-all duration-300 ease-out wake-region top-0"><div data-overlay-chrome=true><div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5"></div><div class="w-[1px] h-3.5 bg-neutral-200 shrink-0 mx-0.5">`), _tmpl$7$2 = /* @__PURE__ */ template(`<svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><polyline points="15 3 21 3 21 9"></polyline><polyline points="9 21 3 21 3 15"></polyline><line x1=21 y1=3 x2=14 y2=10></line><line x1=3 y1=21 x2=10 y2=14>`);
 function PaneIsland(props) {
   const [showSplitMenu, setShowSplitMenu] = createSignal(false);
   const [showProfileMenu, setShowProfileMenu] = createSignal(false);
@@ -25925,7 +26250,7 @@ function PaneIsland(props) {
           return showSplitMenu() || showProfileMenu();
         },
         get children() {
-          var _el$ = _tmpl$$C();
+          var _el$ = _tmpl$$Q();
           _el$.$$pointerdown = (e) => {
             e.stopPropagation();
             props.onActive?.();
@@ -25936,7 +26261,7 @@ function PaneIsland(props) {
           return _el$;
         }
       }), (() => {
-        var _el$2 = _tmpl$6$2(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
+        var _el$2 = _tmpl$6$3(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$9 = _el$6.nextSibling, _el$1 = _el$9.nextSibling;
         _el$3.$$pointerdown = () => {
           props.onActive?.();
           PaneFocusManager.focusPane(props.node.id);
@@ -25972,7 +26297,7 @@ function PaneIsland(props) {
           },
           placement: "bottom",
           get children() {
-            var _el$7 = _tmpl$3$f();
+            var _el$7 = _tmpl$3$h();
             _el$7.$$click = (e) => {
               e.stopPropagation();
               props.onActive?.();
@@ -25989,10 +26314,10 @@ function PaneIsland(props) {
                 return isMaximized();
               },
               get fallback() {
-                return _tmpl$7$1();
+                return _tmpl$7$2();
               },
               get children() {
-                return _tmpl$2$q();
+                return _tmpl$2$v();
               }
             }));
             createRenderEffect(() => className(_el$7, `w-7 h-7 rounded-[10px] flex items-center justify-center transition-all active:scale-95 shrink-0 ${isMaximized() ? "bg-neutral-900 text-white shadow-sm" : "text-neutral-500 hover:text-neutral-900 hover:bg-neutral-100"}`));
@@ -26003,7 +26328,7 @@ function PaneIsland(props) {
           label: "Drag to Move",
           placement: "bottom",
           get children() {
-            var _el$0 = _tmpl$4$a();
+            var _el$0 = _tmpl$4$b();
             _el$0.$$pointerdown = (e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -26057,7 +26382,7 @@ function PaneIsland(props) {
   });
 }
 delegateEvents(["pointerdown", "click"]);
-var _tmpl$$B = /* @__PURE__ */ template(`<div class="flex-1 min-w-0 min-h-0 relative p-1 pointer-events-none z-20 animate-in fade-in duration-150"><div class="w-full h-full border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`), _tmpl$2$p = /* @__PURE__ */ template(`<div class="absolute inset-1 z-30 pointer-events-none border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 animate-in fade-in duration-150 backdrop-blur-[0.5px] shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`);
+var _tmpl$$P = /* @__PURE__ */ template(`<div class="flex-1 min-w-0 min-h-0 relative p-1 pointer-events-none z-20 animate-in fade-in duration-150"><div class="w-full h-full border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`), _tmpl$2$u = /* @__PURE__ */ template(`<div class="absolute inset-1 z-30 pointer-events-none border-2 border-dashed border-neutral-400/60 dark:border-neutral-500/60 bg-black/[0.04] dark:bg-white/[0.06] rounded-xl flex items-center justify-center text-[11px] font-semibold text-neutral-700 dark:text-neutral-200 animate-in fade-in duration-150 backdrop-blur-[0.5px] shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)]"><div class="px-2.5 py-1 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-md shadow-double-bezel-flat text-[10px] font-medium text-neutral-800 dark:text-neutral-100">`);
 function PaneDropGhost(props) {
   const label = () => {
     switch (props.direction) {
@@ -26081,22 +26406,22 @@ function PaneDropGhost(props) {
     },
     get fallback() {
       return (() => {
-        var _el$4 = _tmpl$2$p(), _el$5 = _el$4.firstChild;
+        var _el$4 = _tmpl$2$u(), _el$5 = _el$4.firstChild;
         insert(_el$5, label);
         return _el$4;
       })();
     },
     get children() {
-      var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$$P(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       insert(_el$3, label);
       return _el$;
     }
   });
 }
-var _tmpl$$A = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`);
+var _tmpl$$O = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none z-[80] overflow-hidden"><div class="absolute bottom-0 left-0 right-0 h-2 flex items-end justify-center group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto h-1.5 w-16 hover:h-8 hover:w-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-t-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pt-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute left-0 top-0 bottom-0 w-2 flex items-center justify-start group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-r-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pr-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+</button></div><div class="absolute right-0 top-0 bottom-0 w-2 flex items-center justify-end group/edge pointer-events-auto z-[80]"><button class="pointer-events-auto w-1.5 h-16 hover:w-8 hover:h-32 bg-white/60 hover:bg-white backdrop-blur-md border border-neutral-200/60 text-transparent hover:text-neutral-500 rounded-l-xl transition-all duration-300 ease-out flex items-center justify-center text-xl pl-0.5 opacity-0 group-hover/edge:opacity-100 shadow-sm">+`);
 function PaneSplitEdgeButtons(props) {
   return (() => {
-    var _el$ = _tmpl$$A(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling, _el$7 = _el$6.firstChild;
+    var _el$ = _tmpl$$O(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling, _el$7 = _el$6.firstChild;
     _el$3.$$click = (e) => {
       e.stopPropagation();
       props.onSplit(props.paneId, "bottom");
@@ -26113,7 +26438,7 @@ function PaneSplitEdgeButtons(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$z = /* @__PURE__ */ template(`<div><div><div class="flex-1 min-w-0 min-h-0 relative w-full h-full bg-transparent group/pane pointer-events-none rounded-[14px] transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-10">`), _tmpl$2$o = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
+var _tmpl$$N = /* @__PURE__ */ template(`<div><div><div class="flex-1 min-w-0 min-h-0 relative w-full h-full bg-transparent group/pane pointer-events-none rounded-[14px] transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] z-10">`), _tmpl$2$t = /* @__PURE__ */ template(`<div class="w-full h-full relative p-1.5 pointer-events-none z-10"><div class="w-full h-full bg-black/[0.03] dark:bg-white/[0.05] border-2 border-dashed border-neutral-400/40 rounded-xl pointer-events-none flex items-center justify-center animate-in fade-in duration-350 ease-out shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] transition-all duration-400 ease-[cubic-bezier(0.16,1,0.3,1)]"><div class="px-3 py-1.5 bg-white/90 dark:bg-neutral-900/90 border border-neutral-200/80 dark:border-neutral-700/80 rounded-lg shadow-sm text-xs font-semibold text-neutral-700 dark:text-neutral-200 tracking-tight">`);
 function PaneNode(props) {
   const isPreviewGhost = () => props.node.id === SPLIT_PREVIEW_GHOST_ID;
   const isTarget = () => Boolean(props.dragTarget && props.dragTarget.tier === "leaf" && props.dragTarget.id === props.node.id);
@@ -26160,13 +26485,13 @@ function PaneNode(props) {
     },
     get fallback() {
       return (() => {
-        var _el$4 = _tmpl$2$o(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
+        var _el$4 = _tmpl$2$t(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild;
         insert(_el$6, () => props.node.title || "Split Preview");
         return _el$4;
       })();
     },
     get children() {
-      var _el$ = _tmpl$$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$$N(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       _el$.$$click = () => PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
       _el$.$$mousedown = () => PaneFocusManager.focusPane(props.node.id, props.onActivePaneChange);
       insert(_el$2, createComponent(Show, {
@@ -26262,7 +26587,7 @@ function PaneNode(props) {
   });
 }
 delegateEvents(["mousedown", "click"]);
-var _tmpl$$y = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$n = /* @__PURE__ */ template(`<div>`);
+var _tmpl$$M = /* @__PURE__ */ template(`<div class="overflow-visible min-w-[50px] min-h-[50px] pointer-events-none transition-all duration-450 ease-[cubic-bezier(0.16,1,0.3,1)]">`), _tmpl$2$s = /* @__PURE__ */ template(`<div>`);
 function LayoutNode(props) {
   const node = () => (props.nodes || layoutStore.nodes)[props.nodeId];
   return createComponent(Show, {
@@ -26311,13 +26636,13 @@ function LayoutNode(props) {
       });
     },
     get children() {
-      var _el$ = _tmpl$2$n();
+      var _el$ = _tmpl$2$s();
       insert(_el$, createComponent(Show, {
         get when() {
           return props.activeDragId !== node().a;
         },
         get children() {
-          var _el$2 = _tmpl$$y();
+          var _el$2 = _tmpl$$M();
           insert(_el$2, createComponent(LayoutNode, {
             get nodeId() {
               return node().a;
@@ -26378,7 +26703,7 @@ function LayoutNode(props) {
           return props.activeDragId !== node().b;
         },
         get children() {
-          var _el$3 = _tmpl$$y();
+          var _el$3 = _tmpl$$M();
           insert(_el$3, createComponent(LayoutNode, {
             get nodeId() {
               return node().b;
@@ -26423,7 +26748,7 @@ function LayoutNode(props) {
     }
   });
 }
-var _tmpl$$x = /* @__PURE__ */ template(`<div class="absolute inset-2 z-[99] pointer-events-none transition-all duration-300 border-2 border-dashed border-neutral-400/50 bg-black/[0.02] dark:bg-white/[0.04] rounded-xl flex items-center justify-center animate-in fade-in duration-200 backdrop-blur-[0.5px]"><div class="px-4 py-2 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight">Release to place pane in this tab`), _tmpl$2$m = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-200 ease-out backdrop-blur-[0.5px]"><div class="px-3.5 py-1.5 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight"><span>`);
+var _tmpl$$L = /* @__PURE__ */ template(`<div class="absolute inset-2 z-[99] pointer-events-none transition-all duration-300 border-2 border-dashed border-neutral-400/50 bg-black/[0.02] dark:bg-white/[0.04] rounded-xl flex items-center justify-center animate-in fade-in duration-200 backdrop-blur-[0.5px]"><div class="px-4 py-2 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight">Release to place pane in this tab`), _tmpl$2$r = /* @__PURE__ */ template(`<div class="absolute z-[99] pointer-events-none transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)] border-2 border-dashed border-neutral-400/50 bg-black/[0.03] dark:bg-white/[0.05] rounded-xl flex items-center justify-center text-[13px] font-semibold text-neutral-500 shadow-[inset_0_2px_10px_rgba(0,0,0,0.02)] animate-in fade-in duration-200 ease-out backdrop-blur-[0.5px]"><div class="px-3.5 py-1.5 bg-white/95 dark:bg-neutral-900/95 border border-neutral-300 dark:border-neutral-700 rounded-lg shadow-double-bezel-flat text-xs font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight"><span>`);
 function DropSnapPreview(props) {
   const isEmptyTabTarget = () => {
     return !layoutStore.rootId || Object.keys(layoutStore.nodes).length === 0;
@@ -26474,21 +26799,21 @@ function DropSnapPreview(props) {
       return isEmptyTabTarget();
     },
     get children() {
-      return _tmpl$$x();
+      return _tmpl$$L();
     }
   }), createComponent(Show, {
     get when() {
       return memo(() => !!(!isEmptyTabTarget() && isRootTarget()))() && props.target;
     },
     get children() {
-      var _el$2 = _tmpl$2$m(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+      var _el$2 = _tmpl$2$r(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
       insert(_el$4, () => props.target?.label || `Dock Layout ${props.target.direction}`);
       createRenderEffect((_$p) => style(_el$2, getBoundsStyle(), _$p));
       return _el$2;
     }
   })];
 }
-var _tmpl$$w = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$l = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$e = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$9 = /* @__PURE__ */ template(`<button>`), _tmpl$5$5 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$1 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
+var _tmpl$$K = /* @__PURE__ */ template(`<button class="absolute right-0 p-0.5 rounded-full text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">`), _tmpl$2$q = /* @__PURE__ */ template(`<span class="ml-1 px-1 rounded bg-black/5 dark:bg-white/10 text-[9px] font-sans font-medium text-neutral-600 dark:text-neutral-300"> splits`), _tmpl$3$g = /* @__PURE__ */ template(`<span class="text-[10px] font-mono text-neutral-400 dark:text-neutral-500 px-1 select-none whitespace-nowrap flex items-center">`), _tmpl$4$a = /* @__PURE__ */ template(`<button>`), _tmpl$5$5 = /* @__PURE__ */ template(`<button>Aa`), _tmpl$6$2 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-500 dark:text-neutral-400 text-xs transition-colors cursor-pointer">`), _tmpl$7$1 = /* @__PURE__ */ template(`<button class="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-neutral-400 hover:text-neutral-600 dark:hover:text-neutral-200 text-xs transition-colors ml-0.5 cursor-pointer">`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="mt-2 w-64 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-xl shadow-xl backdrop-blur-xl p-1.5 flex flex-col gap-1 animate-in fade-in slide-in-from-top-1 duration-150">`), _tmpl$9 = /* @__PURE__ */ template(`<div data-overlay-chrome=true data-app-region=no-drag class="fixed top-12 right-6 z-[200] flex flex-col items-end pointer-events-auto select-none font-sans"><div class="flex items-center gap-1.5 px-3 py-1.5 bg-[#fafaf9]/95 dark:bg-[#141415]/95 border border-neutral-300/80 dark:border-neutral-700/80 rounded-2xl shadow-[0_16px_36px_-4px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_16px_36px_-4px_rgba(0,0,0,0.8),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] backdrop-blur-xl animate-in fade-in zoom-in-[0.98] duration-150"><div class="relative flex items-center"><input type=text class="w-44 bg-transparent border-0 outline-none text-xs text-neutral-800 dark:text-neutral-200 placeholder:text-neutral-400 dark:placeholder:text-neutral-500 font-sans focus:ring-0 pr-3.5"></div><div class="flex items-center bg-black/5 dark:bg-white/5 rounded-lg p-0.5 border border-black/5 dark:border-white/5">`), _tmpl$0 = /* @__PURE__ */ template(`<button class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-xs text-neutral-700 dark:text-neutral-200 text-left cursor-pointer transition-colors"><span class="truncate font-medium">`);
 function FindInPageBar(props) {
   let inputRef;
   const [query, setQuery] = createSignal("");
@@ -26617,7 +26942,7 @@ function FindInPageBar(props) {
           return query().length > 0;
         },
         get children() {
-          var _el$5 = _tmpl$$w();
+          var _el$5 = _tmpl$$K();
           _el$5.$$click = () => {
             setQuery("");
             triggerFind("", true, false);
@@ -26634,7 +26959,7 @@ function FindInPageBar(props) {
           return memo(() => query().length > 0)() && scope() !== "global";
         },
         get children() {
-          var _el$6 = _tmpl$3$e();
+          var _el$6 = _tmpl$3$g();
           insert(_el$6, (() => {
             var _c$ = memo(() => matchInfo().total > 0);
             return () => _c$() ? `${matchInfo().current} / ${matchInfo().total}` : "No matches";
@@ -26644,7 +26969,7 @@ function FindInPageBar(props) {
               return memo(() => splitCount() > 1)() && scope() === "all";
             },
             get children() {
-              var _el$7 = _tmpl$2$l(), _el$8 = _el$7.firstChild;
+              var _el$7 = _tmpl$2$q(), _el$8 = _el$7.firstChild;
               insert(_el$7, splitCount, _el$8);
               return _el$7;
             }
@@ -26656,7 +26981,7 @@ function FindInPageBar(props) {
         label: "Active Split",
         placement: "bottom",
         get children() {
-          var _el$0 = _tmpl$4$9();
+          var _el$0 = _tmpl$4$a();
           _el$0.$$click = () => {
             setScope("active");
             triggerFind(query(), true, false);
@@ -26672,7 +26997,7 @@ function FindInPageBar(props) {
         label: "All Splits",
         placement: "bottom",
         get children() {
-          var _el$1 = _tmpl$4$9();
+          var _el$1 = _tmpl$4$a();
           _el$1.$$click = () => {
             setScope("all");
             triggerFind(query(), true, false);
@@ -26688,7 +27013,7 @@ function FindInPageBar(props) {
         label: "All Workspaces",
         placement: "bottom",
         get children() {
-          var _el$10 = _tmpl$4$9();
+          var _el$10 = _tmpl$4$a();
           _el$10.$$click = () => {
             setScope("global");
             triggerFind(query(), true, false);
@@ -26725,7 +27050,7 @@ function FindInPageBar(props) {
             shortcut: "Shift+Enter",
             placement: "bottom",
             get children() {
-              var _el$12 = _tmpl$6$1();
+              var _el$12 = _tmpl$6$2();
               _el$12.$$click = () => triggerFind(query(), false, true);
               insert(_el$12, createComponent(ChevronUp, {
                 "class": "w-3.5 h-3.5"
@@ -26737,7 +27062,7 @@ function FindInPageBar(props) {
             shortcut: "Enter",
             placement: "bottom",
             get children() {
-              var _el$13 = _tmpl$6$1();
+              var _el$13 = _tmpl$6$2();
               _el$13.$$click = () => triggerFind(query(), true, true);
               insert(_el$13, createComponent(ChevronDown, {
                 "class": "w-3.5 h-3.5"
@@ -26752,7 +27077,7 @@ function FindInPageBar(props) {
         shortcut: "Esc",
         placement: "bottom",
         get children() {
-          var _el$14 = _tmpl$7();
+          var _el$14 = _tmpl$7$1();
           _el$14.$$click = () => {
             window.api?.stopFind?.("clearSelection");
             props.onClose();
@@ -26769,7 +27094,7 @@ function FindInPageBar(props) {
           return memo(() => scope() === "global")() && matchingGlobal().length > 0;
         },
         get children() {
-          var _el$15 = _tmpl$8();
+          var _el$15 = _tmpl$8$1();
           insert(_el$15, createComponent(For, {
             get each() {
               return matchingGlobal();
@@ -26797,7 +27122,7 @@ function FindInPageBar(props) {
   });
 }
 delegateEvents(["click", "input", "keydown"]);
-var _tmpl$$v = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
+var _tmpl$$J = /* @__PURE__ */ template(`<div><div style=width:100%;height:100%>`);
 function AbsolutePane(props) {
   let paneRef;
   const [style$1, setStyle] = createSignal({
@@ -26925,7 +27250,7 @@ function AbsolutePane(props) {
     });
   });
   return (() => {
-    var _el$ = _tmpl$$v(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$J(), _el$2 = _el$.firstChild;
     var _ref$ = paneRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : paneRef = _el$;
     insert(_el$2, () => props.children);
@@ -27139,7 +27464,7 @@ function useDefaultPanelController(props) {
     isDomainPattern: isDomainPattern2
   };
 }
-var _tmpl$$u = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
+var _tmpl$$I = /* @__PURE__ */ template(`<div class="flex-1 w-full max-w-3xl mx-auto flex flex-col relative px-8 md:px-16 pb-12 pt-12 cursor-text"><textarea class="w-full flex-1 bg-transparent border-none outline-none resize-none font-sans font-medium text-neutral-700 leading-relaxed text-sm placeholder:text-neutral-300 placeholder:italic transition-all duration-300 text-left"placeholder="Type here to draft a note..."style=caret-color:#000;user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag;transform:none;will-change:auto;pointer-events:auto></textarea><div class="absolute bottom-4 left-8 md:left-16 text-[9px] font-bold text-neutral-400 uppercase tracking-widest pointer-events-none select-none">Notes · Press Esc to Search · Auto-saved`);
 function WorkspaceNotes(props) {
   const [notes, setNotes] = createSignal("");
   let textareaRef;
@@ -27167,7 +27492,7 @@ function WorkspaceNotes(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$u(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$$I(), _el$2 = _el$.firstChild;
     _el$.$$click = () => {
       if (textareaRef) {
         textareaRef.focus();
@@ -27352,7 +27677,7 @@ function useInteractiveTilt(options = {}) {
     onMouseLeave
   };
 }
-var _tmpl$$t = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none"><img class="w-5 h-5 rounded-md object-contain p-0.5 bg-white dark:bg-neutral-800 border border-neutral-200/50 dark:border-neutral-700/60">`), _tmpl$2$k = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer relative overflow-hidden shrink-0 transition-colors"><div class="flex items-center justify-center -space-x-1.5 pointer-events-none">`), _tmpl$3$d = /* @__PURE__ */ template(`<div class="flex items-center shrink-0 overflow-visible"><div class="overflow-hidden flex items-center shrink-0"style=width:0px;opacity:0><div class="flex items-center gap-2 pl-2 sm:gap-2.5 sm:pl-2.5 shrink-0 py-1">`), _tmpl$4$8 = /* @__PURE__ */ template(`<div><img class="w-4 h-4 rounded-xs object-contain">`);
+var _tmpl$$H = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none"><img class="w-5 h-5 rounded-md object-contain p-0.5 bg-white dark:bg-neutral-800 border border-neutral-200/50 dark:border-neutral-700/60">`), _tmpl$2$p = /* @__PURE__ */ template(`<button type=button class="w-10 h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer relative overflow-hidden shrink-0 transition-colors"><div class="flex items-center justify-center -space-x-1.5 pointer-events-none">`), _tmpl$3$f = /* @__PURE__ */ template(`<div class="flex items-center shrink-0 overflow-visible"><div class="overflow-hidden flex items-center shrink-0"style=width:0px;opacity:0><div class="flex items-center gap-2 pl-2 sm:gap-2.5 sm:pl-2.5 shrink-0 py-1">`), _tmpl$4$9 = /* @__PURE__ */ template(`<div><img class="w-4 h-4 rounded-xs object-contain">`);
 function SpawnedAppTile(props) {
   const tilt = useInteractiveTilt({
     maxTilt: 10,
@@ -27365,7 +27690,7 @@ function SpawnedAppTile(props) {
     },
     placement: "bottom",
     get children() {
-      var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$$H(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       _el$.$$click = (e) => {
         e.stopPropagation();
         props.onLaunch();
@@ -27465,7 +27790,7 @@ function StackedSplitTile(props) {
     if (leaveTimer) clearTimeout(leaveTimer);
   });
   return (() => {
-    var _el$4 = _tmpl$3$d(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild;
+    var _el$4 = _tmpl$3$f(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild;
     _el$4.addEventListener("mouseleave", closeDrawer);
     _el$4.addEventListener("mouseenter", openDrawer);
     insert(_el$4, createComponent(ActionTooltip, {
@@ -27474,7 +27799,7 @@ function StackedSplitTile(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$5 = _tmpl$2$k(), _el$6 = _el$5.firstChild;
+        var _el$5 = _tmpl$2$p(), _el$6 = _el$5.firstChild;
         _el$5.$$click = (e) => {
           e.stopPropagation();
           props.onRestoreSplit(props.split);
@@ -27490,7 +27815,7 @@ function StackedSplitTile(props) {
             return props.split.apps.slice(0, 2);
           },
           children: (app, idx) => (() => {
-            var _el$9 = _tmpl$4$8(), _el$0 = _el$9.firstChild;
+            var _el$9 = _tmpl$4$9(), _el$0 = _el$9.firstChild;
             createRenderEffect((_p$) => {
               var _v$4 = `relative rounded-lg p-0.5 bg-white dark:bg-neutral-800 shadow-xs border border-neutral-200/80 dark:border-neutral-700 ring-2 ring-white dark:ring-neutral-900 shrink-0 transition-transform duration-250 ease-out ${idx() === 0 ? compoundTilt.isHovered() ? "translate-x-1 z-10" : "translate-x-0 z-10" : compoundTilt.isHovered() ? "-translate-x-1 z-20" : "translate-x-0 z-20"}`, _v$5 = getFaviconUrl(app.url || app.domain, 64), _v$6 = app.title || app.domain;
               _v$4 !== _p$.e && className(_el$9, _p$.e = _v$4);
@@ -27527,7 +27852,7 @@ function StackedSplitTile(props) {
   })();
 }
 delegateEvents(["mousemove", "click"]);
-var _tmpl$$s = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$j = /* @__PURE__ */ template(`<button class="absolute -top-1 -right-1 p-0.5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer z-50">`), _tmpl$3$c = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center shrink-0 overflow-visible">`), _tmpl$4$7 = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-dashed border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shadow-xs shrink-0 transition-colors relative overflow-hidden group/store"><div class="flex items-center justify-center pointer-events-none text-neutral-400 group-hover/store:text-neutral-700 dark:group-hover/store:text-neutral-200">`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-4 sm:pt-5 mt-4 sm:mt-5 w-full border-t border-neutral-100 dark:border-neutral-800/60 overflow-visible"><div class="flex items-center justify-center flex-nowrap gap-2 sm:gap-2.5 py-1 max-w-full overflow-visible min-h-[52px] h-[52px] will-change-transform">`);
+var _tmpl$$G = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shrink-0 transition-colors relative overflow-hidden"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$o = /* @__PURE__ */ template(`<button class="absolute -top-1 -right-1 p-0.5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 rounded-full text-neutral-400 hover:text-red-500 hover:scale-110 shadow-xs transition-all opacity-0 group-hover/app:opacity-100 cursor-pointer z-50">`), _tmpl$3$e = /* @__PURE__ */ template(`<div class="group/app relative flex flex-col items-center shrink-0 overflow-visible">`), _tmpl$4$8 = /* @__PURE__ */ template(`<button type=button class="w-[38px] h-[38px] sm:w-10 sm:h-10 rounded-xl bg-white dark:bg-neutral-900 border border-dashed border-neutral-200 dark:border-neutral-800 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:border-neutral-300 dark:hover:border-neutral-700 hover:shadow-md active:scale-95 cursor-pointer shadow-xs shrink-0 transition-colors relative overflow-hidden group/store"><div class="flex items-center justify-center pointer-events-none text-neutral-400 group-hover/store:text-neutral-700 dark:group-hover/store:text-neutral-200">`), _tmpl$5$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-center pt-4 sm:pt-5 mt-4 sm:mt-5 w-full border-t border-neutral-100 dark:border-neutral-800/60 overflow-visible"><div class="flex items-center justify-center flex-nowrap gap-2 sm:gap-2.5 py-1 max-w-full overflow-visible min-h-[52px] h-[52px] will-change-transform">`);
 function StandaloneAppShortcut(props) {
   const tilt = useInteractiveTilt({
     maxTilt: 10,
@@ -27535,7 +27860,7 @@ function StandaloneAppShortcut(props) {
     scale: 1.15
   });
   return (() => {
-    var _el$ = _tmpl$3$c();
+    var _el$ = _tmpl$3$e();
     _el$.addEventListener("drop", (e) => props.onDrop(props.idx, e));
     addEventListener(_el$, "dragover", props.onDragOver);
     _el$.addEventListener("dragstart", (e) => props.onDragStart(props.idx, e));
@@ -27546,7 +27871,7 @@ function StandaloneAppShortcut(props) {
       },
       placement: "bottom",
       get children() {
-        var _el$2 = _tmpl$$s(), _el$3 = _el$2.firstChild;
+        var _el$2 = _tmpl$$G(), _el$3 = _el$2.firstChild;
         addEventListener(_el$2, "mouseleave", tilt.onMouseLeave);
         addEventListener(_el$2, "mousemove", tilt.onMouseMove, true);
         _el$2.addEventListener("mouseenter", () => {
@@ -27571,7 +27896,7 @@ function StandaloneAppShortcut(props) {
       label: "Remove shortcut",
       placement: "top",
       get children() {
-        var _el$4 = _tmpl$2$j();
+        var _el$4 = _tmpl$2$o();
         _el$4.$$click = (e) => {
           e.stopPropagation();
           props.onDeleteApp(props.idx, e);
@@ -27595,7 +27920,7 @@ function ExploreStoreButton(props) {
     label: "Explore App Store",
     placement: "bottom",
     get children() {
-      var _el$5 = _tmpl$4$7(), _el$6 = _el$5.firstChild;
+      var _el$5 = _tmpl$4$8(), _el$6 = _el$5.firstChild;
       addEventListener(_el$5, "mouseleave", tilt.onMouseLeave);
       addEventListener(_el$5, "mousemove", tilt.onMouseMove, true);
       addEventListener(_el$5, "mouseenter", tilt.onMouseEnter);
@@ -27685,7 +28010,7 @@ function PinnedShortcuts(props) {
   })();
 }
 delegateEvents(["click", "mousemove", "mousedown"]);
-var _tmpl$$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute right-0 top-full mt-3 w-60 bg-white/95 backdrop-blur-xl border border-neutral-200/80 rounded-2xl shadow-[0_12px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 z-[100] origin-top-right animate-in zoom-in-95 duration-150"><div class="px-2.5 py-1 text-xs font-normal text-neutral-400">Profiles</div><div class=space-y-1></div><div class="mt-1.5 pt-1.5 border-t border-neutral-100 flex items-center justify-between px-1"><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100">+ New profile</button><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100 flex items-center gap-1"><span>⚙</span> Settings`), _tmpl$2$i = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$b = /* @__PURE__ */ template(`<span class="text-xs font-semibold text-neutral-800 pr-1 shrink-0">✓`), _tmpl$4$6 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2.5 overflow-hidden min-w-0"><div class="flex items-center justify-center w-6 h-6 rounded-lg text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><span>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400 truncate">No connected account`), _tmpl$6 = /* @__PURE__ */ template(`<div class="flex items-center gap-1 min-w-0"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class="text-[10px] font-normal text-neutral-500 truncate">`);
+var _tmpl$$F = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="absolute right-0 top-full mt-3 w-60 bg-white/95 backdrop-blur-xl border border-neutral-200/80 rounded-2xl shadow-[0_12px_32px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.9)] p-1.5 z-[100] origin-top-right animate-in zoom-in-95 duration-150"><div class="px-2.5 py-1 text-xs font-normal text-neutral-400">Profiles</div><div class=space-y-1></div><div class="mt-1.5 pt-1.5 border-t border-neutral-100 flex items-center justify-between px-1"><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100">+ New profile</button><button type=button class="text-xs font-normal text-neutral-500 hover:text-neutral-900 transition-colors cursor-pointer py-1 px-1.5 rounded-md hover:bg-neutral-100 flex items-center gap-1"><span>⚙</span> Settings`), _tmpl$2$n = /* @__PURE__ */ template(`<div class="profile-menu-container relative flex items-center select-none pl-1"><button class="flex items-center justify-center w-[22px] h-[22px] rounded-full text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] hover:scale-110 transition-transform active:scale-95 cursor-pointer shrink-0">`), _tmpl$3$d = /* @__PURE__ */ template(`<span class="text-xs font-semibold text-neutral-800 pr-1 shrink-0">✓`), _tmpl$4$7 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2.5 overflow-hidden min-w-0"><div class="flex items-center justify-center w-6 h-6 rounded-lg text-white text-[10px] font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><span>`), _tmpl$5$3 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400 truncate">No connected account`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-1 min-w-0"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class="text-[10px] font-normal text-neutral-500 truncate">`);
 function ProfileMenu(props) {
   const currentProfile = () => layoutStore.profiles.find((p) => p.id === (props.currentProfileId || "main")) || layoutStore.profiles.find((p) => p.id === "main") || {
     name: "Main",
@@ -27706,7 +28031,7 @@ function ProfileMenu(props) {
     props.onToggle();
   };
   return (() => {
-    var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild;
+    var _el$ = _tmpl$2$n(), _el$2 = _el$.firstChild;
     _el$2.$$click = (e) => {
       e.stopPropagation();
       props.onToggle();
@@ -27717,7 +28042,7 @@ function ProfileMenu(props) {
         return props.show;
       },
       get children() {
-        var _el$3 = _tmpl$$r(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+        var _el$3 = _tmpl$$F(), _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
         insert(_el$5, createComponent(For, {
           get each() {
             return [layoutStore.profiles.find((p) => p.id === "main") || {
@@ -27730,7 +28055,7 @@ function ProfileMenu(props) {
             const isSelected = () => props.currentProfileId === profile.id || !props.currentProfileId && profile.id === "main";
             const firstIdentity = () => getPrimaryIdentity(profile?.identities_json);
             return (() => {
-              var _el$9 = _tmpl$4$6(), _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$10.firstChild;
+              var _el$9 = _tmpl$4$7(), _el$0 = _el$9.firstChild, _el$1 = _el$0.firstChild, _el$10 = _el$1.nextSibling, _el$11 = _el$10.firstChild;
               _el$9.$$click = () => {
                 props.onSelect(profile.id === "main" ? void 0 : profile.id);
               };
@@ -27744,7 +28069,7 @@ function ProfileMenu(props) {
                   return _tmpl$5$3();
                 },
                 children: (ident) => (() => {
-                  var _el$14 = _tmpl$6(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
+                  var _el$14 = _tmpl$6$1(), _el$15 = _el$14.firstChild, _el$16 = _el$15.nextSibling;
                   _el$15.addEventListener("error", (e) => {
                     e.currentTarget.style.display = "none";
                   });
@@ -27766,7 +28091,7 @@ function ProfileMenu(props) {
                   return isSelected();
                 },
                 get children() {
-                  return _tmpl$3$b();
+                  return _tmpl$3$d();
                 }
               }), null);
               createRenderEffect((_p$) => {
@@ -27802,7 +28127,7 @@ function ProfileMenu(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$q = /* @__PURE__ */ template(`<div role=button tabindex=0 class="w-full p-2.5 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-white/60 dark:bg-neutral-900/50 hover:bg-white dark:hover:bg-neutral-850 hover:border-neutral-300 dark:hover:border-neutral-700 shadow-xs transition-all cursor-pointer flex items-center justify-between gap-2.5 group/noteCard select-none"><div class="flex items-center gap-2 min-w-0"><span class="text-xs font-medium text-neutral-700 dark:text-neutral-200 truncate"></span></div><span class="text-[10px] font-mono text-neutral-400 group-hover/noteCard:text-neutral-600 dark:group-hover/noteCard:text-neutral-300 shrink-0">Notes ↵`), _tmpl$2$h = /* @__PURE__ */ template(`<div class="w-full text-left mt-4 px-1 default-panel-notes">`), _tmpl$3$a = /* @__PURE__ */ template(`<button type=button class="inline-flex items-center gap-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors text-[11px] font-medium select-none group/notes cursor-pointer"><span>Click here to draft a quick note...`);
+var _tmpl$$E = /* @__PURE__ */ template(`<div role=button tabindex=0 class="w-full p-2.5 rounded-xl border border-neutral-200/80 dark:border-neutral-800 bg-white/60 dark:bg-neutral-900/50 hover:bg-white dark:hover:bg-neutral-850 hover:border-neutral-300 dark:hover:border-neutral-700 shadow-xs transition-all cursor-pointer flex items-center justify-between gap-2.5 group/noteCard select-none"><div class="flex items-center gap-2 min-w-0"><span class="text-xs font-medium text-neutral-700 dark:text-neutral-200 truncate"></span></div><span class="text-[10px] font-mono text-neutral-400 group-hover/noteCard:text-neutral-600 dark:group-hover/noteCard:text-neutral-300 shrink-0">Notes ↵`), _tmpl$2$m = /* @__PURE__ */ template(`<div class="w-full text-left mt-4 px-1 default-panel-notes">`), _tmpl$3$c = /* @__PURE__ */ template(`<button type=button class="inline-flex items-center gap-1.5 text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 transition-colors text-[11px] font-medium select-none group/notes cursor-pointer"><span>Click here to draft a quick note...`);
 function DefaultPanelNotesTrigger(props) {
   const [existingNote, setExistingNote] = createSignal("");
   onMount(() => {
@@ -27820,14 +28145,14 @@ function DefaultPanelNotesTrigger(props) {
     return lines[0] || "";
   };
   return (() => {
-    var _el$ = _tmpl$2$h();
+    var _el$ = _tmpl$2$m();
     insert(_el$, createComponent(Show, {
       get when() {
         return existingNote().length > 0;
       },
       get fallback() {
         return (() => {
-          var _el$5 = _tmpl$3$a(), _el$6 = _el$5.firstChild;
+          var _el$5 = _tmpl$3$c(), _el$6 = _el$5.firstChild;
           addEventListener(_el$5, "click", props.onOpenNotes, true);
           insert(_el$5, createComponent(PenLine, {
             "class": "w-3 h-3 text-neutral-400 group-hover/notes:text-neutral-700 dark:group-hover/notes:text-neutral-200 transition-colors"
@@ -27836,7 +28161,7 @@ function DefaultPanelNotesTrigger(props) {
         })();
       },
       get children() {
-        var _el$2 = _tmpl$$q(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
+        var _el$2 = _tmpl$$E(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild;
         _el$2.$$keydown = (e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
@@ -27855,7 +28180,7 @@ function DefaultPanelNotesTrigger(props) {
   })();
 }
 delegateEvents(["click", "keydown"]);
-var _tmpl$$p = /* @__PURE__ */ template(`<div role=button tabindex=0><div class="w-[46px] h-[46px] rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center shrink-0 transition-colors relative overflow-hidden pointer-events-none"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="min-w-0 flex-1 pr-4"><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-50 truncate tracking-tight group-hover:text-black dark:group-hover:text-white"></h3><p class="text-[11.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate mt-0.5 leading-snug">`), _tmpl$3$9 = /* @__PURE__ */ template(`<div class="absolute top-3 right-3 pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity duration-150">`);
+var _tmpl$$D = /* @__PURE__ */ template(`<div role=button tabindex=0><div class="w-[46px] h-[46px] rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/60 dark:border-neutral-800 shadow-xs flex items-center justify-center shrink-0 transition-colors relative overflow-hidden pointer-events-none"><div class="flex items-center justify-center pointer-events-none">`), _tmpl$2$l = /* @__PURE__ */ template(`<div class="min-w-0 flex-1 pr-4"><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-50 truncate tracking-tight group-hover:text-black dark:group-hover:text-white"></h3><p class="text-[11.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate mt-0.5 leading-snug">`), _tmpl$3$b = /* @__PURE__ */ template(`<div class="absolute top-3 right-3 pointer-events-none opacity-0 group-hover:opacity-100 group-focus:opacity-100 transition-opacity duration-150">`);
 function StoreAppCard(props) {
   let iconRef;
   const tilt = useInteractiveTilt({
@@ -27865,7 +28190,7 @@ function StoreAppCard(props) {
     anchorRef: () => iconRef
   });
   const cardContent = (() => {
-    var _el$ = _tmpl$$p(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$$D(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.$$keydown = (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
@@ -27890,12 +28215,12 @@ function StoreAppCard(props) {
     insert(_el$, (() => {
       var _c$ = memo(() => !!!props.isIconOnly);
       return () => _c$() && [(() => {
-        var _el$4 = _tmpl$2$g(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$l(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         insert(_el$5, () => props.app.name);
         insert(_el$6, () => props.app.description);
         return _el$4;
       })(), (() => {
-        var _el$7 = _tmpl$3$9();
+        var _el$7 = _tmpl$3$b();
         insert(_el$7, createComponent(ArrowUpRight, {
           "class": "w-3.5 h-3.5 text-neutral-400 dark:text-neutral-400 group-hover:text-neutral-900 dark:group-hover:text-white"
         }));
@@ -27922,7 +28247,7 @@ function StoreAppCard(props) {
   }) : cardContent);
 }
 delegateEvents(["click", "mousemove", "keydown"]);
-var _tmpl$$o = /* @__PURE__ */ template(`<div style="mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%);-webkit-mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%)">`), _tmpl$2$f = /* @__PURE__ */ template(`<button type=button>`);
+var _tmpl$$C = /* @__PURE__ */ template(`<div style="mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%);-webkit-mask-image:linear-gradient(to right, black calc(100% - 24px), transparent 100%)">`), _tmpl$2$k = /* @__PURE__ */ template(`<button type=button>`);
 function StoreCategoryTabs(props) {
   let tabsContainerRef;
   const handleWheel = (e) => {
@@ -27932,14 +28257,14 @@ function StoreCategoryTabs(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$o();
+    var _el$ = _tmpl$$C();
     _el$.addEventListener("wheel", handleWheel);
     var _ref$ = tabsContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : tabsContainerRef = _el$;
     insert(_el$, createComponent(For, {
       each: STORE_CATEGORIES,
       children: (cat) => (() => {
-        var _el$2 = _tmpl$2$f();
+        var _el$2 = _tmpl$2$k();
         _el$2.$$click = () => props.onSelectCat(cat);
         insert(_el$2, cat);
         createRenderEffect(() => className(_el$2, `rounded-full transition-colors cursor-pointer whitespace-nowrap font-medium ${props.isCompact ? "px-2.5 py-0.5 text-[11px]" : "px-3 py-1 text-xs"} ${props.activeCat === cat ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 font-semibold shadow-xs" : "text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-100 dark:hover:bg-neutral-800"}`));
@@ -27951,10 +28276,10 @@ function StoreCategoryTabs(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$n = /* @__PURE__ */ template(`<div><button type=button class="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 hover:border-neutral-400 transition-all cursor-pointer group shadow-xs gap-2"><div class="flex items-center gap-2.5 min-w-0"><div class="w-7 h-7 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-300 shrink-0"></div><div class="text-left truncate"><p class="text-xs font-semibold text-neutral-900 dark:text-neutral-50 truncate">Open "<!>"</p><p class="text-[10.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate"></p></div></div><span class="text-[10.5px] font-mono font-medium text-neutral-500 dark:text-neutral-400 group-hover:text-neutral-950 dark:group-hover:text-white shrink-0">↵ launch`);
+var _tmpl$$B = /* @__PURE__ */ template(`<div><button type=button class="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-white dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 hover:border-neutral-400 transition-all cursor-pointer group shadow-xs gap-2"><div class="flex items-center gap-2.5 min-w-0"><div class="w-7 h-7 rounded-lg bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-600 dark:text-neutral-300 shrink-0"></div><div class="text-left truncate"><p class="text-xs font-semibold text-neutral-900 dark:text-neutral-50 truncate">Open "<!>"</p><p class="text-[10.5px] font-normal text-neutral-500 dark:text-neutral-400 truncate"></p></div></div><span class="text-[10.5px] font-mono font-medium text-neutral-500 dark:text-neutral-400 group-hover:text-neutral-950 dark:group-hover:text-white shrink-0">↵ launch`);
 function StoreDirectUrlRow(props) {
   return (() => {
-    var _el$ = _tmpl$$n(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
+    var _el$ = _tmpl$$B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling;
     _el$9.nextSibling;
     var _el$0 = _el$6.nextSibling;
     _el$2.$$click = () => props.onLaunch(props.query);
@@ -27968,10 +28293,10 @@ function StoreDirectUrlRow(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$m = /* @__PURE__ */ template(`<button type=button class="p-1 rounded-md text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 cursor-pointer shrink-0 transition-colors"title="Clear search"aria-label="Clear search">`), _tmpl$2$e = /* @__PURE__ */ template(`<div><input type=text class="w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 outline-none font-sans font-medium"><button type=button class="group/esc h-6 px-2 min-w-6 flex items-center justify-center rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-100/90 dark:bg-neutral-800/90 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors cursor-pointer shrink-0 shadow-xs"title="Close (Esc)"aria-label="Close store"><span class="group-hover/esc:hidden flex items-center justify-center"></span><span class="hidden group-hover/esc:inline text-[10px] font-mono font-medium tracking-tight">ESC`);
+var _tmpl$$A = /* @__PURE__ */ template(`<button type=button class="p-1 rounded-md text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800 cursor-pointer shrink-0 transition-colors"title="Clear search"aria-label="Clear search">`), _tmpl$2$j = /* @__PURE__ */ template(`<div><input type=text class="w-full bg-transparent text-sm text-neutral-900 dark:text-neutral-100 placeholder:text-neutral-400 outline-none font-sans font-medium"><button type=button class="group/esc h-6 px-2 min-w-6 flex items-center justify-center rounded-lg border border-neutral-200 dark:border-neutral-700 bg-neutral-100/90 dark:bg-neutral-800/90 hover:bg-neutral-200 dark:hover:bg-neutral-700 text-neutral-600 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white transition-colors cursor-pointer shrink-0 shadow-xs"title="Close (Esc)"aria-label="Close store"><span class="group-hover/esc:hidden flex items-center justify-center"></span><span class="hidden group-hover/esc:inline text-[10px] font-mono font-medium tracking-tight">ESC`);
 function StoreOmnibarHeader(props) {
   return (() => {
-    var _el$ = _tmpl$2$e(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
+    var _el$ = _tmpl$2$j(), _el$2 = _el$.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild;
     insert(_el$, createComponent(Search, {
       "class": "w-4 h-4 text-neutral-400 shrink-0"
     }), _el$2);
@@ -27990,7 +28315,7 @@ function StoreOmnibarHeader(props) {
         return props.query.trim().length > 0;
       },
       get children() {
-        var _el$3 = _tmpl$$m();
+        var _el$3 = _tmpl$$A();
         _el$3.$$click = () => props.onInput("");
         insert(_el$3, createComponent(X, {
           "class": "w-3.5 h-3.5"
@@ -28016,10 +28341,10 @@ function StoreOmnibarHeader(props) {
   })();
 }
 delegateEvents(["input", "keydown", "click"]);
-var _tmpl$$l = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-12 px-4 text-center"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-400 mb-3 border border-neutral-200/60 dark:border-neutral-700"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1">No catalog results for "<!>"</p><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 max-w-xs leading-snug">Launch any custom URL to auto-index it for this workspace.</p><button type=button class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 hover:opacity-90 transition-opacity cursor-pointer shadow-double-bezel-flat active:shadow-double-bezel-active">Launch "<!>" as Custom App ↵`);
+var _tmpl$$z = /* @__PURE__ */ template(`<div class="flex flex-col items-center justify-center py-12 px-4 text-center"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-400 mb-3 border border-neutral-200/60 dark:border-neutral-700"></div><p class="text-xs font-semibold text-neutral-800 dark:text-neutral-200 mb-1">No catalog results for "<!>"</p><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 max-w-xs leading-snug">Launch any custom URL to auto-index it for this workspace.</p><button type=button class="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 hover:opacity-90 transition-opacity cursor-pointer shadow-double-bezel-flat active:shadow-double-bezel-active">Launch "<!>" as Custom App ↵`);
 function StoreZeroResults(props) {
   return (() => {
-    var _el$ = _tmpl$$l(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$6 = _el$4.nextSibling;
+    var _el$ = _tmpl$$z(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$6 = _el$4.nextSibling;
     _el$6.nextSibling;
     var _el$7 = _el$3.nextSibling, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$1 = _el$9.nextSibling;
     _el$1.nextSibling;
@@ -28148,7 +28473,7 @@ function useStoreModalController(props) {
     setSearchInput: (el) => searchInput = el
   };
 }
-var _tmpl$$k = /* @__PURE__ */ template(`<div class="grid gap-2 sm:gap-2.5">`), _tmpl$2$d = /* @__PURE__ */ template(`<div data-store-modal=backdrop class="absolute inset-0 z-50 bg-neutral-950/20 dark:bg-neutral-950/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 md:p-5 select-none animate-in fade-in duration-150"><div data-store-modal=card class="bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800 rounded-2xl w-full max-w-4xl h-[86vh] max-h-[86vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"><div class="flex-1 overflow-y-auto px-3.5 sm:px-4 py-3 no-scrollbar relative scroll-smooth"style=overscroll-behavior:contain;transform:translateZ(0)>`), _tmpl$3$8 = /* @__PURE__ */ template(`<div style="contain:layout style">`);
+var _tmpl$$y = /* @__PURE__ */ template(`<div class="grid gap-2 sm:gap-2.5">`), _tmpl$2$i = /* @__PURE__ */ template(`<div data-store-modal=backdrop class="absolute inset-0 z-50 bg-neutral-950/20 dark:bg-neutral-950/50 backdrop-blur-[2px] flex items-center justify-center p-3 sm:p-4 md:p-5 select-none animate-in fade-in duration-150"><div data-store-modal=card class="bg-white dark:bg-neutral-900 border border-neutral-200/90 dark:border-neutral-800 rounded-2xl w-full max-w-4xl h-[86vh] max-h-[86vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-150"><div class="flex-1 overflow-y-auto px-3.5 sm:px-4 py-3 no-scrollbar relative scroll-smooth"style=overscroll-behavior:contain;transform:translateZ(0)>`), _tmpl$3$a = /* @__PURE__ */ template(`<div style="contain:layout style">`);
 function WebAppStoreModal(props) {
   const [modalWidth, setModalWidth] = createSignal(720);
   let cardRef;
@@ -28191,7 +28516,7 @@ function WebAppStoreModal(props) {
       return props.show;
     },
     get children() {
-      var _el$ = _tmpl$2$d(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$2$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       _el$.$$mousedown = (e) => {
         if (e.target === e.currentTarget) {
           e.preventDefault();
@@ -28274,13 +28599,13 @@ function WebAppStoreModal(props) {
           });
         },
         get children() {
-          var _el$4 = _tmpl$$k();
+          var _el$4 = _tmpl$$y();
           insert(_el$4, createComponent(For, {
             get each() {
               return ctrl.filteredApps();
             },
             children: (app, idx) => (() => {
-              var _el$5 = _tmpl$3$8();
+              var _el$5 = _tmpl$3$a();
               use((el) => {
                 if (el) ctrl.cardRefs[idx()] = el;
               }, _el$5);
@@ -28351,7 +28676,7 @@ function useLastSplitSession(props) {
   };
   return { lastSplit, handleRestoreSplit };
 }
-var _tmpl$$j = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 dark:bg-neutral-950 text-neutral-800 dark:text-neutral-200 relative @container wake-region pointer-events-auto"style=container-type:size><style>
+var _tmpl$$x = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 flex flex-col h-full overflow-hidden font-sans bg-neutral-50 dark:bg-neutral-950 text-neutral-800 dark:text-neutral-200 relative @container wake-region pointer-events-auto"style=container-type:size><style>
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @container (max-height: 380px) {
@@ -28361,7 +28686,7 @@ var _tmpl$$j = /* @__PURE__ */ template(`<div data-overlay-chrome class="flex-1 
         @container (max-height: 250px) {
           .default-panel-shortcuts { display: none !important; }
         }
-      `), _tmpl$2$c = /* @__PURE__ */ template(`<div><div class="w-full max-w-xl flex flex-col items-center px-2 sm:px-4"><div><h1>Apposition Workspace</h1><p class="text-[9px] text-neutral-400 font-mono uppercase tracking-wider mt-1.5"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts">`);
+      `), _tmpl$2$h = /* @__PURE__ */ template(`<div><div class="w-full max-w-xl flex flex-col items-center px-2 sm:px-4"><div><h1>Apposition Workspace</h1><p class="text-[9px] text-neutral-400 font-mono uppercase tracking-wider mt-1.5"></p></div><div class="w-full relative"></div><div class="w-full default-panel-shortcuts">`);
 function DefaultPanel(props) {
   const ctrl = useDefaultPanelController(props);
   const {
@@ -28404,7 +28729,7 @@ function DefaultPanel(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$$j();
+    var _el$ = _tmpl$$x();
     _el$.firstChild;
     _el$.$$click = (e) => handlePaneInteraction(e.target, true);
     _el$.$$mousedown = (e) => handlePaneInteraction(e.target);
@@ -28417,7 +28742,7 @@ function DefaultPanel(props) {
       },
       get fallback() {
         return (() => {
-          var _el$3 = _tmpl$2$c(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling;
+          var _el$3 = _tmpl$2$h(), _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling;
           insert(_el$7, () => props.activeWorkspaceName);
           insert(_el$8, createComponent(CommandBar, {
             get id() {
@@ -28570,10 +28895,10 @@ function DefaultPanel(props) {
   })();
 }
 delegateEvents(["focusin", "mousedown", "click"]);
-var _tmpl$$i = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$b = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+var _tmpl$$w = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$g = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 text-[14px] font-sans font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
-    var _el$ = _tmpl$2$b(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
+    var _el$ = _tmpl$2$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
     var _ref$ = props.gateContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.gateContainerRef = _el$;
     var _ref$2 = props.topGateRef;
@@ -28585,7 +28910,7 @@ function GateAnimation(props) {
         return props.gateDomain;
       },
       get children() {
-        var _el$6 = _tmpl$$i();
+        var _el$6 = _tmpl$$w();
         createRenderEffect(() => setAttribute(_el$6, "src", `https://www.google.com/s2/favicons?domain=${props.gateDomain}&sz=128`));
         return _el$6;
       }
@@ -28596,308 +28921,44 @@ function GateAnimation(props) {
     return _el$;
   })();
 }
-var _tmpl$$h = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$a = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`), _tmpl$4$5 = /* @__PURE__ */ template(`<div data-overlay-chrome class="pane-context-menu fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[215px] max-w-[280px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100"><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5"></div><div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
-function MenuItem(props) {
-  const IconComp = props.icon;
-  return (() => {
-    var _el$ = _tmpl$2$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
-    addEventListener(_el$, "click", props.onClick, true);
-    insert(_el$2, createComponent(IconComp, {
-      "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
-    }), _el$3);
-    insert(_el$3, () => props.label);
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return props.badge;
-      },
-      get children() {
-        var _el$4 = _tmpl$$h();
-        insert(_el$4, () => props.badge);
-        return _el$4;
-      }
-    }), null);
-    createRenderEffect(() => className(_el$, `w-full flex items-center justify-between px-2.5 py-1.5 rounded-[7px] text-[12px] font-medium transition-all duration-100 group select-none active:scale-[0.98] ${props.danger ? "text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-200/70 dark:hover:bg-neutral-800" : "text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"}`));
-    return _el$;
-  })();
-}
-function PaneContextMenu(props) {
-  const isMaximized = () => layoutStore.maximizedPaneId === props.paneId;
-  const menuWidth = 225;
-  const menuHeight = 360;
-  const posX = () => Math.max(8, Math.min(props.contextMenu.x, window.innerWidth - menuWidth - 8));
-  const posY = () => Math.max(8, Math.min(props.contextMenu.y, window.innerHeight - menuHeight - 8));
-  const closeMenu = () => props.setContextMenu(null);
-  const copyText = (t) => {
-    navigator.clipboard.writeText(t);
-    closeMenu();
-  };
-  const handleReload = (hard) => {
-    window.api?.viewReload?.(props.paneId, hard);
-    window.dispatchEvent(new CustomEvent("pane.reloaded", {
-      detail: props.paneId
-    }));
-    closeMenu();
-  };
-  const openNewPane = (url) => {
-    window.dispatchEvent(new CustomEvent("app:open-in-new-pane", {
-      detail: url
-    }));
-    closeMenu();
-  };
-  const getOrigin = () => {
-    try {
-      return props.currentUrl ? new URL(props.currentUrl).origin : "";
-    } catch {
-      return "";
-    }
-  };
-  const handleClearCookies = async () => {
-    const origin = getOrigin();
-    if (origin && window.api?.clearSiteData) {
-      await window.api.clearSiteData(origin);
-      window.api?.viewReload?.(props.paneId);
-    }
-    closeMenu();
-  };
-  const handleSystemAuth = () => {
-    if (props.currentUrl && window.api?.startAuthRelay) {
-      window.api.startAuthRelay(props.currentUrl, void 0, props.paneId);
-    }
-    closeMenu();
-  };
-  return createComponent(Portal, {
-    get children() {
-      var _el$5 = _tmpl$4$5(), _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$9 = _el$7.nextSibling, _el$0 = _el$9.nextSibling;
-      _el$5.$$contextmenu = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-      };
-      _el$5.$$click = (e) => e.stopPropagation();
-      insert(_el$6, createComponent(MenuItem, {
-        icon: RefreshCw,
-        label: "Reload Pane",
-        badge: "Ctrl+R",
-        onClick: () => handleReload(false)
-      }), _el$7);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: RotateCcw,
-        label: "Hard Reload",
-        badge: "Ctrl+Shift+R",
-        onClick: () => handleReload(true)
-      }), _el$7);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return props.contextMenu.linkURL;
-        },
-        get children() {
-          return [createComponent(MenuItem, {
-            icon: ExternalLink,
-            label: "Open Link in New Tab",
-            onClick: () => openNewPane(props.contextMenu.linkURL)
-          }), createComponent(MenuItem, {
-            icon: Link,
-            label: "Copy Link Address",
-            onClick: () => copyText(props.contextMenu.linkURL)
-          })];
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return props.contextMenu.srcURL;
-        },
-        get children() {
-          return createComponent(MenuItem, {
-            icon: Image,
-            label: "Copy Image Address",
-            onClick: () => copyText(props.contextMenu.srcURL)
-          });
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return props.contextMenu.selectionText;
-        },
-        get children() {
-          return createComponent(MenuItem, {
-            icon: Search,
-            get label() {
-              return `Search for "${props.contextMenu.selectionText.slice(0, 14)}${props.contextMenu.selectionText.length > 14 ? "..." : ""}"`;
-            },
-            onClick: () => openNewPane(`https://www.google.com/search?q=${encodeURIComponent(props.contextMenu.selectionText)}`)
-          });
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: Copy,
-        label: "Copy Page URL",
-        onClick: () => copyText(props.currentUrl || props.contextMenu.pageURL || "")
-      }), _el$9);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return memo(() => !!props.currentUrl)() && props.currentUrl.startsWith("http");
-        },
-        get children() {
-          return createComponent(MenuItem, {
-            icon: ShieldCheck,
-            label: "Sign in via System Browser",
-            onClick: handleSystemAuth
-          });
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return getOrigin();
-        },
-        get children() {
-          return createComponent(MenuItem, {
-            icon: Trash2,
-            label: "Clear Cookies for Site",
-            onClick: handleClearCookies
-          });
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(Show, {
-        get when() {
-          return (layoutStore.profiles || []).length > 1;
-        },
-        get children() {
-          return [_tmpl$3$7(), createComponent(For, {
-            get each() {
-              return layoutStore.profiles;
-            },
-            children: (prof) => createComponent(MenuItem, {
-              icon: Layers,
-              get label() {
-                return `Profile: ${prof.name}`;
-              },
-              get badge() {
-                return (props.profileId || "main") === prof.id ? "Active" : void 0;
-              },
-              onClick: () => {
-                props.onUpdateProfile?.(prof.id);
-                closeMenu();
-              }
-            })
-          })];
-        }
-      }), _el$9);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: PanelRight,
-        label: "Split Right",
-        badge: "Ctrl+Shift+D",
-        onClick: () => {
-          props.onSplit?.("right");
-          closeMenu();
-        }
-      }), _el$0);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: PanelBottom,
-        label: "Split Down",
-        badge: "Ctrl+Shift+E",
-        onClick: () => {
-          props.onSplit?.("bottom");
-          closeMenu();
-        }
-      }), _el$0);
-      insert(_el$6, createComponent(MenuItem, {
-        get icon() {
-          return isMaximized() ? Minimize : Maximize;
-        },
-        get label() {
-          return isMaximized() ? "Exit Full Screen" : "Maximize Pane";
-        },
-        badge: "Alt+F",
-        onClick: () => {
-          setLayoutStore("maximizedPaneId", isMaximized() ? null : props.paneId);
-          closeMenu();
-        }
-      }), _el$0);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: BookOpen,
-        label: "Reader Mode",
-        onClick: () => {
-          window.api?.view?.extractReaderMode?.(props.paneId);
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: Pipette,
-        label: "Pick Color from Pane",
-        onClick: () => {
-          window.api?.view?.pickColor?.(props.paneId, props.contextMenu.x, props.contextMenu.y);
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: Smartphone,
-        label: "Toggle Mobile View",
-        onClick: () => {
-          window.api?.view?.setDeviceEmulation?.(props.paneId, "iphone_16_pro");
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: Camera,
-        label: "Capture Full Page (CDP)",
-        onClick: () => {
-          window.api?.view?.captureFullPage?.(props.paneId);
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: Image,
-        label: "Capture Viewport",
-        onClick: () => {
-          window.api?.view?.captureViewport?.(props.paneId);
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: CodeXml,
-        label: "Inspect Elements",
-        badge: "F12",
-        onClick: () => {
-          window.api?.viewOpenDevTools?.(props.paneId);
-          closeMenu();
-        }
-      }), null);
-      insert(_el$6, createComponent(MenuItem, {
-        icon: X,
-        label: "Close Pane",
-        badge: "Ctrl+W",
-        danger: true,
-        onClick: () => {
-          props.onClosePane?.();
-          closeMenu();
-        }
-      }), null);
-      createRenderEffect((_p$) => {
-        var _v$ = `${posY()}px`, _v$2 = `${posX()}px`;
-        _v$ !== _p$.e && setStyleProperty(_el$5, "top", _p$.e = _v$);
-        _v$2 !== _p$.t && setStyleProperty(_el$5, "left", _p$.t = _v$2);
-        return _p$;
-      }, {
-        e: void 0,
-        t: void 0
-      });
-      return _el$5;
-    }
-  });
-}
-delegateEvents(["click", "contextmenu"]);
-var _tmpl$$g = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
+var _tmpl$$v = /* @__PURE__ */ template(`<div class="absolute top-2 left-1/2 -translate-x-1/2 z-[10000] pointer-events-auto group/zen-exit flex justify-center items-start h-12 w-64"><div class="absolute top-0 w-10 h-1.5 rounded-full bg-neutral-900/15 dark:bg-white/20 transition-all duration-300 group-hover/zen-exit:opacity-0 group-hover/zen-exit:scale-75 backdrop-blur-md"></div><button class="absolute top-0 flex items-center gap-2.5 bg-white/90 dark:bg-neutral-800/90 backdrop-blur-xl border border-neutral-200/50 dark:border-neutral-700/50 px-3.5 py-1.5 rounded-full shadow-[0_8px_30px_rgba(0,0,0,0.12)] transition-all duration-400 ease-[cubic-bezier(0.34,1.56,0.64,1)] scale-90 opacity-0 -translate-y-4 pointer-events-none group-hover/zen-exit:pointer-events-auto group-hover/zen-exit:opacity-100 group-hover/zen-exit:scale-100 group-hover/zen-exit:translate-y-0"><span class="text-neutral-700 dark:text-neutral-300 text-[11px] font-medium tracking-wide">Exit Focus</span><div class="flex gap-1"><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">ESC</div><div class="bg-neutral-100 dark:bg-neutral-900 border border-neutral-200/80 dark:border-neutral-700 text-neutral-500 dark:text-neutral-400 text-[9px] font-bold px-1.5 py-0.5 rounded shadow-sm">Alt+F`);
 function MaximizedPaneControls(props) {
   return (() => {
-    var _el$ = _tmpl$$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+    var _el$ = _tmpl$$v(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
     _el$3.$$click = () => setLayoutStore("maximizedPaneId", null);
     return _el$;
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$f = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
+var _tmpl$$u = /* @__PURE__ */ template(`<iframe class="absolute inset-0 w-full h-full border-none outline-none z-0 bg-white">`);
+function resolveMockUrl(url) {
+  if (!url) return "/mocks/meta-ads.html";
+  const u = url.toLowerCase();
+  if (u.includes("github.com")) return "/mocks/github.html?v=3";
+  if (u.includes("hubspot.com")) return "/mocks/hubspot.html";
+  if (u.includes("stripe.com")) return "/mocks/stripe.html";
+  if (u.includes("slack.com")) return "/mocks/slack.html?v=3";
+  if (u.includes("mail.google.com") || u.includes("gmail.com")) return "/mocks/gmail.html";
+  if (u.includes("google.com") || u.includes("sheets")) return "/mocks/sheets.html";
+  if (u.includes("upwork.com")) return "/mocks/upwork.html?v=3";
+  if (u.includes("fiverr.com")) return "/mocks/fiverr.html?v=3";
+  if (u.includes("jira.atlassian.com") || u.includes("jira.com")) return "/mocks/jira.html";
+  if (u.includes("linear.app")) return "/mocks/linear.html";
+  if (u.includes("salesforce-1.com")) return "/mocks/salesforce-1.html";
+  if (u.includes("salesforce-2.com")) return "/mocks/salesforce-2.html";
+  if (u.includes("salesforce-3.com")) return "/mocks/salesforce-3.html";
+  if (u.includes("salesforce.com")) return "/mocks/salesforce-1.html";
+  if (u.includes("whatsapp.com")) return "/mocks/whatsapp.html";
+  if (u.includes("todoist.com")) return "/mocks/todoist.html";
+  if (u.includes("figma.com")) return "/mocks/figma.html";
+  if (u.includes("facebook-ads.com") || u.includes("facebook.com")) return "/mocks/meta-ads.html";
+  if (u.includes("shopify.com")) return "/mocks/shopify.html";
+  if (u.includes("localhost:5174")) return "";
+  return "/mocks/meta-ads.html";
+}
 function DemoIframe(props) {
   return (() => {
-    var _el$ = _tmpl$$f();
+    var _el$ = _tmpl$$u();
     use((el) => {
       if (el) {
         el.onload = () => {
@@ -28906,24 +28967,24 @@ function DemoIframe(props) {
             if (doc) {
               const style2 = doc.createElement("style");
               style2.innerHTML = `
-              html, body { 
-                overflow: hidden !important; 
-                height: 100% !important; 
-                overscroll-behavior: none !important;
-                user-select: none !important;
-                -webkit-user-select: none !important;
-                scrollbar-width: none !important;
-              }
-              ::-webkit-scrollbar {
-                display: none !important;
-                width: 0 !important;
-                height: 0 !important;
-              }
-              img, a {
-                -webkit-user-drag: none !important;
-                user-drag: none !important;
-              }
-            `;
+                  html, body { 
+                    overflow: hidden !important; 
+                    height: 100% !important; 
+                    overscroll-behavior: none !important;
+                    user-select: none !important;
+                    -webkit-user-select: none !important;
+                    scrollbar-width: none !important;
+                  }
+                  ::-webkit-scrollbar {
+                    display: none !important;
+                    width: 0 !important;
+                    height: 0 !important;
+                  }
+                  img, a {
+                    -webkit-user-drag: none !important;
+                    user-drag: none !important;
+                  }
+                `;
               doc.head.appendChild(style2);
               doc.addEventListener("contextmenu", (e) => e.preventDefault());
               let pendingDeltaY = 0;
@@ -28996,39 +29057,14 @@ function DemoIframe(props) {
         };
       }
     }, _el$);
-    createRenderEffect(() => setAttribute(_el$, "src", (() => {
-      const url = props.currentUrl || "";
-      if (!url) return url;
-      const u = url.toLowerCase();
-      if (u.includes("github.com")) return "/mocks/github.html?v=3";
-      if (u.includes("hubspot.com")) return "/mocks/hubspot.html";
-      if (u.includes("stripe.com")) return "/mocks/stripe.html";
-      if (u.includes("slack.com")) return "/mocks/slack.html?v=3";
-      if (u.includes("mail.google.com")) return "/mocks/gmail.html";
-      if (u.includes("google.com") || u.includes("sheets")) return "/mocks/sheets.html";
-      if (u.includes("upwork.com")) return "/mocks/upwork.html?v=3";
-      if (u.includes("fiverr.com")) return "/mocks/fiverr.html?v=3";
-      if (u.includes("jira.atlassian.com")) return "/mocks/jira.html";
-      if (u.includes("linear.app")) return "/mocks/linear.html";
-      if (u.includes("salesforce-1.com")) return "/mocks/salesforce-1.html";
-      if (u.includes("salesforce-2.com")) return "/mocks/salesforce-2.html";
-      if (u.includes("salesforce-3.com")) return "/mocks/salesforce-3.html";
-      if (u.includes("salesforce.com")) return "/mocks/salesforce-1.html";
-      if (u.includes("whatsapp.com")) return "/mocks/whatsapp.html";
-      if (u.includes("todoist.com")) return "/mocks/todoist.html";
-      if (u.includes("figma.com")) return "/mocks/figma.html";
-      if (u.includes("facebook-ads.com")) return "/mocks/meta-ads.html";
-      if (u.includes("shopify.com")) return "/mocks/shopify.html";
-      if (u.includes("localhost:5174")) return "";
-      return "/mocks/meta-ads.html";
-    })()));
+    createRenderEffect(() => setAttribute(_el$, "src", resolveMockUrl(props.currentUrl)));
     return _el$;
   })();
 }
-var _tmpl$$e = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
+var _tmpl$$t = /* @__PURE__ */ template(`<div class="absolute inset-0 bg-neutral-100/95 dark:bg-neutral-900/95 backdrop-blur-[2px] flex flex-col items-center justify-center p-6 text-center z-30 pointer-events-auto select-none"><div class="p-[1px] rounded-[14px] bg-neutral-300/80 dark:bg-neutral-700/80 shadow-[0_8px_24px_-4px_rgba(0,0,0,0.12),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_8px_24px_-4px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.1)] max-w-xs w-full"><div class="p-5 rounded-[13px] bg-white dark:bg-neutral-950 flex flex-col items-center"><div class="w-8 h-8 rounded-full bg-neutral-100 dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-800 flex items-center justify-center mb-3 text-neutral-600 dark:text-neutral-300"><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 9v4M12 17h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"></path></svg></div><h3 class="text-[13px] font-semibold text-neutral-900 dark:text-neutral-100 mb-1 tracking-tight">Process Interrupted</h3><p class="text-[11px] text-neutral-500 dark:text-neutral-400 mb-4 leading-relaxed">This tab exceeded available memory or stopped responding.</p><button class="w-full py-1.5 px-3 bg-neutral-900 hover:bg-neutral-800 text-white dark:bg-white dark:hover:bg-neutral-200 dark:text-neutral-900 text-xs font-medium rounded-[8px] border border-neutral-800 dark:border-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.2),0_1px_2px_rgba(0,0,0,0.1)] active:scale-[0.97] transition-all duration-200">Restore Tab`);
 function PaneCrashedOverlay(props) {
   return (() => {
-    var _el$ = _tmpl$$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
+    var _el$ = _tmpl$$t(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling, _el$7 = _el$6.nextSibling;
     addEventListener(_el$7, "click", props.onReload, true);
     return _el$;
   })();
@@ -29087,7 +29123,7 @@ class TrpcClient {
   };
 }
 const trpc = new TrpcClient();
-var _tmpl$$d = /* @__PURE__ */ template(`<img class="absolute inset-0 w-full h-full object-cover opacity-30 filter blur-[2px] transition-opacity duration-300 group-hover:opacity-40">`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="absolute inset-0 z-30 flex items-center justify-center cursor-pointer select-none bg-neutral-900/10 dark:bg-neutral-950/40 backdrop-blur-sm transition-all duration-300 group"><div class="relative z-10 flex flex-col items-center gap-3 p-6 max-w-sm mx-auto bg-white/95 dark:bg-neutral-900/95 rounded-2xl border border-neutral-200/80 dark:border-neutral-800 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.9)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 group-hover:scale-[1.02] active:scale-[0.98]"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-700 dark:text-neutral-300 border border-neutral-200/60 dark:border-neutral-700/60 shadow-sm"><svg width=20 height=20 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 2v4"></path><path d="m16.2 7.8 2.9-2.9"></path><path d="M18 12h4"></path><path d="m16.2 16.2 2.9 2.9"></path><path d="M12 18v4"></path><path d="m4.9 19.1 2.9-2.9"></path><path d="M2 12h4"></path><path d="m4.9 4.9 2.9 2.9"></path></svg></div><div class=text-center><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100 tracking-tight">Hibernated to Save RAM</h3><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-1 max-w-[220px]"> was suspended after 15 minutes of idle time.</p></div><button type=button class="mt-1 px-4 py-1.5 text-xs font-medium text-neutral-900 dark:text-neutral-100 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded-lg border border-neutral-300/80 dark:border-neutral-700 transition-colors shadow-sm">Click to Wake`);
+var _tmpl$$s = /* @__PURE__ */ template(`<img class="absolute inset-0 w-full h-full object-cover opacity-30 filter blur-[2px] transition-opacity duration-300 group-hover:opacity-40">`), _tmpl$2$f = /* @__PURE__ */ template(`<div class="absolute inset-0 z-30 flex items-center justify-center cursor-pointer select-none bg-neutral-900/10 dark:bg-neutral-950/40 backdrop-blur-sm transition-all duration-300 group"><div class="relative z-10 flex flex-col items-center gap-3 p-6 max-w-sm mx-auto bg-white/95 dark:bg-neutral-900/95 rounded-2xl border border-neutral-200/80 dark:border-neutral-800 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),inset_0_1px_0_rgba(255,255,255,0.9)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.05)] transition-all duration-200 group-hover:scale-[1.02] active:scale-[0.98]"><div class="w-10 h-10 rounded-xl bg-neutral-100 dark:bg-neutral-800 flex items-center justify-center text-neutral-700 dark:text-neutral-300 border border-neutral-200/60 dark:border-neutral-700/60 shadow-sm"><svg width=20 height=20 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M12 2v4"></path><path d="m16.2 7.8 2.9-2.9"></path><path d="M18 12h4"></path><path d="m16.2 16.2 2.9 2.9"></path><path d="M12 18v4"></path><path d="m4.9 19.1 2.9-2.9"></path><path d="M2 12h4"></path><path d="m4.9 4.9 2.9 2.9"></path></svg></div><div class=text-center><h3 class="text-sm font-semibold text-neutral-900 dark:text-neutral-100 tracking-tight">Hibernated to Save RAM</h3><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-1 max-w-[220px]"> was suspended after 15 minutes of idle time.</p></div><button type=button class="mt-1 px-4 py-1.5 text-xs font-medium text-neutral-900 dark:text-neutral-100 bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200 dark:hover:bg-neutral-700 rounded-lg border border-neutral-300/80 dark:border-neutral-700 transition-colors shadow-sm">Click to Wake`);
 function HibernatedPaneOverlay(props) {
   const handleWake = async (e) => {
     e.stopPropagation();
@@ -29099,14 +29135,14 @@ function HibernatedPaneOverlay(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$2$9(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.firstChild, _el$9 = _el$5.nextSibling;
+    var _el$ = _tmpl$2$f(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.firstChild, _el$9 = _el$5.nextSibling;
     _el$.$$click = handleWake;
     insert(_el$, createComponent(Show, {
       get when() {
         return props.thumbnail;
       },
       get children() {
-        var _el$2 = _tmpl$$d();
+        var _el$2 = _tmpl$$s();
         createRenderEffect((_p$) => {
           var _v$ = props.thumbnail, _v$2 = props.title || "Hibernated Pane";
           _v$ !== _p$.e && setAttribute(_el$2, "src", _p$.e = _v$);
@@ -29125,43 +29161,6 @@ function HibernatedPaneOverlay(props) {
   })();
 }
 delegateEvents(["click"]);
-function usePaneContextMenu(paneId, _getPaneRef) {
-  const [contextMenu, setContextMenu] = createSignal(null);
-  onMount(() => {
-    const handleContextMenu = (e) => {
-      if (e.detail?.paneId === paneId) {
-        const x = typeof e.detail.x === "number" ? e.detail.x : 0;
-        const y = typeof e.detail.y === "number" ? e.detail.y : 0;
-        setContextMenu({
-          x,
-          y,
-          linkURL: e.detail.linkURL,
-          srcURL: e.detail.srcURL,
-          pageURL: e.detail.pageURL
-        });
-      } else {
-        setContextMenu(null);
-      }
-    };
-    window.addEventListener("app:pane-context-menu", handleContextMenu);
-    const handlePaneClicked = () => setContextMenu(null);
-    window.addEventListener("app:pane-clicked", handlePaneClicked);
-    const handleGlobalClick = (e) => {
-      if (e.button === 2) return;
-      const target = e.target;
-      if (!target.closest(".pane-context-menu")) {
-        setContextMenu(null);
-      }
-    };
-    window.addEventListener("pointerdown", handleGlobalClick);
-    onCleanup(() => {
-      window.removeEventListener("app:pane-context-menu", handleContextMenu);
-      window.removeEventListener("app:pane-clicked", handlePaneClicked);
-      window.removeEventListener("pointerdown", handleGlobalClick);
-    });
-  });
-  return { contextMenu, setContextMenu };
-}
 function usePaneLoadingState(paneId) {
   const [isLoading, setIsLoading] = createSignal(false);
   const [progress, setProgress] = createSignal(0);
@@ -29445,12 +29444,6 @@ function useNativePaneBridge(paneId, onNavigated) {
         window.dispatchEvent(new CustomEvent("app:webview-focused", { detail: paneId }));
       }) ?? noop
     );
-    offs.push(
-      api.onNativeContextMenu?.((d) => {
-        if (d?.paneId !== paneId) return;
-        window.dispatchEvent(new CustomEvent("app:pane-context-menu", { detail: d }));
-      }) ?? noop
-    );
     const ipc = window.electron?.ipcRenderer;
     const onTs = (_e, d) => window.dispatchEvent(
       new CustomEvent("app:media-timestamp", { detail: { paneId, ...d ?? {} } })
@@ -29534,24 +29527,8 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
         })
       );
     };
-    const handleContextMenu = (e) => {
+    const handleContextMenu = () => {
       handleFocus();
-      const params = e.params || e;
-      const rect = el.getBoundingClientRect();
-      const clientX = typeof params.x === "number" ? rect.left + params.x : typeof e.clientX === "number" ? e.clientX : rect.left + 20;
-      const clientY = typeof params.y === "number" ? rect.top + params.y : typeof e.clientY === "number" ? e.clientY : rect.top + 20;
-      window.dispatchEvent(
-        new CustomEvent("app:pane-context-menu", {
-          detail: {
-            paneId,
-            x: clientX,
-            y: clientY,
-            linkURL: params.linkURL || "",
-            srcURL: params.srcURL || "",
-            pageURL: params.pageURL || (typeof el.getURL === "function" ? el.getURL() : "")
-          }
-        })
-      );
     };
     const registerWc = () => {
       try {
@@ -29749,13 +29726,356 @@ function useSessionSync(_paneId, _partition, _currentUrl, _isActivePane, _reload
     });
   });
 }
-var _tmpl$$c = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 left-0 right-0 h-[2px] z-[60] overflow-hidden bg-neutral-200/40 dark:bg-neutral-800/40"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-200 ease-out">`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane pointer-events-none"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full pointer-events-none"><div class="w-full h-full bg-transparent relative"style=position:relative>`), _tmpl$3$6 = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div data-pane-gap class="w-full h-full bg-transparent">`), _tmpl$5$2 = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0 pointer-events-auto"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
+function usePaneInteractions(paneId, onActive) {
+  const handleActivation = (e, isFocus = false) => {
+    if (isFocus && layoutStore.isTransitioning) return;
+    onActive?.();
+    const t = e.target;
+    if (t?.closest?.("[data-store-modal], [role='dialog']")) {
+      PaneFocusManager.syncActivePane(paneId);
+      return;
+    }
+    PaneFocusManager.focusPane(paneId);
+  };
+  const handleContextMenu = (e, isBlank) => {
+    onActive?.();
+    PaneFocusManager.focusPane(paneId);
+    const target = e.target;
+    if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+      return;
+    }
+    if (isBlank) {
+      e.preventDefault();
+      e.stopPropagation();
+      window.dispatchEvent(
+        new CustomEvent("app:show-context-menu", {
+          detail: {
+            mode: "FULL",
+            data: {
+              x: e.clientX,
+              y: e.clientY,
+              paneId,
+              pageURL: ""
+            }
+          }
+        })
+      );
+    }
+  };
+  return { handleActivation, handleContextMenu };
+}
+const DEVICE_PRESETS = {
+  desktop: { id: "desktop", name: "Desktop (Default)", width: 0, height: 0, type: "desktop" },
+  iphone_16_pro: { id: "iphone_16_pro", name: "iPhone 16 Pro", width: 393, height: 852, type: "phone" },
+  ipad_air: { id: "ipad_air", name: "iPad Air", width: 820, height: 1180, type: "tablet" },
+  pixel_9: { id: "pixel_9", name: "Google Pixel 9", width: 412, height: 924, type: "phone" }
+};
+const [emulatedDevices, setEmulatedDevices] = createSignal({});
+const [orientations, setOrientations] = createSignal({});
+const [scales, setScales] = createSignal({});
+function useDeviceEmulationStore() {
+  const getDevice = (paneId) => emulatedDevices()[paneId] || "desktop";
+  const getOrientation = (paneId) => orientations()[paneId] || "portrait";
+  const getScale = (paneId) => scales()[paneId] || 1;
+  const setDevice = async (paneId, mode, orientation = getOrientation(paneId), scale = getScale(paneId)) => {
+    setEmulatedDevices((prev) => ({ ...prev, [paneId]: mode }));
+    setOrientations((prev) => ({ ...prev, [paneId]: orientation }));
+    setScales((prev) => ({ ...prev, [paneId]: scale }));
+    const ipcMode = mode === "desktop" ? "reset" : mode;
+    try {
+      await window.api?.view?.setDeviceEmulation?.(paneId, ipcMode, orientation, scale);
+    } catch {
+    }
+    window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    airspaceCoordinator.scheduleSettlementSync();
+  };
+  const toggleOrientation = async (paneId) => {
+    const current = getOrientation(paneId);
+    const next = current === "portrait" ? "landscape" : "portrait";
+    await setDevice(paneId, getDevice(paneId), next, getScale(paneId));
+  };
+  const setScale = async (paneId, scale) => {
+    await setDevice(paneId, getDevice(paneId), getOrientation(paneId), scale);
+  };
+  return {
+    getDevice,
+    getOrientation,
+    getScale,
+    setDevice,
+    toggleOrientation,
+    setScale,
+    presets: DEVICE_PRESETS
+  };
+}
+var _tmpl$$r = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="z-50 flex items-center justify-between gap-3 px-3.5 py-1.5 rounded-full bg-white/95 dark:bg-neutral-900/95 backdrop-blur-2xl border border-neutral-300/90 dark:border-neutral-700/80 text-xs shadow-[0_12px_28px_-6px_rgba(0,0,0,0.2),inset_0_1px_0_rgba(255,255,255,0.8)] dark:shadow-[0_12px_28px_-6px_rgba(0,0,0,0.7),inset_0_1px_0_rgba(255,255,255,0.08)] pointer-events-auto"><div class="flex items-center gap-2"><span class="font-medium text-neutral-800 dark:text-neutral-200"></span><button type=button class="font-mono text-[10.5px] text-neutral-600 hover:text-neutral-950 dark:text-neutral-300 dark:hover:text-white bg-neutral-100 dark:bg-neutral-800 px-2 py-0.5 rounded-full border border-neutral-200 dark:border-neutral-700/60 hover:bg-neutral-200/80 dark:hover:bg-neutral-700 transition-colors"> × <!> • </button></div><div class="flex items-center gap-1.5"><button type=button data-overlay-chrome=true class="p-1 rounded-full text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200/70 dark:hover:bg-neutral-800 transition-colors"></button><div class="w-[1px] h-3 bg-neutral-300 dark:bg-neutral-700 mx-0.5"></div><button type=button data-overlay-chrome=true>iPhone</button><button type=button data-overlay-chrome=true>Pixel</button><button type=button data-overlay-chrome=true>iPad</button><div class="w-[1px] h-3 bg-neutral-300 dark:bg-neutral-700 mx-0.5"></div><button type=button data-overlay-chrome=true class="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium text-neutral-700 dark:text-neutral-200 hover:text-neutral-950 dark:hover:text-white bg-neutral-100 dark:bg-neutral-800 hover:bg-neutral-200/80 dark:hover:bg-neutral-700 transition-all border border-neutral-300/70 dark:border-neutral-700/80 active:scale-[0.97]"title="Reset to Desktop View (Esc)"><span>Desktop</span><kbd class="font-mono text-[9px] px-1 py-0.2 rounded bg-neutral-200/80 dark:bg-neutral-700 text-neutral-500 dark:text-neutral-400">Esc`);
+function DeviceControlsCapsule(props) {
+  const isLandscape = () => props.orientation === "landscape";
+  const displayW = () => isLandscape() ? props.cfg.height : props.cfg.width;
+  const displayH = () => isLandscape() ? props.cfg.width : props.cfg.height;
+  const scalePercent = () => Math.round(props.scale * 100);
+  return (() => {
+    var _el$ = _tmpl$$r(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$7 = _el$5.nextSibling;
+    _el$7.nextSibling;
+    var _el$8 = _el$2.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling, _el$10 = _el$1.nextSibling, _el$11 = _el$10.nextSibling, _el$12 = _el$11.nextSibling, _el$13 = _el$12.nextSibling, _el$14 = _el$13.firstChild;
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return props.cfg.type === "phone";
+      },
+      get fallback() {
+        return createComponent(Tablet, {
+          "class": "w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400"
+        });
+      },
+      get children() {
+        return createComponent(Smartphone, {
+          "class": "w-3.5 h-3.5 text-neutral-500 dark:text-neutral-400"
+        });
+      }
+    }), _el$3);
+    insert(_el$3, () => props.cfg.name);
+    addEventListener(_el$4, "click", props.onToggleScaleMode, true);
+    insert(_el$4, displayW, _el$5);
+    insert(_el$4, displayH, _el$7);
+    insert(_el$4, (() => {
+      var _c$ = memo(() => props.scaleMode === "auto");
+      return () => _c$() ? `Fit ${scalePercent()}%` : "100%";
+    })(), null);
+    addEventListener(_el$9, "click", props.onToggleOrientation, true);
+    insert(_el$9, createComponent(RotateCw, {
+      "class": "w-3.5 h-3.5"
+    }));
+    _el$1.$$click = () => props.onSelectMode("iphone_16_pro");
+    _el$10.$$click = () => props.onSelectMode("pixel_9");
+    _el$11.$$click = () => props.onSelectMode("ipad_air");
+    addEventListener(_el$13, "click", props.onReset, true);
+    insert(_el$13, createComponent(Monitor, {
+      "class": "w-3 h-3"
+    }), _el$14);
+    createRenderEffect((_p$) => {
+      var _v$ = `Click to switch between Auto-Fit and 1:1 Actual Size (Currently ${props.scaleMode === "auto" ? "Fit" : "100%"})`, _v$2 = `Rotate to ${isLandscape() ? "Portrait" : "Landscape"}`, _v$3 = `px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-all ${props.currentMode === "iphone_16_pro" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 shadow-sm" : "text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200/70 dark:hover:bg-neutral-800"}`, _v$4 = `px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-all ${props.currentMode === "pixel_9" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 shadow-sm" : "text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200/70 dark:hover:bg-neutral-800"}`, _v$5 = `px-2.5 py-0.5 rounded-full text-[11px] font-medium transition-all ${props.currentMode === "ipad_air" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900 shadow-sm" : "text-neutral-600 dark:text-neutral-300 hover:bg-neutral-200/70 dark:hover:bg-neutral-800"}`;
+      _v$ !== _p$.e && setAttribute(_el$4, "title", _p$.e = _v$);
+      _v$2 !== _p$.t && setAttribute(_el$9, "title", _p$.t = _v$2);
+      _v$3 !== _p$.a && className(_el$1, _p$.a = _v$3);
+      _v$4 !== _p$.o && className(_el$10, _p$.o = _v$4);
+      _v$5 !== _p$.i && className(_el$11, _p$.i = _v$5);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0,
+      i: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+function useDeviceAutoFit(params) {
+  const { setScale } = useDeviceEmulationStore();
+  const [containerSize, setContainerSize] = createSignal({
+    width: 1200,
+    height: 800
+  });
+  onMount(() => {
+    const el = params.containerRef();
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setContainerSize({ width, height });
+        }
+      }
+    });
+    ro.observe(el);
+    onCleanup(() => ro.disconnect());
+  });
+  const bezel = createMemo(() => params.cfg().type === "phone" ? 10 : 12);
+  const screenDimensions = createMemo(() => {
+    const isLand = params.orientation() === "landscape";
+    const w = isLand ? params.cfg().height : params.cfg().width;
+    const h = isLand ? params.cfg().width : params.cfg().height;
+    return { width: w, height: h };
+  });
+  const chassisDimensions = createMemo(() => {
+    const b = bezel();
+    const s = screenDimensions();
+    return {
+      width: s.width + b * 2,
+      height: s.height + b * 2
+    };
+  });
+  const scale = createMemo(() => {
+    if (params.scaleMode() === "actual") return 1;
+    const { width: cw, height: ch } = containerSize();
+    const { width: fw, height: fh } = chassisDimensions();
+    const availW = Math.max(120, cw - 32);
+    const availH = Math.max(120, ch - 100);
+    const fitScale = Math.min(1, availW / fw, availH / fh);
+    return Math.max(0.3, Math.round(fitScale * 100) / 100);
+  });
+  const scaledFootprint = createMemo(() => {
+    const s = scale();
+    const c = chassisDimensions();
+    return {
+      width: Math.round(c.width * s),
+      height: Math.round(c.height * s)
+    };
+  });
+  let syncTimer = null;
+  createEffect(() => {
+    const s = scale();
+    if (syncTimer) clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => {
+      setScale(params.paneId, s);
+      window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    }, 40);
+  });
+  onCleanup(() => {
+    if (syncTimer) clearTimeout(syncTimer);
+  });
+  return {
+    scale,
+    bezel,
+    screenDimensions,
+    chassisDimensions,
+    scaledFootprint,
+    scalePercent: () => `${Math.round(scale() * 100)}%`
+  };
+}
+var _tmpl$$q = /* @__PURE__ */ template(`<div><div class="w-2 h-2 rounded-full bg-emerald-500/80 border border-emerald-400/50 animate-pulse shadow-[0_0_6px_rgba(16,185,129,0.6)]">`), _tmpl$2$e = /* @__PURE__ */ template(`<div>`), _tmpl$3$9 = /* @__PURE__ */ template(`<div class="w-full h-full relative flex flex-col items-center justify-center bg-transparent text-neutral-900 dark:text-neutral-100 select-none font-sans pointer-events-auto overflow-hidden p-6"><div class="flex-1 w-full flex items-center justify-center overflow-hidden bg-transparent"><div style=position:relative><div class="absolute top-0 left-0 flex flex-col items-center bg-transparent shrink-0 transition-transform duration-200"style="transform-origin:top left;box-shadow:0 0 0 9999px rgba(244, 244, 242, 0.98), 0 25px 60px -15px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.15)"><div></div></div></div></div><div class="absolute bottom-5 left-1/2 -translate-x-1/2 z-50 shrink-0 pointer-events-auto">`);
+function DeviceMockupFrame(props) {
+  const {
+    getDevice,
+    getOrientation,
+    setDevice,
+    toggleOrientation
+  } = useDeviceEmulationStore();
+  const currentMode = () => getDevice(props.paneId);
+  const orientation = () => getOrientation(props.paneId);
+  const cfg = () => DEVICE_PRESETS[currentMode()];
+  let containerRef;
+  const [scaleMode, setScaleMode] = createSignal("auto");
+  const autoFit = useDeviceAutoFit({
+    paneId: props.paneId,
+    cfg,
+    orientation,
+    scaleMode,
+    containerRef: () => containerRef
+  });
+  const isLandscape = () => orientation() === "landscape";
+  createEffect(() => {
+    currentMode();
+    window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+  });
+  onMount(() => {
+    window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    const handleKeyDown = (e) => {
+      if (currentMode() !== "desktop") {
+        if (e.key === "Escape") {
+          setDevice(props.paneId, "desktop");
+        } else if (e.key.toLowerCase() === "r" && (e.ctrlKey || e.metaKey)) {
+          toggleOrientation(props.paneId);
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.dispatchEvent(new CustomEvent("pane.force-sync-bounds"));
+    });
+  });
+  return createComponent(Show, {
+    get when() {
+      return currentMode() !== "desktop";
+    },
+    get fallback() {
+      return props.children;
+    },
+    get children() {
+      var _el$ = _tmpl$3$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$8 = _el$2.nextSibling;
+      use((el) => containerRef = el, _el$);
+      insert(_el$5, createComponent(Show, {
+        get when() {
+          return cfg().type === "phone";
+        },
+        get children() {
+          var _el$6 = _tmpl$$q();
+          createRenderEffect(() => className(_el$6, `pointer-events-none absolute z-30 flex items-center justify-end px-3 bg-black rounded-full border border-neutral-800/80 shadow-md ${isLandscape() ? "top-1/2 left-2.5 -translate-y-1/2 w-5.5 h-26 flex-col pb-1" : "top-2.5 left-1/2 -translate-x-1/2 w-26 h-5.5"}`));
+          return _el$6;
+        }
+      }), null);
+      insert(_el$5, () => props.children, null);
+      insert(_el$5, createComponent(Show, {
+        get when() {
+          return cfg().type === "phone";
+        },
+        get children() {
+          var _el$7 = _tmpl$2$e();
+          createRenderEffect(() => className(_el$7, `pointer-events-none absolute z-30 bg-neutral-600/80 rounded-full ${isLandscape() ? "top-1/2 right-1.5 -translate-y-1/2 w-1 h-32" : "bottom-1.5 left-1/2 -translate-x-1/2 w-32 h-1"}`));
+          return _el$7;
+        }
+      }), null);
+      insert(_el$8, createComponent(DeviceControlsCapsule, {
+        get cfg() {
+          return cfg();
+        },
+        get currentMode() {
+          return currentMode();
+        },
+        get orientation() {
+          return orientation();
+        },
+        get scale() {
+          return autoFit.scale();
+        },
+        get scaleMode() {
+          return scaleMode();
+        },
+        onToggleScaleMode: () => setScaleMode((m) => m === "auto" ? "actual" : "auto"),
+        onSelectMode: (mode) => setDevice(props.paneId, mode, orientation(), autoFit.scale()),
+        onToggleOrientation: () => toggleOrientation(props.paneId),
+        onReset: () => setDevice(props.paneId, "desktop")
+      }));
+      createRenderEffect((_p$) => {
+        var _v$ = `${autoFit.scaledFootprint().width}px`, _v$2 = `${autoFit.scaledFootprint().height}px`, _v$3 = `${autoFit.chassisDimensions().width}px`, _v$4 = `${autoFit.chassisDimensions().height}px`, _v$5 = `scale(${autoFit.scale()})`, _v$6 = cfg().type === "phone" ? "46px" : "32px", _v$7 = `${autoFit.bezel()}px solid #222226`, _v$8 = `device-screen-${props.paneId}`, _v$9 = `${autoFit.screenDimensions().width}px`, _v$0 = `${autoFit.screenDimensions().height}px`, _v$1 = `relative overflow-hidden bg-transparent ${cfg().type === "phone" ? "rounded-[36px]" : "rounded-[20px]"}`;
+        _v$ !== _p$.e && setStyleProperty(_el$3, "width", _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$3, "height", _p$.t = _v$2);
+        _v$3 !== _p$.a && setStyleProperty(_el$4, "width", _p$.a = _v$3);
+        _v$4 !== _p$.o && setStyleProperty(_el$4, "height", _p$.o = _v$4);
+        _v$5 !== _p$.i && setStyleProperty(_el$4, "transform", _p$.i = _v$5);
+        _v$6 !== _p$.n && setStyleProperty(_el$4, "border-radius", _p$.n = _v$6);
+        _v$7 !== _p$.s && setStyleProperty(_el$4, "border", _p$.s = _v$7);
+        _v$8 !== _p$.h && setAttribute(_el$5, "id", _p$.h = _v$8);
+        _v$9 !== _p$.r && setStyleProperty(_el$5, "width", _p$.r = _v$9);
+        _v$0 !== _p$.d && setStyleProperty(_el$5, "height", _p$.d = _v$0);
+        _v$1 !== _p$.l && className(_el$5, _p$.l = _v$1);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0,
+        a: void 0,
+        o: void 0,
+        i: void 0,
+        n: void 0,
+        s: void 0,
+        h: void 0,
+        r: void 0,
+        d: void 0,
+        l: void 0
+      });
+      return _el$;
+    }
+  });
+}
+var _tmpl$$p = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 left-0 right-0 h-[2px] z-[60] overflow-hidden bg-neutral-200/40 dark:bg-neutral-800/40"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-200 ease-out">`), _tmpl$2$d = /* @__PURE__ */ template(`<div class="pointer-events-none absolute top-0 bottom-0 right-0 w-[2px] bg-neutral-900/80 dark:bg-neutral-100/80 z-[70] animate-pulse shadow-[0_0_8px_rgba(0,0,0,0.3)]">`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="pointer-events-none absolute bottom-0 left-0 right-0 h-[2px] bg-neutral-900/80 dark:bg-neutral-100/80 z-[70] animate-pulse shadow-[0_0_8px_rgba(0,0,0,0.3)]">`), _tmpl$4$6 = /* @__PURE__ */ template(`<div class="w-full h-full bg-transparent relative">`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="w-full h-full flex flex-col bg-transparent rounded-[12px] overflow-hidden relative group/pane pointer-events-none"><div class="flex-1 relative overflow-hidden flex flex-col w-full h-full pointer-events-none">`), _tmpl$6 = /* @__PURE__ */ template(`<div class="w-full h-full overflow-y-auto">`), _tmpl$7 = /* @__PURE__ */ template(`<div data-pane-gap class="w-full h-full bg-transparent">`), _tmpl$8 = /* @__PURE__ */ template(`<webview class="w-full h-full border-0 absolute inset-0 pointer-events-auto"allowpopups webpreferences="contextIsolation=yes, javascript=yes, webgl=yes, spellcheck=no, backgroundThrottling=no"style=position:absolute;inset:0px;border:none;outline:none;background:#ffffff>`);
 const gateTriggeredSet = /* @__PURE__ */ new Set();
 function Pane(props) {
   const [currentUrl, setCurrentUrl] = createSignal(props.url);
   const [currentType, setCurrentType] = createSignal(props.paneType);
   const [isCrashed, setIsCrashed] = createSignal(false);
   const [hibernatedData, setHibernatedData] = createSignal(null);
+  const [splitPreview, setSplitPreview] = createSignal(null);
   let paneRef;
   let containerRef;
   const initialUrl = props.url || "";
@@ -29805,7 +30125,11 @@ function Pane(props) {
         if (currentUrl() !== e.detail.url) setCurrentUrl(e.detail.url);
       }
     };
+    const handlePreview = (e) => {
+      setSplitPreview(e.detail?.paneId === props.id ? e.detail.direction : null);
+    };
     window.addEventListener("pane.force-gate", handleForceGate);
+    window.addEventListener("app:preview-split-edge", handlePreview);
     const unsubHib = window.api?.onPaneHibernated?.((d) => {
       if (d.paneId === props.id) setHibernatedData({
         title: d.title,
@@ -29817,6 +30141,7 @@ function Pane(props) {
     });
     onCleanup(() => {
       window.removeEventListener("pane.force-gate", handleForceGate);
+      window.removeEventListener("app:preview-split-edge", handlePreview);
       unsubHib?.();
       unsubRes?.();
     });
@@ -29832,10 +30157,6 @@ function Pane(props) {
     progress
   } = usePaneLoadingState(() => props.id);
   const {
-    contextMenu,
-    setContextMenu
-  } = usePaneContextMenu(props.id);
-  const {
     launchApp,
     handlePointerActivity
   } = usePaneLauncher(props.id, setCurrentType, setCurrentUrl, props.onUpdate, (url) => {
@@ -29844,30 +30165,17 @@ function Pane(props) {
   });
   useSessionSync(props.id);
   useNativePaneView(props.id, initialUrl, currentPartition, currentUserAgent, () => containerRef, setIsCrashed, currentUrl);
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    props.onActive?.();
-    PaneFocusManager.focusPane(props.id);
-    setContextMenu({
-      x: e.clientX,
-      y: e.clientY,
-      pageURL: currentUrl() || ""
-    });
-  };
-  const handleActivation = (e, isFocus = false) => {
-    if (isFocus && layoutStore.isTransitioning) return;
-    props.onActive?.();
-    const t = e.target;
-    if (t?.closest?.("[data-store-modal], [role='dialog']")) {
-      PaneFocusManager.syncActivePane(props.id);
-      return;
-    }
-    PaneFocusManager.focusPane(props.id);
-  };
+  const {
+    handleActivation,
+    handleContextMenu
+  } = usePaneInteractions(props.id, props.onActive);
+  const {
+    getDevice
+  } = useDeviceEmulationStore();
+  const isEmulated = () => getDevice(props.id) !== "desktop";
   return (() => {
-    var _el$ = _tmpl$2$8(), _el$2 = _el$.firstChild, _el$5 = _el$2.firstChild;
-    _el$.$$contextmenu = handleContextMenu;
+    var _el$ = _tmpl$5$2(), _el$2 = _el$.firstChild;
+    _el$.$$contextmenu = (e) => handleContextMenu(e, isBlank());
     _el$.$$click = (e) => handleActivation(e);
     _el$.$$mousedown = (e) => handleActivation(e);
     _el$.$$focusin = (e) => handleActivation(e, true);
@@ -29884,81 +30192,16 @@ function Pane(props) {
         return isLoading();
       },
       get children() {
-        var _el$3 = _tmpl$$c(), _el$4 = _el$3.firstChild;
+        var _el$3 = _tmpl$$p(), _el$4 = _el$3.firstChild;
         createRenderEffect((_$p) => setStyleProperty(_el$4, "width", `${progress()}%`));
         return _el$3;
       }
-    }), _el$5);
-    var _ref$2 = containerRef;
-    typeof _ref$2 === "function" ? use(_ref$2, _el$5) : containerRef = _el$5;
-    insert(_el$5, createComponent(Show, {
-      get when() {
-        return !props.children;
-      },
-      get fallback() {
-        return (() => {
-          var _el$6 = _tmpl$3$6();
-          insert(_el$6, () => props.children);
-          return _el$6;
-        })();
-      },
-      get children() {
-        return createComponent(Show, {
-          get when() {
-            return !isNative();
-          },
-          get fallback() {
-            return _tmpl$4$4();
-          },
-          get children() {
-            return createComponent(Show, {
-              get when() {
-                return window.IS_WEB_DEMO;
-              },
-              get fallback() {
-                return createComponent(Show, {
-                  get when() {
-                    return currentPartition();
-                  },
-                  keyed: true,
-                  children: (partitionVal) => (() => {
-                    var _el$8 = _tmpl$5$2();
-                    use(setupWebview, _el$8);
-                    setAttribute(_el$8, "partition", partitionVal);
-                    createRenderEffect((_p$) => {
-                      var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = window.api?.panePreloadUrl;
-                      _v$3 !== _p$.e && setAttribute(_el$8, "id", _p$.e = _v$3);
-                      _v$4 !== _p$.t && setAttribute(_el$8, "src", _p$.t = _v$4);
-                      _v$5 !== _p$.a && setAttribute(_el$8, "useragent", _p$.a = _v$5);
-                      _v$6 !== _p$.o && setAttribute(_el$8, "preload", _p$.o = _v$6);
-                      return _p$;
-                    }, {
-                      e: void 0,
-                      t: void 0,
-                      a: void 0,
-                      o: void 0
-                    });
-                    return _el$8;
-                  })()
-                });
-              },
-              get children() {
-                return createComponent(DemoIframe, {
-                  get currentUrl() {
-                    return currentUrl();
-                  }
-                });
-              }
-            });
-          }
-        });
-      }
-    }));
+    }), null);
     insert(_el$2, createComponent(Show, {
       get when() {
-        return isBlank();
+        return !isBlank();
       },
-      get children() {
+      get fallback() {
         return createComponent(DefaultPanel, {
           get id() {
             return props.id;
@@ -29982,6 +30225,107 @@ function Pane(props) {
           },
           get onRestoreSplit() {
             return props.onRestoreSplit;
+          }
+        });
+      },
+      get children() {
+        return createComponent(DeviceMockupFrame, {
+          get paneId() {
+            return props.id;
+          },
+          get children() {
+            var _el$5 = _tmpl$4$6();
+            var _ref$2 = containerRef;
+            typeof _ref$2 === "function" ? use(_ref$2, _el$5) : containerRef = _el$5;
+            insert(_el$5, createComponent(Show, {
+              get when() {
+                return splitPreview() === "right";
+              },
+              get children() {
+                return _tmpl$2$d();
+              }
+            }), null);
+            insert(_el$5, createComponent(Show, {
+              get when() {
+                return splitPreview() === "bottom";
+              },
+              get children() {
+                return _tmpl$3$8();
+              }
+            }), null);
+            insert(_el$5, createComponent(Show, {
+              get when() {
+                return !props.children;
+              },
+              get fallback() {
+                return (() => {
+                  var _el$8 = _tmpl$6();
+                  insert(_el$8, () => props.children);
+                  return _el$8;
+                })();
+              },
+              get children() {
+                return createComponent(Show, {
+                  get when() {
+                    return !isNative();
+                  },
+                  get fallback() {
+                    return _tmpl$7();
+                  },
+                  get children() {
+                    return createComponent(Show, {
+                      get when() {
+                        return window.IS_WEB_DEMO;
+                      },
+                      get fallback() {
+                        return createComponent(Show, {
+                          get when() {
+                            return currentPartition();
+                          },
+                          keyed: true,
+                          children: (partitionVal) => (() => {
+                            var _el$0 = _tmpl$8();
+                            use(setupWebview, _el$0);
+                            setAttribute(_el$0, "partition", partitionVal);
+                            createRenderEffect((_p$) => {
+                              var _v$3 = `webview-${props.id}`, _v$4 = untrack(() => currentUrl()) || props.url || initialUrl, _v$5 = currentUserAgent(), _v$6 = window.api?.panePreloadUrl;
+                              _v$3 !== _p$.e && setAttribute(_el$0, "id", _p$.e = _v$3);
+                              _v$4 !== _p$.t && setAttribute(_el$0, "src", _p$.t = _v$4);
+                              _v$5 !== _p$.a && setAttribute(_el$0, "useragent", _p$.a = _v$5);
+                              _v$6 !== _p$.o && setAttribute(_el$0, "preload", _p$.o = _v$6);
+                              return _p$;
+                            }, {
+                              e: void 0,
+                              t: void 0,
+                              a: void 0,
+                              o: void 0
+                            });
+                            return _el$0;
+                          })()
+                        });
+                      },
+                      get children() {
+                        return createComponent(DemoIframe, {
+                          get currentUrl() {
+                            return currentUrl();
+                          }
+                        });
+                      }
+                    });
+                  }
+                });
+              }
+            }), null);
+            createRenderEffect((_p$) => {
+              var _v$ = `webview-container-${props.id}`, _v$2 = isEmulated() ? "true" : void 0;
+              _v$ !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$);
+              _v$2 !== _p$.t && setAttribute(_el$5, "data-device-emulated", _p$.t = _v$2);
+              return _p$;
+            }, {
+              e: void 0,
+              t: void 0
+            });
+            return _el$5;
           }
         });
       }
@@ -30057,56 +30401,14 @@ function Pane(props) {
         });
       }
     }), null);
-    insert(_el$2, createComponent(Show, {
-      get when() {
-        return contextMenu();
-      },
-      get children() {
-        return createComponent(PaneContextMenu, {
-          get contextMenu() {
-            return contextMenu();
-          },
-          setContextMenu,
-          get paneId() {
-            return props.id;
-          },
-          get currentUrl() {
-            return currentUrl();
-          },
-          get profileId() {
-            return props.profileId || "main";
-          },
-          onUpdateProfile: (newProfileId) => {
-            props.onUpdate?.({
-              profileId: newProfileId
-            });
-          },
-          get onClosePane() {
-            return props.onClose;
-          },
-          get onSplit() {
-            return props.onSplit;
-          }
-        });
-      }
-    }), null);
-    createRenderEffect((_p$) => {
-      var _v$ = `webview-container-${props.id}`, _v$2 = isBlank() ? "none" : "flex";
-      _v$ !== _p$.e && setAttribute(_el$5, "id", _p$.e = _v$);
-      _v$2 !== _p$.t && setStyleProperty(_el$5, "display", _p$.t = _v$2);
-      return _p$;
-    }, {
-      e: void 0,
-      t: void 0
-    });
     return _el$;
   })();
 }
 delegateEvents(["mousemove", "focusin", "mousedown", "click", "contextmenu"]);
-var _tmpl$$b = /* @__PURE__ */ template(`<div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent">`);
+var _tmpl$$o = /* @__PURE__ */ template(`<div class="absolute inset-0 z-0 pointer-events-none rounded-xl overflow-hidden bg-transparent">`);
 function AbsolutePanesLayer(props) {
   return (() => {
-    var _el$ = _tmpl$$b();
+    var _el$ = _tmpl$$o();
     insert(_el$, createComponent(For, {
       get each() {
         return props.renderedPaneIds();
@@ -30198,7 +30500,7 @@ function AbsolutePanesLayer(props) {
     return _el$;
   })();
 }
-var _tmpl$$a = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`);
+var _tmpl$$n = /* @__PURE__ */ template(`<div id=workspace-inset-sentinel class="absolute inset-0 z-[65] pointer-events-auto bg-transparent">`);
 function WorkspaceExitSentinel(props) {
   const isEdgeHovered = (axis) => {
     const z = props.hoverZone;
@@ -30211,7 +30513,7 @@ function WorkspaceExitSentinel(props) {
       return props.hoverZone !== "none";
     },
     get children() {
-      var _el$ = _tmpl$$a();
+      var _el$ = _tmpl$$n();
       _el$.addEventListener("pointerleave", () => {
         let leaveTimer = window._leaveTimer;
         if (leaveTimer) clearTimeout(leaveTimer);
@@ -30343,7 +30645,7 @@ function computeRootDockBounds(target) {
       return { top: "0px", left: "0px", right: "0px", bottom: "0px" };
   }
 }
-var _tmpl$$9 = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute z-10 pointer-events-none rounded-xl overflow-hidden will-change-[top,left,right,bottom]">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors shadow-double-bezel-flat active:shadow-double-bezel-active">Reset & Reload Workspace`);
+var _tmpl$$m = /* @__PURE__ */ template(`<div id=canvas-container class="flex-1 flex flex-col min-w-0 relative h-full transition-colors duration-300 z-0 bg-transparent will-change-[padding]"><div id=main-canvas class="flex-1 relative bg-transparent w-full h-full overflow-hidden rounded-[16px]"><div id=main-canvas-bezel class="absolute inset-0 pointer-events-none rounded-[16px] border border-neutral-300/70 shadow-[0_8px_32px_-4px_rgba(0,0,0,0.08),inset_0_1px_0_rgba(255,255,255,0.9),inset_0_0_0_1px_rgba(0,0,0,0.03)] z-20"></div><div class="absolute z-10 pointer-events-none rounded-xl overflow-hidden will-change-[top,left,right,bottom]">`), _tmpl$2$c = /* @__PURE__ */ template(`<div class="w-full h-full bg-white flex flex-col items-center justify-center p-8 text-center pointer-events-auto"><h2 class="text-xl font-semibold text-neutral-800 mb-2">Workspace Layout Crashed</h2><p class="text-neutral-500 mb-6 text-sm max-w-md"></p><button class="px-4 py-2 bg-neutral-900 text-white rounded-lg text-sm font-medium hover:bg-neutral-800 transition-colors shadow-double-bezel-flat active:shadow-double-bezel-active">Reset & Reload Workspace`);
 function AppMainCanvas(props) {
   const displayTree = createMemo(() => getComputedPreviewTree());
   const {
@@ -30418,7 +30720,7 @@ function AppMainCanvas(props) {
     reset();
   };
   return (() => {
-    var _el$ = _tmpl$$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+    var _el$ = _tmpl$$m(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
     var _ref$ = props.canvasContainerRef;
     typeof _ref$ === "function" ? use(_ref$, _el$) : props.canvasContainerRef = _el$;
     insert(_el$2, createComponent(CommandPalette, {
@@ -30459,7 +30761,7 @@ function AppMainCanvas(props) {
     }), _el$4);
     insert(_el$4, createComponent(ErrorBoundary, {
       fallback: (err, reset) => (() => {
-        var _el$5 = _tmpl$2$7(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.nextSibling;
+        var _el$5 = _tmpl$2$c(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$7.nextSibling;
         insert(_el$7, () => err.toString());
         _el$8.$$click = () => handleResetLayout(reset);
         return _el$5;
@@ -30526,7 +30828,7 @@ function AppMainCanvas(props) {
   })();
 }
 delegateEvents(["click"]);
-var _tmpl$$8 = /* @__PURE__ */ template(`<div class="flex flex-col items-center gap-2.5 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="[writing-mode:vertical-rl] text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-h-[140px] select-none">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div>`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-w-[130px] select-none">`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class="relative w-[18px] h-[18px] flex-shrink-0 flex items-center justify-center"><svg class="w-full h-full -rotate-90"viewBox="0 0 18 18"><circle cx=9 cy=9 r=7 class="stroke-neutral-300/80 dark:stroke-neutral-700/80"stroke-width=1.75 fill=none></circle><circle cx=9 cy=9 r=7 class="stroke-neutral-900 dark:stroke-neutral-100 transition-[stroke-dashoffset] duration-75 ease-linear"stroke-width=1.75 fill=none stroke-dasharray=43.98 stroke-linecap=round></circle></svg><span class="absolute text-[9px] font-semibold text-neutral-800 dark:text-neutral-200">`);
+var _tmpl$$l = /* @__PURE__ */ template(`<div class="flex flex-col items-center gap-2.5 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="[writing-mode:vertical-rl] text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-h-[140px] select-none">`), _tmpl$2$b = /* @__PURE__ */ template(`<div>`), _tmpl$3$7 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 whitespace-nowrap overflow-hidden animate-in fade-in zoom-in-95 duration-150"><span class="text-[11px] font-semibold text-neutral-800 dark:text-neutral-100 tracking-tight truncate max-w-[130px] select-none">`), _tmpl$4$5 = /* @__PURE__ */ template(`<div class="relative w-[18px] h-[18px] flex-shrink-0 flex items-center justify-center"><svg class="w-full h-full -rotate-90"viewBox="0 0 18 18"><circle cx=9 cy=9 r=7 class="stroke-neutral-300/80 dark:stroke-neutral-700/80"stroke-width=1.75 fill=none></circle><circle cx=9 cy=9 r=7 class="stroke-neutral-900 dark:stroke-neutral-100 transition-[stroke-dashoffset] duration-75 ease-linear"stroke-width=1.75 fill=none stroke-dasharray=43.98 stroke-linecap=round></circle></svg><span class="absolute text-[9px] font-semibold text-neutral-800 dark:text-neutral-200">`);
 function BezelShelfItem(props) {
   const isVertical = () => props.direction === "left" || props.direction === "right";
   const positionClass = () => {
@@ -30550,7 +30852,7 @@ function BezelShelfItem(props) {
   const activeClass = () => "bg-white/95 dark:bg-neutral-900/95 border-neutral-300/90 dark:border-neutral-700/90 shadow-double-bezel-flat shadow-[0_8px_30px_rgb(0_0_0/0.12)] opacity-100";
   const dashoffset = () => 43.98 * (1 - Math.min(Math.max(props.progress, 0), 1));
   return (() => {
-    var _el$ = _tmpl$2$6();
+    var _el$ = _tmpl$2$b();
     insert(_el$, createComponent(Show, {
       get when() {
         return props.isActive;
@@ -30562,7 +30864,7 @@ function BezelShelfItem(props) {
           },
           get fallback() {
             return (() => {
-              var _el$4 = _tmpl$3$5(), _el$5 = _el$4.firstChild;
+              var _el$4 = _tmpl$3$7(), _el$5 = _el$4.firstChild;
               insert(_el$4, createComponent(Show, {
                 get when() {
                   return props.direction === "top";
@@ -30598,7 +30900,7 @@ function BezelShelfItem(props) {
             })();
           },
           get children() {
-            var _el$2 = _tmpl$$8(), _el$3 = _el$2.firstChild;
+            var _el$2 = _tmpl$$l(), _el$3 = _el$2.firstChild;
             insert(_el$2, createComponent(TensionRing, {
               get icon() {
                 return props.icon;
@@ -30619,7 +30921,7 @@ function BezelShelfItem(props) {
 }
 function TensionRing(props) {
   return (() => {
-    var _el$6 = _tmpl$4$3(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$7.nextSibling;
+    var _el$6 = _tmpl$4$5(), _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$7.nextSibling;
     insert(_el$0, () => props.icon);
     createRenderEffect(() => setAttribute(_el$9, "stroke-dashoffset", props.dashoffset));
     return _el$6;
@@ -30824,7 +31126,7 @@ const __vitePreload = function preload(baseModule, deps, importerUrl) {
     return baseModule().catch(handlePreloadError);
   });
 };
-var _tmpl$$7 = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$4 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$2 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
+var _tmpl$$k = /* @__PURE__ */ template(`<span class="text-neutral-400 mx-0.5 text-[10px] font-medium">+`), _tmpl$2$a = /* @__PURE__ */ template(`<div class="flex items-center"><kbd class="px-1.5 py-0.5 rounded-md bg-white border border-neutral-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.05),inset_0_-1px_0_rgba(0,0,0,0.02)] text-[10px] font-mono font-semibold text-neutral-700 tracking-wide">`), _tmpl$3$6 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[99999] flex items-center justify-center bg-black/20 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome class="w-full max-w-3xl max-h-[80vh] bg-white rounded-2xl shadow-[0_24px_64px_-24px_rgba(0,0,0,0.3)] overflow-hidden flex flex-col scale-in-center animate-in zoom-in-95 duration-200"><div class="flex items-center justify-between px-6 py-4 border-b border-neutral-100"><h2 class="text-base font-semibold text-neutral-800">Keyboard Shortcuts</h2><button class="text-neutral-400 hover:text-neutral-800 transition-colors bg-neutral-100 hover:bg-neutral-200 p-1.5 rounded-full"><svg width=16 height=16 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 overflow-y-auto p-6"><div class="grid grid-cols-2 gap-8">`), _tmpl$4$4 = /* @__PURE__ */ template(`<div><h3 class="text-[11px] font-bold text-neutral-400 uppercase tracking-widest mb-3 px-1"></h3><div class=space-y-1>`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-1.5 px-2 hover:bg-neutral-50 rounded-lg transition-colors"><span class="text-xs font-medium text-neutral-600"></span><div class="flex items-center">`);
 function CheatSheetModal() {
   const [isOpen, setIsOpen] = createSignal(false);
   const toggle = () => setIsOpen(!isOpen());
@@ -30850,14 +31152,14 @@ function CheatSheetModal() {
     if (keyName === "BACKSLASH") keyName = "\\";
     parts.push(keyName);
     return parts.map((p, i) => (() => {
-      var _el$ = _tmpl$2$5(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$2$a(), _el$2 = _el$.firstChild;
       insert(_el$2, p);
       insert(_el$, createComponent(Show, {
         get when() {
           return i < parts.length - 1;
         },
         get children() {
-          return _tmpl$$7();
+          return _tmpl$$k();
         }
       }), null);
       return _el$;
@@ -30868,7 +31170,7 @@ function CheatSheetModal() {
       return isOpen();
     },
     get children() {
-      var _el$4 = _tmpl$3$4(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.firstChild;
+      var _el$4 = _tmpl$3$6(), _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling, _el$9 = _el$6.nextSibling, _el$0 = _el$9.firstChild;
       _el$4.$$click = toggle;
       _el$5.$$click = (e) => e.stopPropagation();
       _el$8.$$click = toggle;
@@ -30877,7 +31179,7 @@ function CheatSheetModal() {
           return [...new Set(activeShortcuts().map((s) => s.category || "Other"))];
         },
         children: (category) => (() => {
-          var _el$1 = _tmpl$4$2(), _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling;
+          var _el$1 = _tmpl$4$4(), _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling;
           insert(_el$10, category);
           insert(_el$11, createComponent(For, {
             get each() {
@@ -30898,7 +31200,7 @@ function CheatSheetModal() {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$6 = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome>`);
+var _tmpl$$j = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed inset-0 z-[999999] flex items-center justify-center bg-neutral-950/40 backdrop-blur-sm p-4 animate-in fade-in duration-200"><div data-overlay-chrome>`);
 function ModalShell(props) {
   onMount(() => {
     const onKeyDown = (e) => {
@@ -30914,7 +31216,7 @@ function ModalShell(props) {
       return props.isOpen;
     },
     get children() {
-      var _el$ = _tmpl$$6(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$$j(), _el$2 = _el$.firstChild;
       _el$.$$click = (e) => {
         if (e.target === e.currentTarget) props.onClose();
       };
@@ -30925,7 +31227,7 @@ function ModalShell(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$5 = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
+var _tmpl$$i = /* @__PURE__ */ template(`<div class=p-6><h3 class="text-base font-semibold text-neutral-900 mb-2"></h3><p class="text-sm text-neutral-500 leading-relaxed">`), _tmpl$2$9 = /* @__PURE__ */ template(`<div class="bg-neutral-50 px-6 py-3.5 flex items-center justify-end gap-2 border-t border-neutral-100"><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 px-3 py-1.5 rounded-lg transition-colors"></button><button class="text-xs font-medium bg-neutral-900 hover:bg-neutral-800 active:scale-95 text-white px-4 py-1.5 rounded-lg shadow-sm transition-all">`);
 function ConfirmationModal(props) {
   return createComponent(ModalShell, {
     get isOpen() {
@@ -30937,12 +31239,12 @@ function ConfirmationModal(props) {
     maxWidthClass: "max-w-sm",
     get children() {
       return [(() => {
-        var _el$ = _tmpl$$5(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+        var _el$ = _tmpl$$i(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
         insert(_el$2, () => props.title);
         insert(_el$3, () => props.description);
         return _el$;
       })(), (() => {
-        var _el$4 = _tmpl$2$4(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+        var _el$4 = _tmpl$2$9(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
         addEventListener(_el$5, "click", props.onCancel, true);
         insert(_el$5, () => props.cancelText || "Cancel");
         addEventListener(_el$6, "click", props.onConfirm, true);
@@ -31085,7 +31387,7 @@ function useMilestoneController(workspaceCount, ws) {
     dismissToast
   };
 }
-var _tmpl$$4 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$3 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div data-overlay-chrome style=-webkit-app-region:no-drag>`);
+var _tmpl$$h = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class=text-neutral-500><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1=7 y1=7 x2=7.01 y2=7></line></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">How is it going?</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">You've been using Apposition for a bit now. We'd love to hear your feedback or feature requests.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$2$8 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">Give Feedback</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$3$5 = /* @__PURE__ */ template(`<div class="flex justify-between items-start"><div class="flex-1 pr-4"><div class="flex items-center gap-1.5 mb-1"><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-yellow-500 fill-yellow-500/20"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg><h4 class="text-[13px] font-semibold text-neutral-900 leading-none tracking-tight">Apposition Lifetime Deal</h4></div><p class="text-[12px] text-neutral-500 leading-relaxed">Grab the Lifetime Deal (LTD) before your trial expires. Pay once, use forever.</p></div><button class="text-neutral-400 hover:text-neutral-600 transition-colors shrink-0"aria-label=Dismiss><svg xmlns=http://www.w3.org/2000/svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 mt-1"><button class="flex-1 bg-neutral-900 text-white text-[12px] font-medium py-1.5 px-3 rounded-lg shadow-[0_2px_8px_-2px_rgba(0,0,0,0.4),inset_0_1px_1px_rgba(255,255,255,0.2)] hover:bg-neutral-800 transition-all duration-200 active:scale-[0.97]">View Deal</button><button class="flex-1 bg-transparent hover:bg-neutral-100 text-neutral-500 text-[12px] font-medium py-1.5 px-3 rounded-lg transition-colors duration-200 active:scale-[0.97]">Remind Me Later`), _tmpl$5 = /* @__PURE__ */ template(`<div data-overlay-chrome style=-webkit-app-region:no-drag>`);
 function MilestoneToaster(props) {
   const ctrl = useMilestoneController(props.workspaceCount, props.ws);
   return createComponent(Show, {
@@ -31102,11 +31404,11 @@ function MilestoneToaster(props) {
         },
         get children() {
           return [(() => {
-            var _el$2 = _tmpl$$4(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
+            var _el$2 = _tmpl$$h(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
             _el$4.$$click = () => ctrl.dismissToast("feedback_dismiss");
             return _el$2;
           })(), (() => {
-            var _el$5 = _tmpl$2$3(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
+            var _el$5 = _tmpl$2$8(), _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling;
             _el$6.$$click = () => ctrl.dismissToast("feedback_give");
             _el$7.$$click = () => ctrl.dismissToast("feedback_snooze");
             return _el$5;
@@ -31119,11 +31421,11 @@ function MilestoneToaster(props) {
         },
         get children() {
           return [(() => {
-            var _el$8 = _tmpl$3$3(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
+            var _el$8 = _tmpl$3$5(), _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
             _el$0.$$click = () => ctrl.dismissToast("timeout");
             return _el$8;
           })(), (() => {
-            var _el$1 = _tmpl$4$1(), _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling;
+            var _el$1 = _tmpl$4$3(), _el$10 = _el$1.firstChild, _el$11 = _el$10.nextSibling;
             _el$10.$$click = () => ctrl.dismissToast("ltd_view");
             _el$11.$$click = () => ctrl.dismissToast("timeout");
             return _el$1;
@@ -31136,7 +31438,7 @@ function MilestoneToaster(props) {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$3 = /* @__PURE__ */ template(`<div class="p-5 flex flex-col gap-4 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 select-none"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-3"><div><h2 class="text-base font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">Share Your Screen</h2><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Select the entire display or a specific window to present</p></div><button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-sm font-medium p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">✕</button></div><div class="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800/60 p-1 rounded-lg w-fit border border-neutral-200/50 dark:border-neutral-700/50"><button type=button>Entire Screens</button><button type=button>Application Windows</button></div><div class="grid grid-cols-2 gap-3 max-h-[340px] overflow-y-auto p-1"></div><div class="flex items-center justify-end gap-2 pt-3 border-t border-neutral-200/80 dark:border-neutral-800"><button type=button class="px-4 py-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors border border-neutral-200 dark:border-neutral-700">Cancel</button><button type=button class="px-4 py-1.5 text-xs font-medium text-white bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 disabled:opacity-40 disabled:pointer-events-none rounded-lg transition-colors shadow-sm">Share Screen`), _tmpl$2$2 = /* @__PURE__ */ template(`<div class="col-span-2 py-10 text-center text-xs text-neutral-400">No sources available in this category`), _tmpl$3$2 = /* @__PURE__ */ template(`<div><div class="aspect-video w-full rounded-lg overflow-hidden bg-neutral-950/5 border border-neutral-200/60 dark:border-neutral-800 flex items-center justify-center"><img class="w-full h-full object-contain"></div><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate">`);
+var _tmpl$$g = /* @__PURE__ */ template(`<div class="p-5 flex flex-col gap-4 bg-white dark:bg-neutral-900 text-neutral-900 dark:text-neutral-100 select-none"><div class="flex items-center justify-between border-b border-neutral-200/80 dark:border-neutral-800 pb-3"><div><h2 class="text-base font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">Share Your Screen</h2><p class="text-xs text-neutral-500 dark:text-neutral-400 mt-0.5">Select the entire display or a specific window to present</p></div><button class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-sm font-medium p-1 rounded-md hover:bg-neutral-100 dark:hover:bg-neutral-800 transition-colors">✕</button></div><div class="flex items-center gap-1 bg-neutral-100 dark:bg-neutral-800/60 p-1 rounded-lg w-fit border border-neutral-200/50 dark:border-neutral-700/50"><button type=button>Entire Screens</button><button type=button>Application Windows</button></div><div class="grid grid-cols-2 gap-3 max-h-[340px] overflow-y-auto p-1"></div><div class="flex items-center justify-end gap-2 pt-3 border-t border-neutral-200/80 dark:border-neutral-800"><button type=button class="px-4 py-1.5 text-xs font-medium text-neutral-600 dark:text-neutral-300 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-lg transition-colors border border-neutral-200 dark:border-neutral-700">Cancel</button><button type=button class="px-4 py-1.5 text-xs font-medium text-white bg-neutral-900 hover:bg-neutral-800 dark:bg-neutral-100 dark:text-neutral-900 dark:hover:bg-neutral-200 disabled:opacity-40 disabled:pointer-events-none rounded-lg transition-colors shadow-sm">Share Screen`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="col-span-2 py-10 text-center text-xs text-neutral-400">No sources available in this category`), _tmpl$3$4 = /* @__PURE__ */ template(`<div><div class="aspect-video w-full rounded-lg overflow-hidden bg-neutral-950/5 border border-neutral-200/60 dark:border-neutral-800 flex items-center justify-center"><img class="w-full h-full object-contain"></div><span class="text-xs font-medium text-neutral-800 dark:text-neutral-200 truncate">`);
 function ScreenSourcePickerModal() {
   const [isOpen, setIsOpen] = createSignal(false);
   const [requestId, setRequestId] = createSignal("");
@@ -31184,7 +31486,7 @@ function ScreenSourcePickerModal() {
     onClose: handleClose,
     maxWidthClass: "max-w-2xl",
     get children() {
-      var _el$ = _tmpl$$3(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
+      var _el$ = _tmpl$$g(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$2.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild, _el$1 = _el$0.nextSibling;
       _el$4.$$click = handleClose;
       _el$6.$$click = () => setActiveTab("screen");
       _el$7.$$click = () => setActiveTab("window");
@@ -31193,12 +31495,12 @@ function ScreenSourcePickerModal() {
           return filteredSources();
         },
         get fallback() {
-          return _tmpl$2$2();
+          return _tmpl$2$7();
         },
         children: (source) => {
           const isSelected = () => selectedId() === source.id;
           return (() => {
-            var _el$11 = _tmpl$3$2(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling;
+            var _el$11 = _tmpl$3$4(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling;
             _el$11.$$click = () => setSelectedId(source.id);
             insert(_el$14, () => source.name);
             createRenderEffect((_p$) => {
@@ -31234,10 +31536,628 @@ function ScreenSourcePickerModal() {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-B4bDyOL9.js"), true ? [] : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-Do7q845Q.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-DyJw8Oc1.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-Y5e0VloK.js"), true ? [] : void 0, import.meta.url));
+const initialVersion = "1.3.1";
+const [updateStore, setUpdateStore] = createStore({
+  status: "idle",
+  currentVersion: initialVersion
+});
+let initialized = false;
+function initUpdateStore() {
+  if (initialized || typeof window === "undefined" || !window.api) return;
+  initialized = true;
+  window.api.updater?.getState?.().then((state) => {
+    if (state) setUpdateStore(state);
+  }).catch(() => {
+  });
+  window.api.onUpdateStateChanged?.((state) => {
+    if (state) setUpdateStore(state);
+  });
+}
+async function checkForUpdates() {
+  if (!window.api?.updater) return;
+  try {
+    const res = await window.api.updater.checkForUpdates();
+    if (res?.state) {
+      setUpdateStore(res.state);
+    }
+  } catch (err) {
+    setUpdateStore({
+      status: "error",
+      currentVersion: updateStore.currentVersion,
+      message: err?.message || "Failed to check for updates"
+    });
+  }
+}
+async function downloadUpdate() {
+  if (!window.api?.updater) return;
+  try {
+    const res = await window.api.updater.downloadUpdate();
+    if (res?.state) {
+      setUpdateStore(res.state);
+    }
+  } catch (err) {
+    setUpdateStore({
+      status: "error",
+      currentVersion: updateStore.currentVersion,
+      message: err?.message || "Download failed"
+    });
+  }
+}
+async function applyUpdate() {
+  if (!window.api?.updater) return;
+  try {
+    await window.api.updater.applyUpdate();
+  } catch (err) {
+    setUpdateStore({
+      status: "error",
+      currentVersion: updateStore.currentVersion,
+      message: err?.message || "Failed to apply update and restart"
+    });
+  }
+}
+function openExternalUrl(url) {
+  if (window.api?.updater?.openExternal) {
+    window.api.updater.openExternal(url);
+  } else {
+    window.open(url, "_blank");
+  }
+}
+var _tmpl$$f = /* @__PURE__ */ template(`<div data-overlay-chrome class="fixed bottom-6 right-6 z-[99990] flex items-center gap-3 bg-neutral-900 text-white border border-neutral-700/80 px-4 py-2.5 rounded-xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.5)] animate-in fade-in slide-in-from-bottom-4 duration-200 select-none"><div class="flex items-center gap-2 cursor-pointer hover:opacity-90 transition-opacity"title="Click to view Release Notes"><span class="w-2 h-2 rounded-full bg-emerald-400"></span><span class="text-xs font-medium text-neutral-200 underline decoration-neutral-600 underline-offset-2">Apposition v<!> is ready to apply.</span></div><button class="text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 active:scale-[0.97] text-white px-2.5 py-1 rounded-md shadow-2xs transition-all cursor-pointer">Restart Now</button><button title="Dismiss for this session"class="text-neutral-400 hover:text-white p-1 rounded-md transition-colors cursor-pointer"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`);
+function UpdateNotificationToast() {
+  const [dismissed, setDismissed] = createSignal(false);
+  return createComponent(Show, {
+    get when() {
+      return memo(() => updateStore.status === "ready")() && !dismissed();
+    },
+    get children() {
+      var _el$ = _tmpl$$f(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling, _el$5 = _el$4.firstChild, _el$7 = _el$5.nextSibling;
+      _el$7.nextSibling;
+      var _el$8 = _el$2.nextSibling, _el$9 = _el$8.nextSibling;
+      _el$2.$$click = () => setLayoutStore("showChangelog", true);
+      insert(_el$4, () => updateStore.targetVersion, _el$7);
+      _el$8.$$click = () => applyUpdate();
+      _el$9.$$click = () => setDismissed(true);
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click"]);
+var _tmpl$$e = /* @__PURE__ */ template(`<div class="fixed inset-0 z-[999999] cursor-crosshair select-none"><canvas class=hidden></canvas><div class="pointer-events-none fixed flex flex-col items-center gap-2 -translate-x-1/2 -translate-y-1/2 transition-transform duration-75"><div class="relative w-[92px] h-[92px] rounded-full overflow-hidden border-[3px] border-white dark:border-neutral-900 shadow-2xl bg-black"><canvas width=88 height=88 class="w-full h-full"></canvas><div class="absolute inset-0 flex items-center justify-center pointer-events-none"><div class="w-2.5 h-2.5 border-[1.5px] border-white shadow-[0_0_2px_rgba(0,0,0,0.8)]"></div></div></div><div class="flex items-center gap-2 px-2.5 py-1.5 rounded-full bg-neutral-900/90 text-white backdrop-blur-md border border-white/20 shadow-lg text-[11px] font-mono font-medium"><div class="w-3.5 h-3.5 rounded-full border border-white/40 shadow-inner"></div><span>`);
+function InteractiveEyedropper() {
+  const [state, setState] = createSignal({
+    isActive: false,
+    x: 0,
+    y: 0,
+    hex: "#000000",
+    rgb: {
+      r: 0,
+      g: 0,
+      b: 0
+    }
+  });
+  let canvasRef;
+  let loupeCanvasRef;
+  let snapshotImg = null;
+  let ctx = null;
+  const showToast = (message) => {
+    window.dispatchEvent(new CustomEvent("app:toast", {
+      detail: {
+        message,
+        type: "success"
+      }
+    }));
+  };
+  const close = () => {
+    setState((prev) => ({
+      ...prev,
+      isActive: false
+    }));
+    snapshotImg = null;
+  };
+  const samplePixel = (clientX, clientY) => {
+    if (!ctx) return;
+    try {
+      const pixel = ctx.getImageData(clientX, clientY, 1, 1).data;
+      const r = pixel[0];
+      const g = pixel[1];
+      const b = pixel[2];
+      const toHex = (n) => n.toString(16).padStart(2, "0").toUpperCase();
+      const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+      setState((prev) => ({
+        ...prev,
+        x: clientX,
+        y: clientY,
+        hex,
+        rgb: {
+          r,
+          g,
+          b
+        }
+      }));
+      if (loupeCanvasRef) {
+        const lCtx = loupeCanvasRef.getContext("2d");
+        if (lCtx) {
+          lCtx.imageSmoothingEnabled = false;
+          lCtx.clearRect(0, 0, 88, 88);
+          lCtx.drawImage(canvasRef, clientX - 5, clientY - 5, 11, 11, 0, 0, 88, 88);
+        }
+      }
+    } catch {
+    }
+  };
+  const startDropper = async (paneId) => {
+    if (typeof window.EyeDropper !== "undefined") {
+      try {
+        const dropper = new window.EyeDropper();
+        const res = await dropper.open();
+        if (res?.sRGBHex) {
+          await navigator.clipboard.writeText(res.sRGBHex.toUpperCase());
+          showToast(`Copied ${res.sRGBHex.toUpperCase()} to clipboard`);
+          return;
+        }
+      } catch (e) {
+        if (e?.name === "AbortError") return;
+      }
+    }
+    try {
+      const res = await window.api?.view?.captureViewport?.(paneId);
+      if (!res?.success || !res?.dataUrl) return;
+      const img = new Image();
+      img.onload = () => {
+        snapshotImg = img;
+        if (canvasRef) {
+          canvasRef.width = window.innerWidth;
+          canvasRef.height = window.innerHeight;
+          ctx = canvasRef.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, window.innerWidth, window.innerHeight);
+          }
+        }
+        setState({
+          isActive: true,
+          x: window.innerWidth / 2,
+          y: window.innerHeight / 2,
+          hex: "#000000",
+          rgb: {
+            r: 0,
+            g: 0,
+            b: 0
+          }
+        });
+      };
+      img.src = res.dataUrl;
+    } catch {
+    }
+  };
+  onMount(() => {
+    const handleActivate = (e) => {
+      if (e.detail?.paneId) startDropper(e.detail.paneId);
+    };
+    window.addEventListener("app:activate-eyedropper", handleActivate);
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && state().isActive) {
+        close();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => {
+      window.removeEventListener("app:activate-eyedropper", handleActivate);
+      window.removeEventListener("keydown", handleKeyDown);
+    });
+  });
+  const handleClick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    navigator.clipboard.writeText(state().hex);
+    showToast(`Copied ${state().hex} to clipboard`);
+    close();
+  };
+  const handleMouseMove = (e) => {
+    samplePixel(e.clientX, e.clientY);
+  };
+  return createComponent(Show, {
+    get when() {
+      return state().isActive;
+    },
+    get children() {
+      return createComponent(Portal, {
+        get children() {
+          var _el$ = _tmpl$$e(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$7.nextSibling;
+          _el$.$$contextmenu = (e) => {
+            e.preventDefault();
+            close();
+          };
+          _el$.$$click = handleClick;
+          _el$.$$mousemove = handleMouseMove;
+          var _ref$ = canvasRef;
+          typeof _ref$ === "function" ? use(_ref$, _el$2) : canvasRef = _el$2;
+          var _ref$2 = loupeCanvasRef;
+          typeof _ref$2 === "function" ? use(_ref$2, _el$5) : loupeCanvasRef = _el$5;
+          insert(_el$8, () => state().hex);
+          createRenderEffect((_p$) => {
+            var _v$ = `${state().x}px`, _v$2 = `${state().y}px`, _v$3 = `translate(${state().x > window.innerWidth - 120 ? -80 : 80}px, ${state().y > window.innerHeight - 120 ? -80 : 80}px)`, _v$4 = state().hex;
+            _v$ !== _p$.e && setStyleProperty(_el$3, "left", _p$.e = _v$);
+            _v$2 !== _p$.t && setStyleProperty(_el$3, "top", _p$.t = _v$2);
+            _v$3 !== _p$.a && setStyleProperty(_el$3, "transform", _p$.a = _v$3);
+            _v$4 !== _p$.o && setStyleProperty(_el$7, "background-color", _p$.o = _v$4);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0,
+            a: void 0,
+            o: void 0
+          });
+          return _el$;
+        }
+      });
+    }
+  });
+}
+delegateEvents(["mousemove", "click", "contextmenu"]);
+var _tmpl$$d = /* @__PURE__ */ template(`<a target=_blank rel=noreferrer class="text-[11px] font-medium text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100 flex items-center gap-1 transition-colors px-1 py-0.5"title="Open original page in new window">Source `), _tmpl$2$6 = /* @__PURE__ */ template(`<button type=button class="px-2 py-1 flex items-center gap-1 rounded-full text-[10.5px] font-medium text-neutral-600 dark:text-neutral-400 hover:text-neutral-900 dark:hover:text-neutral-100 bg-neutral-100/90 dark:bg-neutral-800/90 hover:bg-neutral-200/80 transition-colors border border-neutral-200/60 dark:border-neutral-700/60"title="Copy distilled article as Markdown"><span>Markdown`), _tmpl$3$3 = /* @__PURE__ */ template(`<button type=button>`), _tmpl$4$2 = /* @__PURE__ */ template(`<header data-overlay-chrome=true class="fixed top-6 left-1/2 -translate-x-1/2 z-50 rounded-full bg-white/95 dark:bg-neutral-900/95 backdrop-blur-xl border border-neutral-300/80 dark:border-neutral-700/80 shadow-[0_16px_36px_-8px_rgba(0,0,0,0.25),inset_0_1px_0_rgba(255,255,255,0.9)] dark:shadow-[0_16px_36px_-8px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.1)] px-4 py-2 flex items-center gap-3.5 text-xs select-none pointer-events-auto animate-in fade-in slide-in-from-top-3 duration-300"><div class="flex items-center gap-2"><span class="px-2.5 py-1 rounded-full text-[11px] font-mono tracking-wide bg-neutral-100 dark:bg-neutral-800/90 text-neutral-700 dark:text-neutral-300 border border-neutral-200/60 dark:border-neutral-700/60 flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"> min read</span></div><div class="h-4 w-px bg-neutral-200 dark:bg-neutral-800"></div><div class="flex items-center gap-1 bg-neutral-100/90 dark:bg-neutral-800/90 p-0.5 rounded-full border border-neutral-200/70 dark:border-neutral-700/60"><button type=button>Serif</button><button type=button>Sans</button><button type=button>Mono</button></div><div class="flex items-center gap-1 bg-neutral-100/90 dark:bg-neutral-800/90 p-0.5 rounded-full border border-neutral-200/70 dark:border-neutral-700/60"><button type=button class="w-5 h-5 flex items-center justify-center rounded-full text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-700 transition-colors"title="Decrease font size"></button><span class="px-1 text-[10.5px] font-mono font-medium text-neutral-600 dark:text-neutral-300">px</span><button type=button class="w-5 h-5 flex items-center justify-center rounded-full text-neutral-600 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-700 transition-colors"title="Increase font size"></button></div><div class="flex items-center gap-1.5 bg-neutral-100/90 dark:bg-neutral-800/90 p-1 rounded-full border border-neutral-200/70 dark:border-neutral-700/60"><button type=button title="Light Theme"></button><button type=button title="Sepia Theme"></button><button type=button title="Dark Theme"></button></div><div class="flex items-center gap-1.5"><div class="h-4 w-px bg-neutral-200 dark:bg-neutral-800"></div><button type=button class="w-6 h-6 flex items-center justify-center rounded-full text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-colors"title="Close Reader Mode (Esc)">`);
+function ReaderCapsuleHeader(props) {
+  return (() => {
+    var _el$ = _tmpl$4$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$7 = _el$2.nextSibling, _el$8 = _el$7.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$0.nextSibling, _el$10 = _el$8.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling, _el$15 = _el$10.nextSibling, _el$16 = _el$15.firstChild, _el$17 = _el$16.nextSibling, _el$18 = _el$17.nextSibling, _el$19 = _el$15.nextSibling, _el$23 = _el$19.firstChild, _el$24 = _el$23.nextSibling;
+    insert(_el$3, createComponent(Clock, {
+      "class": "w-3 h-3 text-neutral-500 dark:text-neutral-400"
+    }), _el$4);
+    insert(_el$3, () => props.readingTimeMinutes || 3, _el$4);
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return props.url;
+      },
+      get children() {
+        var _el$5 = _tmpl$$d();
+        _el$5.firstChild;
+        insert(_el$5, createComponent(ExternalLink, {
+          "class": "w-2.5 h-2.5"
+        }), null);
+        createRenderEffect(() => setAttribute(_el$5, "href", props.url));
+        return _el$5;
+      }
+    }), null);
+    _el$9.$$click = () => props.onFontFamilyChange("serif");
+    _el$0.$$click = () => props.onFontFamilyChange("sans");
+    _el$1.$$click = () => props.onFontFamilyChange("mono");
+    _el$11.$$click = () => props.onFontSizeChange(Math.max(14, props.fontSize - 2));
+    insert(_el$11, createComponent(Minus, {
+      "class": "w-3 h-3"
+    }));
+    insert(_el$12, () => props.fontSize, _el$13);
+    _el$14.$$click = () => props.onFontSizeChange(Math.min(28, props.fontSize + 2));
+    insert(_el$14, createComponent(Plus, {
+      "class": "w-3 h-3"
+    }));
+    _el$16.$$click = () => props.onThemeChange("light");
+    _el$17.$$click = () => props.onThemeChange("sepia");
+    _el$18.$$click = () => props.onThemeChange("dark");
+    insert(_el$19, createComponent(Show, {
+      get when() {
+        return props.onCopyMarkdown;
+      },
+      get children() {
+        var _el$20 = _tmpl$2$6(), _el$21 = _el$20.firstChild;
+        addEventListener(_el$20, "click", props.onCopyMarkdown, true);
+        insert(_el$20, createComponent(Copy, {
+          "class": "w-3 h-3"
+        }), _el$21);
+        return _el$20;
+      }
+    }), _el$23);
+    insert(_el$19, createComponent(Show, {
+      get when() {
+        return props.onToggleTts;
+      },
+      get children() {
+        var _el$22 = _tmpl$3$3();
+        addEventListener(_el$22, "click", props.onToggleTts, true);
+        insert(_el$22, createComponent(Show, {
+          get when() {
+            return props.isSpeaking;
+          },
+          get fallback() {
+            return createComponent(Volume2, {
+              "class": "w-3.5 h-3.5"
+            });
+          },
+          get children() {
+            return createComponent(VolumeX, {
+              "class": "w-3.5 h-3.5"
+            });
+          }
+        }));
+        createRenderEffect((_p$) => {
+          var _v$ = `w-6 h-6 flex items-center justify-center rounded-full transition-colors ${props.isSpeaking ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/40 animate-pulse" : "text-neutral-500 hover:text-neutral-950 dark:text-neutral-400 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800"}`, _v$2 = props.isSpeaking ? "Stop listening" : "Listen to article (TTS)";
+          _v$ !== _p$.e && className(_el$22, _p$.e = _v$);
+          _v$2 !== _p$.t && setAttribute(_el$22, "title", _p$.t = _v$2);
+          return _p$;
+        }, {
+          e: void 0,
+          t: void 0
+        });
+        return _el$22;
+      }
+    }), _el$23);
+    addEventListener(_el$24, "click", props.onClose, true);
+    insert(_el$24, createComponent(X, {
+      "class": "w-3.5 h-3.5"
+    }));
+    createRenderEffect((_p$) => {
+      var _v$3 = `px-2 py-0.5 rounded-full text-[10.5px] font-medium transition-colors ${props.fontFamily === "serif" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900" : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-950"}`, _v$4 = `px-2 py-0.5 rounded-full text-[10.5px] font-medium transition-colors ${props.fontFamily === "sans" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900" : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-950"}`, _v$5 = `px-2 py-0.5 rounded-full text-[10.5px] font-medium transition-colors ${props.fontFamily === "mono" ? "bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900" : "text-neutral-600 dark:text-neutral-400 hover:text-neutral-950"}`, _v$6 = `w-4 h-4 rounded-full bg-white border border-neutral-300 transition-all ${props.theme === "light" ? "ring-2 ring-neutral-900 dark:ring-neutral-100 scale-110 shadow-sm" : "opacity-70 hover:opacity-100"}`, _v$7 = `w-4 h-4 rounded-full bg-[#fbf0d9] border border-[#e6d0aa] transition-all ${props.theme === "sepia" ? "ring-2 ring-neutral-900 dark:ring-neutral-100 scale-110 shadow-sm" : "opacity-70 hover:opacity-100"}`, _v$8 = `w-4 h-4 rounded-full bg-neutral-950 border border-neutral-700 transition-all ${props.theme === "dark" ? "ring-2 ring-neutral-100 scale-110 shadow-sm" : "opacity-70 hover:opacity-100"}`;
+      _v$3 !== _p$.e && className(_el$9, _p$.e = _v$3);
+      _v$4 !== _p$.t && className(_el$0, _p$.t = _v$4);
+      _v$5 !== _p$.a && className(_el$1, _p$.a = _v$5);
+      _v$6 !== _p$.o && className(_el$16, _p$.o = _v$6);
+      _v$7 !== _p$.i && className(_el$17, _p$.i = _v$7);
+      _v$8 !== _p$.n && className(_el$18, _p$.n = _v$8);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0,
+      i: void 0,
+      n: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+function htmlToMarkdown(html, title, url) {
+  if (typeof document === "undefined") return "";
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  const lines = [];
+  if (title) lines.push(`# ${title}
+`);
+  if (url) lines.push(`> Source: ${url}
+`);
+  div.childNodes.forEach((node) => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node;
+      const tag = el.tagName.toLowerCase();
+      const text = (el.innerText || "").trim();
+      if (!text) return;
+      if (tag === "h1") lines.push(`
+# ${text}
+`);
+      else if (tag === "h2") lines.push(`
+## ${text}
+`);
+      else if (tag === "h3") lines.push(`
+### ${text}
+`);
+      else if (tag === "h4" || tag === "h5" || tag === "h6") lines.push(`
+#### ${text}
+`);
+      else if (tag === "p") lines.push(`
+${text}
+`);
+      else if (tag === "blockquote") lines.push(`
+> ${text}
+`);
+      else if (tag === "pre") lines.push(`
+\`\`\`
+${text}
+\`\`\`
+`);
+      else if (tag === "ul" || tag === "ol") {
+        const items = Array.from(el.querySelectorAll("li")).map((li, i) => tag === "ol" ? `${i + 1}. ${(li.innerText || "").trim()}` : `- ${(li.innerText || "").trim()}`).filter(Boolean).join("\n");
+        if (items) lines.push(`
+${items}
+`);
+      }
+    }
+  });
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+const STORAGE_KEY$1 = "apposition:reader-preferences";
+function loadReaderPreferences() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(STORAGE_KEY$1);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return {
+          fontSize: typeof parsed.fontSize === "number" ? parsed.fontSize : 18,
+          fontFamily: ["serif", "sans", "mono"].includes(parsed.fontFamily) ? parsed.fontFamily : "serif",
+          theme: ["light", "sepia", "dark"].includes(parsed.theme) ? parsed.theme : "light"
+        };
+      }
+    }
+  } catch {
+  }
+  const isDark = typeof document !== "undefined" && document.documentElement.classList.contains("dark");
+  return {
+    fontSize: 18,
+    fontFamily: "serif",
+    theme: isDark ? "dark" : "light"
+  };
+}
+function saveReaderPreferences(prefs) {
+  try {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem(STORAGE_KEY$1, JSON.stringify(prefs));
+    }
+  } catch {
+  }
+}
+var _tmpl$$c = /* @__PURE__ */ template(`<p class="text-sm font-medium opacity-75 tracking-tight">By `), _tmpl$2$5 = /* @__PURE__ */ template(`<div data-overlay-chrome=true role=dialog aria-modal=true class="fixed inset-0 z-[100000] flex flex-col items-center justify-start bg-black/60 backdrop-blur-md animate-in fade-in duration-200 select-none pointer-events-auto"><div class="fixed top-[58px] left-1/2 -translate-x-1/2 z-50 w-36 h-[2px] bg-neutral-200/50 dark:bg-neutral-800/50 rounded-full overflow-hidden"><div class="h-full bg-neutral-900 dark:bg-neutral-100 transition-all duration-100"></div></div><div tabindex=0 data-overlay-chrome=true><div class="max-w-3xl mx-auto w-full select-text"><article><header class="space-y-4 pb-8 border-b border-neutral-300/40 dark:border-neutral-700/40"><h1 class="text-3xl sm:text-4xl font-bold tracking-tight leading-tight"></h1></header><div>`);
+function ReaderModeModal() {
+  const initialPrefs = loadReaderPreferences();
+  const [article, setArticle] = createSignal(null);
+  const [fontSize, setFontSize] = createSignal(initialPrefs.fontSize);
+  const [fontFamily, setFontFamily] = createSignal(initialPrefs.fontFamily);
+  const [scrollProgress, setScrollProgress] = createSignal(0);
+  const [isSpeaking, setIsSpeaking] = createSignal(false);
+  const [theme, setTheme] = createSignal(initialPrefs.theme);
+  let scrollContainerRef;
+  createEffect(() => {
+    saveReaderPreferences({
+      fontSize: fontSize(),
+      fontFamily: fontFamily(),
+      theme: theme()
+    });
+  });
+  const stopTts = () => {
+    if (typeof window !== "undefined" && "speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+    }
+  };
+  const close = () => {
+    stopTts();
+    setArticle(null);
+  };
+  const toggleTts = () => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    if (isSpeaking()) {
+      stopTts();
+      return;
+    }
+    const cur = article();
+    if (!cur?.contentHtml) return;
+    const text = `${cur.title}. ${cur.contentHtml.replace(/<[^>]+>/g, " ")}`;
+    const u = new SpeechSynthesisUtterance(text.slice(0, 4e3));
+    u.onend = () => setIsSpeaking(false);
+    u.onerror = () => setIsSpeaking(false);
+    setIsSpeaking(true);
+    window.speechSynthesis.speak(u);
+  };
+  const copyMarkdown = () => {
+    const cur = article();
+    if (!cur) return;
+    const md = htmlToMarkdown(cur.contentHtml, cur.title, cur.url);
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(md);
+      window.dispatchEvent(new CustomEvent("app:toast", {
+        detail: {
+          message: "Distilled Markdown copied to clipboard",
+          type: "success"
+        }
+      }));
+    }
+  };
+  onMount(() => {
+    const handleShow = (e) => {
+      if (e.detail?.contentHtml) {
+        setArticle(e.detail);
+      }
+    };
+    window.addEventListener("app:show-reader-mode", handleShow);
+    const handleKeyDown = (e) => {
+      if (!article()) return;
+      if (e.key === "Escape") close();
+      else if (e.key === "t" || e.key === "T") setTheme((p) => p === "light" ? "sepia" : p === "sepia" ? "dark" : "light");
+      else if (e.key === "+" || e.key === "=") setFontSize((s) => Math.min(28, s + 2));
+      else if (e.key === "-" || e.key === "_") setFontSize((s) => Math.max(14, s - 2));
+      else if (e.key === "j" || e.key === "J") scrollContainerRef?.scrollBy({
+        top: 120,
+        behavior: "smooth"
+      });
+      else if (e.key === "k" || e.key === "K") scrollContainerRef?.scrollBy({
+        top: -120,
+        behavior: "smooth"
+      });
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => {
+      window.removeEventListener("app:show-reader-mode", handleShow);
+      window.removeEventListener("keydown", handleKeyDown);
+    });
+  });
+  createEffect(() => {
+    if (article() && scrollContainerRef) {
+      scrollContainerRef.scrollTop = 0;
+      scrollContainerRef.focus();
+    }
+  });
+  const fontClass = () => fontFamily() === "sans" ? "font-sans" : fontFamily() === "mono" ? "font-mono" : "font-serif";
+  const themeClasses = () => theme() === "light" ? "bg-[#fafaf9] text-neutral-900 selection:bg-neutral-200 border-neutral-200/80" : theme() === "sepia" ? "bg-[#fbf0d9] text-[#43321d] selection:bg-[#edd4ae] border-[#ebd3ac]" : "bg-[#121214] text-neutral-100 selection:bg-neutral-800 border-neutral-800/80";
+  const articleSurfaceClasses = () => theme() === "light" ? "bg-white text-neutral-900 shadow-[0_20px_60px_-15px_rgba(0,0,0,0.06),0_0_0_1px_rgba(0,0,0,0.04)]" : theme() === "sepia" ? "bg-[#f7ebd0] text-[#3d2e1b] shadow-[0_20px_60px_-15px_rgba(90,60,20,0.08),0_0_0_1px_rgba(150,110,60,0.12)]" : "bg-[#18181b] text-neutral-100 shadow-[0_25px_70px_-15px_rgba(0,0,0,0.6),0_0_0_1px_rgba(255,255,255,0.06)]";
+  return createComponent(Show, {
+    get when() {
+      return article();
+    },
+    get children() {
+      return createComponent(Portal, {
+        get children() {
+          var _el$ = _tmpl$2$5(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$2.nextSibling, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$8 = _el$7.firstChild, _el$1 = _el$7.nextSibling;
+          _el$.$$click = (e) => {
+            if (e.target === e.currentTarget) close();
+          };
+          insert(_el$, createComponent(ReaderCapsuleHeader, {
+            get readingTimeMinutes() {
+              return article()?.readingTimeMinutes;
+            },
+            get url() {
+              return article()?.url;
+            },
+            get fontSize() {
+              return fontSize();
+            },
+            onFontSizeChange: setFontSize,
+            get fontFamily() {
+              return fontFamily();
+            },
+            onFontFamilyChange: setFontFamily,
+            get theme() {
+              return theme();
+            },
+            onThemeChange: setTheme,
+            onCopyMarkdown: copyMarkdown,
+            get isSpeaking() {
+              return isSpeaking();
+            },
+            onToggleTts: toggleTts,
+            onClose: close
+          }), _el$2);
+          _el$4.addEventListener("scroll", (e) => {
+            const target = e.currentTarget;
+            const max = target.scrollHeight - target.clientHeight;
+            setScrollProgress(max > 0 ? target.scrollTop / max * 100 : 0);
+          });
+          use((el) => scrollContainerRef = el, _el$4);
+          insert(_el$8, () => article()?.title);
+          insert(_el$7, createComponent(Show, {
+            get when() {
+              return article()?.byline;
+            },
+            get children() {
+              var _el$9 = _tmpl$$c();
+              _el$9.firstChild;
+              insert(_el$9, () => article()?.byline, null);
+              return _el$9;
+            }
+          }), null);
+          createRenderEffect((_p$) => {
+            var _v$ = `${scrollProgress()}%`, _v$2 = `w-full flex-1 overflow-y-auto overscroll-contain transition-colors duration-200 outline-none pt-24 pb-20 px-4 sm:px-8 ${themeClasses()}`, _v$3 = `p-8 sm:p-14 rounded-2xl border transition-all duration-300 ${articleSurfaceClasses()}`, _v$4 = `reader-content leading-relaxed space-y-5 pt-8 ${fontClass()} [&_p]:mb-4 [&_p]:leading-relaxed [&_h2]:text-2xl [&_h2]:font-bold [&_h2]:mt-8 [&_h2]:mb-3 [&_h3]:text-xl [&_h3]:font-semibold [&_h3]:mt-6 [&_h3]:mb-2 [&_h4]:text-lg [&_h4]:font-semibold [&_h4]:mt-4 [&_ul]:list-disc [&_ul]:pl-6 [&_ul]:my-4 [&_ol]:list-decimal [&_ol]:pl-6 [&_ol]:my-4 [&_li]:mb-1 [&_blockquote]:border-l-4 [&_blockquote]:border-neutral-400 [&_blockquote]:pl-4 [&_blockquote]:italic [&_blockquote]:my-4 [&_pre]:p-4 [&_pre]:rounded-xl [&_pre]:bg-neutral-100 dark:[&_pre]:bg-neutral-800/90 [&_pre]:font-mono [&_pre]:text-sm [&_pre]:overflow-x-auto`, _v$5 = `${fontSize()}px`, _v$6 = article()?.contentHtml;
+            _v$ !== _p$.e && setStyleProperty(_el$3, "width", _p$.e = _v$);
+            _v$2 !== _p$.t && className(_el$4, _p$.t = _v$2);
+            _v$3 !== _p$.a && className(_el$6, _p$.a = _v$3);
+            _v$4 !== _p$.o && className(_el$1, _p$.o = _v$4);
+            _v$5 !== _p$.i && setStyleProperty(_el$1, "font-size", _p$.i = _v$5);
+            _v$6 !== _p$.n && (_el$1.innerHTML = _p$.n = _v$6);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0,
+            a: void 0,
+            o: void 0,
+            i: void 0,
+            n: void 0
+          });
+          return _el$;
+        }
+      });
+    }
+  });
+}
+delegateEvents(["click"]);
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-CjY2Da0j.js"), true ? [] : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-DRZGYbQz.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-a3GhJBSN.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-Baly0AEu.js"), true ? [] : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
@@ -31338,7 +32258,1475 @@ function AppModals(props) {
     get ws() {
       return props.ws;
     }
-  }), createComponent(ScreenSourcePickerModal, {})];
+  }), createComponent(ScreenSourcePickerModal, {}), createComponent(UpdateNotificationToast, {}), createComponent(InteractiveEyedropper, {}), createComponent(ReaderModeModal, {})];
+}
+var _tmpl$$b = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed inset-0 z-[9990] bg-transparent pointer-events-auto cursor-default select-none">`);
+function LightDismissScrim(props) {
+  const handleDismiss = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    props.onDismiss();
+  };
+  return (() => {
+    var _el$ = _tmpl$$b();
+    _el$.$$contextmenu = handleDismiss;
+    _el$.$$click = handleDismiss;
+    _el$.$$mousedown = handleDismiss;
+    _el$.$$pointerdown = handleDismiss;
+    return _el$;
+  })();
+}
+delegateEvents(["pointerdown", "mousedown", "click", "contextmenu"]);
+var _tmpl$$a = /* @__PURE__ */ template(`<div class="flex items-center justify-between px-1 py-0.5 mb-0.5 bg-neutral-100/70 dark:bg-neutral-900/60 rounded-[8px] border border-neutral-200/60 dark:border-neutral-800/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.6)] dark:shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"><button type=button title="Go Back"class="w-7 h-7 flex items-center justify-center rounded-[6px] text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-all active:scale-[0.92] disabled:opacity-25 disabled:pointer-events-none"></button><button type=button title="Go Forward"class="w-7 h-7 flex items-center justify-center rounded-[6px] text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-all active:scale-[0.92] disabled:opacity-25 disabled:pointer-events-none"></button><button type=button title="Reload Pane (R) - Shift+Click for Hard Reload"class="w-7 h-7 flex items-center justify-center rounded-[6px] text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-all active:scale-[0.92] disabled:opacity-25 disabled:pointer-events-none"></button><button type=button title="Copy Page URL (C)"class="w-7 h-7 flex items-center justify-center rounded-[6px] text-neutral-600 dark:text-neutral-300 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-all active:scale-[0.92] disabled:opacity-25 disabled:pointer-events-none"></button><button type=button title="Close Pane (W)"class="w-7 h-7 flex items-center justify-center rounded-[6px] text-neutral-600 dark:text-neutral-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-500/10 transition-all active:scale-[0.92]">`);
+function QuickActionBar(props) {
+  const isBlank = () => !props.pageURL;
+  const handleNav = (dir) => {
+    if (isBlank()) return;
+    const el = document.getElementById("webview-" + props.paneId);
+    if (dir === "back" && typeof el?.canGoBack === "function" && el.canGoBack()) {
+      try {
+        el.goBack();
+        return;
+      } catch {
+      }
+    } else if (dir === "forward" && typeof el?.canGoForward === "function" && el.canGoForward()) {
+      try {
+        el.goForward();
+        return;
+      } catch {
+      }
+    }
+    window.dispatchEvent(new CustomEvent("pane.nav", {
+      detail: {
+        paneId: props.paneId,
+        direction: dir
+      }
+    }));
+  };
+  return (() => {
+    var _el$ = _tmpl$$a(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling, _el$5 = _el$4.nextSibling, _el$6 = _el$5.nextSibling;
+    _el$2.$$click = () => handleNav("back");
+    insert(_el$2, createComponent(ArrowLeft, {
+      "class": "w-3.5 h-3.5"
+    }));
+    _el$3.$$click = () => handleNav("forward");
+    insert(_el$3, createComponent(ArrowRight, {
+      "class": "w-3.5 h-3.5"
+    }));
+    _el$4.$$click = (e) => props.onReload(Boolean(e.shiftKey));
+    insert(_el$4, createComponent(RefreshCw, {
+      "class": "w-3.5 h-3.5"
+    }));
+    addEventListener(_el$5, "click", props.onCopyUrl, true);
+    insert(_el$5, createComponent(Copy, {
+      "class": "w-3.5 h-3.5"
+    }));
+    addEventListener(_el$6, "click", props.onClosePane, true);
+    insert(_el$6, createComponent(X, {
+      "class": "w-3.5 h-3.5"
+    }));
+    createRenderEffect((_p$) => {
+      var _v$ = isBlank(), _v$2 = isBlank(), _v$3 = isBlank(), _v$4 = isBlank();
+      _v$ !== _p$.e && (_el$2.disabled = _p$.e = _v$);
+      _v$2 !== _p$.t && (_el$3.disabled = _p$.t = _v$2);
+      _v$3 !== _p$.a && (_el$4.disabled = _p$.a = _v$3);
+      _v$4 !== _p$.o && (_el$5.disabled = _p$.o = _v$4);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0,
+      a: void 0,
+      o: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$9 = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-2">`), _tmpl$2$4 = /* @__PURE__ */ template(`<button><div class="flex items-center gap-2 truncate"><span class=truncate>`);
+function ContextMenuItem(props) {
+  const IconComp = props.icon;
+  return (() => {
+    var _el$ = _tmpl$2$4(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    addEventListener(_el$, "mouseleave", props.onMouseLeave);
+    addEventListener(_el$, "mouseenter", props.onMouseEnter);
+    addEventListener(_el$, "click", props.onClick, true);
+    insert(_el$2, createComponent(IconComp, {
+      "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
+    }), _el$3);
+    insert(_el$3, () => props.label);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.badge;
+      },
+      get children() {
+        var _el$4 = _tmpl$$9();
+        insert(_el$4, () => props.badge);
+        return _el$4;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$, `w-full flex items-center justify-between px-2.5 py-1.5 rounded-[7px] text-[12px] font-medium transition-all duration-100 group select-none active:scale-[0.98] outline-none focus-visible:bg-neutral-200/80 dark:focus-visible:bg-neutral-800 ${props.danger ? "text-neutral-700 dark:text-neutral-300 hover:text-neutral-950 dark:hover:text-white hover:bg-neutral-200/70 dark:hover:bg-neutral-800" : "text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"}`));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$8 = /* @__PURE__ */ template(`<div class="w-full h-px bg-neutral-200/80 dark:bg-neutral-800 my-0.5">`);
+function ContextSeparator() {
+  return _tmpl$$8();
+}
+var _tmpl$$7 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[10000] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.22),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[200px] max-w-[260px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100">`);
+function ContextSubmenu(props) {
+  const w = props.width || 215;
+  const h = props.height || 160;
+  const pos = createMemo(() => {
+    const vp = {
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
+    return calculateSubmenuPosition(props.parentRect, {
+      width: w,
+      height: h
+    }, vp, 8);
+  });
+  return createComponent(Portal, {
+    get children() {
+      var _el$ = _tmpl$$7(), _el$2 = _el$.firstChild;
+      _el$.$$contextmenu = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      _el$.$$click = (e) => e.stopPropagation();
+      addEventListener(_el$, "mouseleave", props.onMouseLeave);
+      addEventListener(_el$, "mouseenter", props.onMouseEnter);
+      insert(_el$2, () => props.children);
+      createRenderEffect((_p$) => {
+        var _v$ = `${pos().y}px`, _v$2 = `${pos().x}px`;
+        _v$ !== _p$.e && setStyleProperty(_el$, "top", _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$, "left", _p$.t = _v$2);
+        return _p$;
+      }, {
+        e: void 0,
+        t: void 0
+      });
+      return _el$;
+    }
+  });
+}
+delegateEvents(["click", "contextmenu"]);
+var _tmpl$$6 = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500">`), _tmpl$2$3 = /* @__PURE__ */ template(`<div class="relative w-full"><button type=button><div class="flex items-center gap-2 truncate"><span class=truncate></span></div><div class="flex items-center gap-1.5 shrink-0">`);
+function SubmenuItem(props) {
+  let itemRef;
+  const IconComp = props.icon;
+  const getRect = () => {
+    if (!itemRef) return {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0
+    };
+    const r = itemRef.getBoundingClientRect();
+    return {
+      x: r.left,
+      y: r.top,
+      width: r.width,
+      height: r.height
+    };
+  };
+  return (() => {
+    var _el$ = _tmpl$2$3(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$3.nextSibling;
+    _el$2.addEventListener("mouseenter", () => props.onOpen(getRect()));
+    _el$2.$$click = (e) => {
+      e.stopPropagation();
+      props.onOpen(getRect());
+    };
+    var _ref$ = itemRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$2) : itemRef = _el$2;
+    insert(_el$3, createComponent(IconComp, {
+      "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
+    }), _el$4);
+    insert(_el$4, () => props.label);
+    insert(_el$5, createComponent(Show, {
+      get when() {
+        return props.badge;
+      },
+      get children() {
+        var _el$6 = _tmpl$$6();
+        insert(_el$6, () => props.badge);
+        return _el$6;
+      }
+    }), null);
+    insert(_el$5, createComponent(ChevronRight, {
+      get ["class"]() {
+        return `w-3 h-3 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-transform duration-150 ${props.isOpen ? "rotate-90 text-neutral-900 dark:text-white" : ""}`;
+      }
+    }), null);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.isOpen;
+      },
+      get children() {
+        return createComponent(ContextSubmenu, {
+          get parentRect() {
+            return getRect();
+          },
+          get width() {
+            return props.submenuWidth || 215;
+          },
+          get height() {
+            return props.submenuHeight || 160;
+          },
+          get onMouseEnter() {
+            return props.onSubmenuMouseEnter;
+          },
+          get onMouseLeave() {
+            return props.onSubmenuMouseLeave;
+          },
+          get children() {
+            return props.children;
+          }
+        });
+      }
+    }), null);
+    createRenderEffect(() => className(_el$2, `w-full flex items-center justify-between px-2.5 py-1.5 rounded-[7px] text-[12px] font-medium transition-all duration-100 group select-none active:scale-[0.98] outline-none ${props.isOpen ? "bg-neutral-200/80 dark:bg-neutral-800 text-neutral-950 dark:text-white" : "text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]"}`));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+function ImageActionsSubmenu(props) {
+  const showToast = (message, type = "success") => {
+    window.dispatchEvent(new CustomEvent("app:toast", {
+      detail: {
+        message,
+        type
+      }
+    }));
+  };
+  const handleCopyImage = async () => {
+    props.onCloseMenu();
+    try {
+      if (window.api?.view?.copyImage) {
+        const coordX = typeof props.guestX === "number" ? props.guestX : props.x;
+        const coordY = typeof props.guestY === "number" ? props.guestY : props.y;
+        const res = await window.api.view.copyImage(props.paneId || "", coordX, coordY, props.srcURL);
+        if (res?.success) {
+          showToast("Image copied to clipboard");
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Native copyImage failed, using fallback:", err);
+    }
+    try {
+      const resp = await fetch(props.srcURL);
+      const blob = await resp.blob();
+      await navigator.clipboard.write([new ClipboardItem({
+        [blob.type || "image/png"]: blob
+      })]);
+      showToast("Image copied to clipboard", "success");
+    } catch {
+      showToast("Unable to copy image to clipboard", "error");
+    }
+  };
+  return createComponent(SubmenuItem, {
+    icon: Image$1,
+    label: "Image Actions",
+    get isOpen() {
+      return props.isOpen;
+    },
+    get onOpen() {
+      return props.onOpen;
+    },
+    get onClose() {
+      return props.onClose;
+    },
+    get onSubmenuMouseEnter() {
+      return props.onSubmenuMouseEnter;
+    },
+    get onSubmenuMouseLeave() {
+      return props.onSubmenuMouseLeave;
+    },
+    submenuWidth: 210,
+    submenuHeight: 110,
+    get children() {
+      return [createComponent(ContextMenuItem, {
+        icon: Copy,
+        label: "Copy Image",
+        onClick: handleCopyImage
+      }), createComponent(ContextMenuItem, {
+        icon: Image$1,
+        label: "Copy Image Address",
+        onClick: () => {
+          props.onCopyText(props.srcURL);
+          showToast("Image address copied to clipboard");
+        }
+      }), createComponent(ContextMenuItem, {
+        icon: ExternalLink,
+        label: "Open Image in New Tab",
+        onClick: () => props.onOpenNewPane(props.srcURL)
+      })];
+    }
+  });
+}
+function LinkActionsSubmenu(props) {
+  const showToast = (message, type = "success") => {
+    window.dispatchEvent(new CustomEvent("app:toast", {
+      detail: {
+        message,
+        type
+      }
+    }));
+  };
+  return createComponent(SubmenuItem, {
+    icon: Link,
+    label: "Link Actions",
+    get isOpen() {
+      return props.isOpen;
+    },
+    get onOpen() {
+      return props.onOpen;
+    },
+    get onClose() {
+      return props.onClose;
+    },
+    get onSubmenuMouseEnter() {
+      return props.onSubmenuMouseEnter;
+    },
+    get onSubmenuMouseLeave() {
+      return props.onSubmenuMouseLeave;
+    },
+    submenuWidth: 200,
+    submenuHeight: 80,
+    get children() {
+      return [createComponent(ContextMenuItem, {
+        icon: ExternalLink,
+        label: "Open Link in New Tab",
+        onClick: () => props.onOpenNewPane(props.linkURL)
+      }), createComponent(ContextMenuItem, {
+        icon: Link,
+        label: "Copy Link Address",
+        onClick: () => {
+          props.onCopyText(props.linkURL);
+          showToast("Link address copied to clipboard");
+        }
+      })];
+    }
+  });
+}
+function ContextualActions(props) {
+  const hasItems = () => Boolean(props.data.selectionText || props.data.linkURL || props.data.srcURL);
+  return createComponent(Show, {
+    get when() {
+      return hasItems();
+    },
+    get children() {
+      return [createComponent(Show, {
+        get when() {
+          return props.data.selectionText;
+        },
+        get children() {
+          return [createComponent(ContextMenuItem, {
+            icon: Sparkles,
+            get label() {
+              return `Ask Cascade about "${props.data.selectionText.slice(0, 12)}${props.data.selectionText.length > 12 ? "..." : ""}"`;
+            },
+            badge: "Ctrl+K",
+            onClick: () => {
+              window.dispatchEvent(new CustomEvent("app:prompt-cascade-profile", {
+                detail: {
+                  initialPrompt: `Explain or summarize this selection:
+
+"${props.data.selectionText}"`
+                }
+              }));
+              props.onClose();
+            }
+          }), createComponent(ContextMenuItem, {
+            icon: Search,
+            get label() {
+              return `Search for "${props.data.selectionText.slice(0, 12)}${props.data.selectionText.length > 12 ? "..." : ""}"`;
+            },
+            onClick: () => props.onOpenNewPane(`https://www.google.com/search?q=${encodeURIComponent(props.data.selectionText)}`)
+          })];
+        }
+      }), createComponent(Show, {
+        get when() {
+          return props.data.linkURL;
+        },
+        get children() {
+          return createComponent(LinkActionsSubmenu, {
+            get linkURL() {
+              return props.data.linkURL;
+            },
+            get isOpen() {
+              return props.activeSubmenu() === "linkActions";
+            },
+            onOpen: (rect) => props.onOpenSubmenu("linkActions", rect),
+            get onClose() {
+              return props.onCloseSubmenu;
+            },
+            get onSubmenuMouseEnter() {
+              return props.onSubmenuMouseEnter;
+            },
+            get onSubmenuMouseLeave() {
+              return props.onSubmenuMouseLeave;
+            },
+            get onOpenNewPane() {
+              return props.onOpenNewPane;
+            },
+            get onCopyText() {
+              return props.onCopyText;
+            }
+          });
+        }
+      }), createComponent(Show, {
+        get when() {
+          return props.data.srcURL;
+        },
+        get children() {
+          return createComponent(ImageActionsSubmenu, {
+            get paneId() {
+              return props.data.paneId;
+            },
+            get x() {
+              return props.data.x;
+            },
+            get y() {
+              return props.data.y;
+            },
+            get guestX() {
+              return props.data.guestX;
+            },
+            get guestY() {
+              return props.data.guestY;
+            },
+            get srcURL() {
+              return props.data.srcURL;
+            },
+            get isOpen() {
+              return props.activeSubmenu() === "imageActions";
+            },
+            onOpen: (rect) => props.onOpenSubmenu("imageActions", rect),
+            get onClose() {
+              return props.onCloseSubmenu;
+            },
+            get onSubmenuMouseEnter() {
+              return props.onSubmenuMouseEnter;
+            },
+            get onSubmenuMouseLeave() {
+              return props.onSubmenuMouseLeave;
+            },
+            get onOpenNewPane() {
+              return props.onOpenNewPane;
+            },
+            get onCopyText() {
+              return props.onCopyText;
+            },
+            get onCloseMenu() {
+              return props.onClose;
+            }
+          });
+        }
+      }), createComponent(ContextSeparator, {})];
+    }
+  });
+}
+var _tmpl$$5 = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500 shrink-0 pl-1.5">`), _tmpl$2$2 = /* @__PURE__ */ template(`<div class="w-full flex items-center justify-between rounded-[7px] text-[12px] font-medium transition-all duration-100 group select-none relative"><button type=button class="flex-1 flex items-center justify-between px-2.5 py-1.5 rounded-l-[7px] text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.8)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] active:scale-[0.98] transition-all truncate"><div class="flex items-center gap-2 truncate"><span class=truncate></span></div></button><button type=button title="More options in this tool group"aria-label="More options in this tool group">`), _tmpl$3$2 = /* @__PURE__ */ template(`<kbd class="font-mono text-[9.5px] text-neutral-400 dark:text-neutral-500">`), _tmpl$4$1 = /* @__PURE__ */ template(`<button type=button><div class="flex items-center gap-2 truncate"><span class=truncate></span></div><div class="flex items-center gap-1.5 shrink-0">`);
+function RotarySplitButton(props) {
+  let rootRef;
+  const activeOption = () => props.options.find((o) => o.id === props.activeId) || props.options[0];
+  const getRect = () => {
+    if (!rootRef) return {
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0
+    };
+    const r = rootRef.getBoundingClientRect();
+    return {
+      x: r.left,
+      y: r.top,
+      width: r.width,
+      height: r.height
+    };
+  };
+  const handleExecuteActive = () => {
+    const active = activeOption();
+    if (active) {
+      active.onSelect();
+    }
+  };
+  const handleSelectOption = (opt) => {
+    props.onRotate(opt.id);
+    opt.onSelect();
+  };
+  return (() => {
+    var _el$ = _tmpl$2$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$6 = _el$2.nextSibling;
+    _el$.addEventListener("mouseleave", () => activeOption()?.onMouseLeave?.());
+    _el$.addEventListener("mouseenter", () => activeOption()?.onMouseEnter?.());
+    var _ref$ = rootRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : rootRef = _el$;
+    _el$2.$$click = handleExecuteActive;
+    insert(_el$3, createComponent(Show, {
+      get when() {
+        return activeOption();
+      },
+      children: (opt) => {
+        const IconComp = opt().icon;
+        return createComponent(IconComp, {
+          "class": "w-3.5 h-3.5 text-neutral-400 group-hover:text-neutral-800 dark:group-hover:text-neutral-100 transition-colors shrink-0"
+        });
+      }
+    }), _el$4);
+    insert(_el$4, () => activeOption()?.label);
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return activeOption()?.badge;
+      },
+      get children() {
+        var _el$5 = _tmpl$$5();
+        insert(_el$5, () => activeOption()?.badge);
+        return _el$5;
+      }
+    }), null);
+    _el$6.addEventListener("mouseenter", () => props.onOpenSubmenu(getRect()));
+    _el$6.$$click = (e) => {
+      e.stopPropagation();
+      props.onOpenSubmenu(getRect());
+    };
+    insert(_el$6, createComponent(ChevronRight, {
+      get ["class"]() {
+        return `w-3 h-3 transition-transform duration-150 ${props.isOpen ? "rotate-90 text-neutral-900 dark:text-white" : ""}`;
+      }
+    }));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return props.isOpen;
+      },
+      get children() {
+        return createComponent(ContextSubmenu, {
+          get parentRect() {
+            return getRect();
+          },
+          width: 220,
+          get height() {
+            return props.options.length * 32 + 10;
+          },
+          get onMouseEnter() {
+            return props.onSubmenuMouseEnter;
+          },
+          get onMouseLeave() {
+            return props.onSubmenuMouseLeave;
+          },
+          get children() {
+            return createComponent(For, {
+              get each() {
+                return props.options;
+              },
+              children: (opt) => {
+                const Icon2 = opt.icon;
+                const isCurrent = () => opt.id === props.activeId;
+                return (() => {
+                  var _el$7 = _tmpl$4$1(), _el$8 = _el$7.firstChild, _el$9 = _el$8.firstChild, _el$0 = _el$8.nextSibling;
+                  _el$7.addEventListener("mouseleave", () => opt.onMouseLeave?.());
+                  _el$7.addEventListener("mouseenter", () => opt.onMouseEnter?.());
+                  _el$7.$$click = () => handleSelectOption(opt);
+                  insert(_el$8, createComponent(Icon2, {
+                    "class": "w-3.5 h-3.5 text-neutral-400 shrink-0"
+                  }), _el$9);
+                  insert(_el$9, () => opt.label);
+                  insert(_el$0, createComponent(Show, {
+                    get when() {
+                      return opt.badge;
+                    },
+                    get children() {
+                      var _el$1 = _tmpl$3$2();
+                      insert(_el$1, () => opt.badge);
+                      return _el$1;
+                    }
+                  }), null);
+                  insert(_el$0, createComponent(Show, {
+                    get when() {
+                      return isCurrent();
+                    },
+                    get children() {
+                      return createComponent(Check, {
+                        "class": "w-3 h-3 text-neutral-700 dark:text-neutral-200"
+                      });
+                    }
+                  }), null);
+                  createRenderEffect(() => className(_el$7, `w-full flex items-center justify-between px-2.5 py-1.5 rounded-[7px] text-[12px] font-medium transition-all duration-100 select-none active:scale-[0.98] ${isCurrent() ? "bg-neutral-200/80 dark:bg-neutral-800 text-neutral-950 dark:text-white font-semibold" : "text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80"}`));
+                  return _el$7;
+                })();
+              }
+            });
+          }
+        });
+      }
+    }), null);
+    createRenderEffect(() => className(_el$6, `w-6 py-1.5 flex items-center justify-center rounded-r-[7px] text-neutral-400 hover:text-neutral-900 dark:hover:text-white hover:bg-neutral-200/80 dark:hover:bg-neutral-800 transition-all ${props.isOpen ? "bg-neutral-200/80 dark:bg-neutral-800 text-neutral-900 dark:text-white" : ""}`));
+    return _el$;
+  })();
+}
+delegateEvents(["click"]);
+var _tmpl$$4 = /* @__PURE__ */ template(`<button type=button class="w-full flex items-center justify-between px-2.5 py-1.5 rounded-[7px] text-[12px] font-medium text-neutral-800 dark:text-neutral-200 hover:bg-neutral-200/60 dark:hover:bg-neutral-800/80 transition-all select-none"><span class=truncate>`);
+function ProfilesSubmenu(props) {
+  const hasMultiple = () => (layoutStore.profiles || []).length > 1;
+  const currentProfileId = () => layoutStore.nodes[props.paneId]?.profileId || "main";
+  return createComponent(Show, {
+    get when() {
+      return hasMultiple();
+    },
+    get children() {
+      return createComponent(SubmenuItem, {
+        icon: Layers,
+        label: "Switch Profile",
+        get isOpen() {
+          return props.isOpen;
+        },
+        get onOpen() {
+          return props.onOpen;
+        },
+        get onClose() {
+          return props.onClose;
+        },
+        get onSubmenuMouseEnter() {
+          return props.onSubmenuMouseEnter;
+        },
+        get onSubmenuMouseLeave() {
+          return props.onSubmenuMouseLeave;
+        },
+        get children() {
+          return createComponent(For, {
+            get each() {
+              return layoutStore.profiles;
+            },
+            children: (prof) => (() => {
+              var _el$ = _tmpl$$4(), _el$2 = _el$.firstChild;
+              _el$.$$click = () => {
+                props.onUpdateProfile?.(props.paneId, prof.id);
+                props.onClose();
+              };
+              insert(_el$2, () => prof.name);
+              insert(_el$, createComponent(Show, {
+                get when() {
+                  return currentProfileId() === prof.id;
+                },
+                get children() {
+                  return createComponent(Check, {
+                    "class": "w-3.5 h-3.5 text-neutral-600 dark:text-neutral-300"
+                  });
+                }
+              }), null);
+              return _el$;
+            })()
+          });
+        }
+      });
+    }
+  });
+}
+delegateEvents(["click"]);
+function PageDevToolsSubmenu(props) {
+  const {
+    getDevice,
+    setDevice
+  } = useDeviceEmulationStore();
+  const currentDevice = () => getDevice(props.paneId);
+  const [isViewportOpen, setIsViewportOpen] = createSignal(false);
+  let viewportCloseTimer = null;
+  const getOrigin = () => {
+    try {
+      return props.pageURL ? new URL(props.pageURL).origin : "";
+    } catch {
+      return "";
+    }
+  };
+  const openViewportSubmenu = (_rect) => {
+    if (viewportCloseTimer) {
+      clearTimeout(viewportCloseTimer);
+      viewportCloseTimer = null;
+    }
+    props.onSubmenuMouseEnter?.();
+    setIsViewportOpen(true);
+  };
+  const closeViewportSubmenu = () => {
+    if (viewportCloseTimer) clearTimeout(viewportCloseTimer);
+    viewportCloseTimer = setTimeout(() => {
+      setIsViewportOpen(false);
+    }, 160);
+  };
+  const cancelViewportClose = () => {
+    if (viewportCloseTimer) {
+      clearTimeout(viewportCloseTimer);
+      viewportCloseTimer = null;
+    }
+    props.onSubmenuMouseEnter?.();
+  };
+  onCleanup(() => {
+    if (viewportCloseTimer) clearTimeout(viewportCloseTimer);
+  });
+  return createComponent(SubmenuItem, {
+    icon: CodeXml,
+    label: "Page & Dev Tools",
+    badge: "More",
+    get isOpen() {
+      return props.isOpen;
+    },
+    get onOpen() {
+      return props.onOpen;
+    },
+    get onClose() {
+      return props.onClose;
+    },
+    get onSubmenuMouseEnter() {
+      return props.onSubmenuMouseEnter;
+    },
+    get onSubmenuMouseLeave() {
+      return props.onSubmenuMouseLeave;
+    },
+    get children() {
+      return [createComponent(ContextMenuItem, {
+        icon: CodeXml,
+        label: "Inspect Elements",
+        badge: "D",
+        onClick: () => {
+          window.api?.viewOpenDevTools?.(props.paneId);
+          props.onClose();
+        }
+      }), createComponent(SubmenuItem, {
+        icon: Smartphone,
+        label: "Device Viewport",
+        get badge() {
+          return currentDevice() !== "desktop" ? "Active" : void 0;
+        },
+        get isOpen() {
+          return isViewportOpen();
+        },
+        onOpen: openViewportSubmenu,
+        onClose: closeViewportSubmenu,
+        onSubmenuMouseEnter: cancelViewportClose,
+        onSubmenuMouseLeave: closeViewportSubmenu,
+        get children() {
+          return [createComponent(ContextMenuItem, {
+            icon: Monitor,
+            label: "Desktop (Default)",
+            get badge() {
+              return currentDevice() === "desktop" ? "✓" : void 0;
+            },
+            onClick: () => {
+              setDevice(props.paneId, "desktop");
+              setIsViewportOpen(false);
+              props.onClose();
+            }
+          }), createComponent(ContextMenuItem, {
+            icon: Smartphone,
+            label: "iPhone 16 Pro",
+            get badge() {
+              return currentDevice() === "iphone_16_pro" ? "✓" : void 0;
+            },
+            onClick: () => {
+              setDevice(props.paneId, "iphone_16_pro");
+              setIsViewportOpen(false);
+              props.onClose();
+            }
+          }), createComponent(ContextMenuItem, {
+            icon: Smartphone,
+            label: "Google Pixel 9",
+            get badge() {
+              return currentDevice() === "pixel_9" ? "✓" : void 0;
+            },
+            onClick: () => {
+              setDevice(props.paneId, "pixel_9");
+              setIsViewportOpen(false);
+              props.onClose();
+            }
+          }), createComponent(ContextMenuItem, {
+            icon: Tablet,
+            label: "iPad Air",
+            get badge() {
+              return currentDevice() === "ipad_air" ? "✓" : void 0;
+            },
+            onClick: () => {
+              setDevice(props.paneId, "ipad_air");
+              setIsViewportOpen(false);
+              props.onClose();
+            }
+          })];
+        }
+      }), createComponent(ContextMenuItem, {
+        icon: Columns2,
+        label: "Open Mobile View Beside",
+        badge: "Split",
+        onClick: () => {
+          window.dispatchEvent(new CustomEvent("app:split-pane", {
+            detail: {
+              paneId: props.paneId,
+              direction: "right",
+              initialUrl: props.pageURL
+            }
+          }));
+          props.onClose();
+        }
+      }), createComponent(Show, {
+        get when() {
+          return getOrigin();
+        },
+        get children() {
+          return [createComponent(ContextSeparator, {}), createComponent(ContextMenuItem, {
+            icon: Trash2,
+            label: "Clear Cookies for Site",
+            danger: true,
+            get onClick() {
+              return props.onClearCookies;
+            }
+          })];
+        }
+      })];
+    }
+  });
+}
+const STORAGE_KEY = "apposition:context_menu_rotary";
+function useRotaryState() {
+  const loadInitial = () => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        assertValidRotaryState(parsed);
+        return parsed;
+      }
+    } catch {
+    }
+    return initialRotaryState;
+  };
+  const [rotaryState, setRotaryState] = createSignal(loadInitial());
+  const persist = (next) => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+    }
+  };
+  const rotateLayout = (tool) => {
+    const next = rotaryReducer(rotaryState(), { type: "ROTATE_LAYOUT", tool });
+    setRotaryState(next);
+    persist(next);
+  };
+  const rotatePageTool = (tool) => {
+    const next = rotaryReducer(rotaryState(), { type: "ROTATE_PAGE_TOOL", tool });
+    setRotaryState(next);
+    persist(next);
+  };
+  return {
+    rotaryState,
+    rotateLayout,
+    rotatePageTool
+  };
+}
+function useSubmenuCoordinator() {
+  const [activeSubmenu, setActiveSubmenu] = createSignal(null);
+  const [anchorRect, setAnchorRect] = createSignal(null);
+  let closeTimer2 = null;
+  let openTimer = null;
+  const cancelClose = () => {
+    if (closeTimer2) {
+      clearTimeout(closeTimer2);
+      closeTimer2 = null;
+    }
+  };
+  const cancelOpen = () => {
+    if (openTimer) {
+      clearTimeout(openTimer);
+      openTimer = null;
+    }
+  };
+  const openSubmenu = (id, rect, immediate = false) => {
+    cancelClose();
+    cancelOpen();
+    if (immediate) {
+      setAnchorRect(rect);
+      setActiveSubmenu(id);
+    } else {
+      openTimer = setTimeout(() => {
+        setAnchorRect(rect);
+        setActiveSubmenu(id);
+      }, 90);
+    }
+  };
+  const closeSubmenu = (immediate = false) => {
+    cancelOpen();
+    if (immediate) {
+      cancelClose();
+      setActiveSubmenu(null);
+      setAnchorRect(null);
+    } else {
+      cancelClose();
+      closeTimer2 = setTimeout(() => {
+        setActiveSubmenu(null);
+        setAnchorRect(null);
+      }, 160);
+    }
+  };
+  onCleanup(() => {
+    cancelClose();
+    cancelOpen();
+  });
+  return {
+    activeSubmenu,
+    anchorRect,
+    openSubmenu,
+    closeSubmenu,
+    cancelClose,
+    cancelOpen
+  };
+}
+function useContextMenuKeyboard(getContainerRef, handlers) {
+  const [focusedIndex, setFocusedIndex] = createSignal(-1);
+  const getActionButtons = () => {
+    const root2 = getContainerRef();
+    if (!root2) return [];
+    return Array.from(root2.querySelectorAll("button:not([disabled])"));
+  };
+  const focusButtonAtIndex = (idx) => {
+    const buttons = getActionButtons();
+    if (buttons.length === 0) return;
+    const clamped = (idx + buttons.length) % buttons.length;
+    setFocusedIndex(clamped);
+    buttons[clamped]?.focus();
+  };
+  onMount(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        focusButtonAtIndex(focusedIndex() + 1);
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        focusButtonAtIndex(focusedIndex() - 1);
+        return;
+      }
+      if (e.key === "Home") {
+        e.preventDefault();
+        focusButtonAtIndex(0);
+        return;
+      }
+      if (e.key === "End") {
+        e.preventDefault();
+        const btns = getActionButtons();
+        focusButtonAtIndex(btns.length - 1);
+        return;
+      }
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        const key = e.key.toLowerCase();
+        if (key === "r") {
+          e.preventDefault();
+          handlers.onReload(false);
+        } else if (key === "s") {
+          e.preventDefault();
+          handlers.onSplitRight();
+        } else if (key === "e") {
+          e.preventDefault();
+          handlers.onSplitDown();
+        } else if (key === "w") {
+          e.preventDefault();
+          handlers.onClosePane();
+        } else if (key === "d") {
+          e.preventDefault();
+          handlers.onInspect();
+        } else if (key === "f") {
+          e.preventDefault();
+          handlers.onMaximize();
+        } else if (key === "c") {
+          e.preventDefault();
+          handlers.onCopyUrl();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => window.removeEventListener("keydown", handleKeyDown));
+  });
+  return { focusedIndex };
+}
+function useContextMenuOptions(params) {
+  const layoutOptions = [
+    {
+      id: "split_right",
+      label: "Split Right",
+      icon: PanelRight,
+      badge: "S",
+      onSelect: () => {
+        params.onSplit?.("right");
+        params.onClose();
+      },
+      onMouseEnter: () => params.onSetSplitPreview("right"),
+      onMouseLeave: () => params.onSetSplitPreview(null)
+    },
+    {
+      id: "split_bottom",
+      label: "Split Down",
+      icon: PanelBottom,
+      badge: "E",
+      onSelect: () => {
+        params.onSplit?.("bottom");
+        params.onClose();
+      },
+      onMouseEnter: () => params.onSetSplitPreview("bottom"),
+      onMouseLeave: () => params.onSetSplitPreview(null)
+    },
+    {
+      id: "maximize",
+      label: params.isMaximized ? "Exit Full Screen" : "Maximize Pane",
+      icon: params.isMaximized ? Minimize : Maximize,
+      badge: "F",
+      onSelect: params.onToggleMaximize
+    }
+  ];
+  const showToast = (message, type = "success") => {
+    window.dispatchEvent(
+      new CustomEvent("app:toast", {
+        detail: { message, type }
+      })
+    );
+  };
+  const writeBlobToClipboard = async (dataUrl) => {
+    if (!dataUrl || typeof navigator === "undefined" || !navigator.clipboard?.write) return;
+    try {
+      const res = await fetch(dataUrl);
+      const blob = await res.blob();
+      await navigator.clipboard.write([
+        new ClipboardItem({ [blob.type]: blob })
+      ]);
+    } catch {
+    }
+  };
+  const pageToolOptions = [
+    {
+      id: "reader_mode",
+      label: "Reader Mode",
+      icon: BookOpen,
+      onSelect: async () => {
+        params.onClose();
+        try {
+          const res = await window.api?.view?.extractReaderMode?.(params.paneId);
+          if (res?.success && res?.article) {
+            window.dispatchEvent(
+              new CustomEvent("app:show-reader-mode", { detail: res.article })
+            );
+          } else {
+            showToast(res?.error || "No readable article detected on page", "error");
+          }
+        } catch {
+          showToast("Could not activate reader mode", "error");
+        }
+      }
+    },
+    {
+      id: "capture_full",
+      label: "Capture Full Page",
+      icon: Camera,
+      onSelect: async () => {
+        params.onClose();
+        try {
+          const res = await window.api?.view?.captureFullPage?.(params.paneId);
+          if (res?.success) {
+            await writeBlobToClipboard(res.dataUrl);
+            showToast("Full-page screenshot copied to clipboard", "success");
+          } else {
+            showToast(res?.error || "Failed to capture page", "error");
+          }
+        } catch {
+          showToast("Failed to capture page", "error");
+        }
+      }
+    },
+    {
+      id: "capture_viewport",
+      label: "Capture Viewport",
+      icon: Image$1,
+      onSelect: async () => {
+        params.onClose();
+        try {
+          const res = await window.api?.view?.captureViewport?.(params.paneId);
+          if (res?.success) {
+            await writeBlobToClipboard(res.dataUrl);
+            showToast("Viewport screenshot copied to clipboard", "success");
+          } else {
+            showToast(res?.error || "Failed to capture viewport", "error");
+          }
+        } catch {
+          showToast("Failed to capture viewport", "error");
+        }
+      }
+    },
+    {
+      id: "pick_color",
+      label: "Pick Color from Pane",
+      icon: Pipette,
+      onSelect: () => {
+        params.onClose();
+        window.dispatchEvent(
+          new CustomEvent("app:activate-eyedropper", {
+            detail: { paneId: params.paneId }
+          })
+        );
+      }
+    }
+  ];
+  return { layoutOptions, pageToolOptions };
+}
+var _tmpl$$3 = /* @__PURE__ */ template(`<div data-overlay-chrome=true class="fixed z-[9999] pointer-events-auto select-none font-sans"><div class="bg-[#fafaf9] dark:bg-[#18181b] border border-neutral-300/80 dark:border-neutral-700/80 rounded-[12px] p-1 shadow-[0_12px_32px_-8px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] dark:shadow-[0_12px_32px_-8px_rgba(0,0,0,0.7),0_0_0_1px_rgba(255,255,255,0.08),inset_0_1px_0_rgba(255,255,255,0.08)] min-w-[220px] max-w-[275px] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100">`);
+function FullContextMenu(props) {
+  let containerRef;
+  const menuWidth = 230;
+  const menuHeight = 240;
+  const isMaximized = () => layoutStore.maximizedPaneId === props.data.paneId;
+  const pos = () => clampMenuPosition({
+    x: props.data.x,
+    y: props.data.y
+  }, {
+    width: menuWidth,
+    height: menuHeight
+  }, {
+    width: window.innerWidth,
+    height: window.innerHeight
+  }, 8);
+  const close = () => {
+    window.dispatchEvent(new CustomEvent("app:preview-split-edge", {
+      detail: null
+    }));
+    props.onDismiss();
+  };
+  const copyText = (t) => {
+    navigator.clipboard.writeText(t);
+    close();
+  };
+  const handleReload = (hard) => {
+    window.api?.viewReload?.(props.data.paneId, hard);
+    window.dispatchEvent(new CustomEvent("pane.reloaded", {
+      detail: props.data.paneId
+    }));
+    close();
+  };
+  const openNewPane = (url) => {
+    window.dispatchEvent(new CustomEvent("app:open-in-new-pane", {
+      detail: url
+    }));
+    close();
+  };
+  const setSplitPreview = (dir) => {
+    window.dispatchEvent(new CustomEvent("app:preview-split-edge", {
+      detail: dir ? {
+        paneId: props.data.paneId,
+        direction: dir
+      } : null
+    }));
+  };
+  const handleClearCookies = async () => {
+    try {
+      const origin = props.data.pageURL ? new URL(props.data.pageURL).origin : "";
+      if (origin && window.api?.clearSiteData) {
+        await window.api.clearSiteData(origin);
+        window.api?.viewReload?.(props.data.paneId);
+      }
+    } catch {
+    }
+    close();
+  };
+  const toggleMaximize = () => {
+    setLayoutStore("maximizedPaneId", isMaximized() ? null : props.data.paneId);
+    close();
+  };
+  const {
+    rotaryState,
+    rotateLayout,
+    rotatePageTool
+  } = useRotaryState();
+  const {
+    activeSubmenu,
+    openSubmenu,
+    closeSubmenu,
+    cancelClose
+  } = useSubmenuCoordinator();
+  useContextMenuKeyboard(() => containerRef, {
+    onReload: handleReload,
+    onSplitRight: () => {
+      props.onSplit?.("right");
+      close();
+    },
+    onSplitDown: () => {
+      props.onSplit?.("bottom");
+      close();
+    },
+    onClosePane: () => {
+      props.onClosePane?.(props.data.paneId);
+      close();
+    },
+    onInspect: () => {
+      window.api?.viewOpenDevTools?.(props.data.paneId);
+      close();
+    },
+    onMaximize: toggleMaximize,
+    onCopyUrl: () => copyText(props.data.pageURL || ""),
+    onDismiss: close
+  });
+  const {
+    layoutOptions,
+    pageToolOptions
+  } = useContextMenuOptions({
+    paneId: props.data.paneId,
+    isMaximized: isMaximized(),
+    onSplit: props.onSplit,
+    onToggleMaximize: toggleMaximize,
+    onSetSplitPreview: setSplitPreview,
+    onClose: close
+  });
+  return (() => {
+    var _el$ = _tmpl$$3(), _el$2 = _el$.firstChild;
+    _el$.$$contextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    _el$.$$click = (e) => e.stopPropagation();
+    var _ref$ = containerRef;
+    typeof _ref$ === "function" ? use(_ref$, _el$) : containerRef = _el$;
+    insert(_el$2, createComponent(QuickActionBar, {
+      get paneId() {
+        return props.data.paneId;
+      },
+      get pageURL() {
+        return props.data.pageURL;
+      },
+      onReload: handleReload,
+      onCopyUrl: () => copyText(props.data.pageURL || ""),
+      onClosePane: () => {
+        props.onClosePane?.(props.data.paneId);
+        close();
+      }
+    }), null);
+    insert(_el$2, createComponent(ContextSeparator, {}), null);
+    insert(_el$2, createComponent(ContextualActions, {
+      get data() {
+        return props.data;
+      },
+      activeSubmenu,
+      onOpenSubmenu: (id, rect) => openSubmenu(id, rect),
+      onCloseSubmenu: () => closeSubmenu(),
+      onSubmenuMouseEnter: cancelClose,
+      onSubmenuMouseLeave: () => closeSubmenu(),
+      onOpenNewPane: openNewPane,
+      onCopyText: copyText,
+      onClose: close
+    }), null);
+    insert(_el$2, createComponent(RotarySplitButton, {
+      get activeId() {
+        return rotaryState().layout;
+      },
+      options: layoutOptions,
+      get isOpen() {
+        return activeSubmenu() === "layout";
+      },
+      onOpenSubmenu: (rect) => openSubmenu("layout", rect),
+      onCloseSubmenu: () => closeSubmenu(),
+      onRotate: rotateLayout,
+      onSubmenuMouseEnter: cancelClose,
+      onSubmenuMouseLeave: () => closeSubmenu()
+    }), null);
+    insert(_el$2, createComponent(Show, {
+      get when() {
+        return props.data.pageURL;
+      },
+      get children() {
+        return createComponent(RotarySplitButton, {
+          get activeId() {
+            return rotaryState().pageTool;
+          },
+          options: pageToolOptions,
+          get isOpen() {
+            return activeSubmenu() === "pageTool";
+          },
+          onOpenSubmenu: (rect) => openSubmenu("pageTool", rect),
+          onCloseSubmenu: () => closeSubmenu(),
+          onRotate: rotatePageTool,
+          onSubmenuMouseEnter: cancelClose,
+          onSubmenuMouseLeave: () => closeSubmenu()
+        });
+      }
+    }), null);
+    insert(_el$2, createComponent(ContextSeparator, {}), null);
+    insert(_el$2, createComponent(ProfilesSubmenu, {
+      get paneId() {
+        return props.data.paneId;
+      },
+      get isOpen() {
+        return activeSubmenu() === "profiles";
+      },
+      onOpen: (rect) => openSubmenu("profiles", rect),
+      onClose: () => closeSubmenu(),
+      onSubmenuMouseEnter: cancelClose,
+      onSubmenuMouseLeave: () => closeSubmenu(),
+      get onUpdateProfile() {
+        return props.onUpdateProfile;
+      }
+    }), null);
+    insert(_el$2, createComponent(PageDevToolsSubmenu, {
+      get paneId() {
+        return props.data.paneId;
+      },
+      get pageURL() {
+        return props.data.pageURL;
+      },
+      get isOpen() {
+        return activeSubmenu() === "devTools";
+      },
+      onOpen: (rect) => openSubmenu("devTools", rect),
+      onClose: () => closeSubmenu(),
+      onSubmenuMouseEnter: cancelClose,
+      onSubmenuMouseLeave: () => closeSubmenu(),
+      onClearCookies: handleClearCookies
+    }), null);
+    createRenderEffect((_p$) => {
+      var _v$ = `${pos().y}px`, _v$2 = `${pos().x}px`;
+      _v$ !== _p$.e && setStyleProperty(_el$, "top", _p$.e = _v$);
+      _v$2 !== _p$.t && setStyleProperty(_el$, "left", _p$.t = _v$2);
+      return _p$;
+    }, {
+      e: void 0,
+      t: void 0
+    });
+    return _el$;
+  })();
+}
+delegateEvents(["click", "contextmenu"]);
+const emptyPayload = {
+  x: 0,
+  y: 0,
+  paneId: ""
+};
+function useContextMenuState() {
+  const [state, setState] = createSignal({
+    isOpen: false,
+    mode: "FULL",
+    data: emptyPayload
+  });
+  const dismiss = () => {
+    setState((prev) => ({
+      ...prev,
+      isOpen: false
+    }));
+  };
+  onMount(() => {
+    const unsubShow = window.api?.onContextMenuShow?.((event) => {
+      setState({
+        isOpen: true,
+        mode: event.mode,
+        data: event.data
+      });
+    });
+    const unsubDismiss = window.api?.onContextMenuDismiss?.(() => {
+      dismiss();
+    });
+    const handleLocalShow = (e) => {
+      if (e.detail) {
+        setState({
+          isOpen: true,
+          mode: e.detail.mode || "FULL",
+          data: e.detail.data
+        });
+      }
+    };
+    window.addEventListener("app:show-context-menu", handleLocalShow);
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape" && state().isOpen) {
+        dismiss();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    onCleanup(() => {
+      unsubShow?.();
+      unsubDismiss?.();
+      window.removeEventListener("app:show-context-menu", handleLocalShow);
+      window.removeEventListener("keydown", handleKeyDown);
+    });
+  });
+  return {
+    state,
+    dismiss
+  };
+}
+function ContextMenuContainer(props) {
+  const {
+    state,
+    dismiss
+  } = useContextMenuState();
+  const handleSplit = (direction) => {
+    const mappedDir = direction === "horizontal" ? "right" : direction === "vertical" ? "bottom" : direction;
+    setLayoutStore("lastSplitDirection", mappedDir);
+    setLayoutStore("splitPreview", null);
+    window.dispatchEvent(new CustomEvent("app:preview-split-edge", {
+      detail: null
+    }));
+    const paneId = state().data.paneId || props.ws?.activePaneId?.();
+    if (paneId && props.ws?.handleSplit) {
+      props.ws.handleSplit(paneId, direction);
+    } else if (paneId && props.ws?.splitPane) {
+      props.ws.splitPane(paneId, direction);
+    } else {
+      window.dispatchEvent(new CustomEvent("app:split-pane", {
+        detail: {
+          paneId,
+          direction
+        }
+      }));
+    }
+    dismiss();
+  };
+  const handleClosePane = (paneId) => {
+    if (paneId && props.ws?.handleClose) {
+      props.ws.handleClose(paneId);
+    } else if (paneId && props.ws?.closePane) {
+      props.ws.closePane(paneId);
+    } else {
+      window.dispatchEvent(new CustomEvent("app:close-pane", {
+        detail: {
+          paneId
+        }
+      }));
+    }
+    dismiss();
+  };
+  const handleUpdateProfile = (paneId, profileId) => {
+    if (paneId && props.ws?.handleUpdatePane) {
+      props.ws.handleUpdatePane(paneId, {
+        profileId
+      });
+    } else if (paneId && props.ws?.updatePaneProfile) {
+      props.ws.updatePaneProfile(paneId, profileId);
+    }
+    dismiss();
+  };
+  return createComponent(Show, {
+    get when() {
+      return state().isOpen;
+    },
+    get children() {
+      return createComponent(Portal, {
+        get children() {
+          return [createComponent(LightDismissScrim, {
+            onDismiss: dismiss
+          }), createComponent(FullContextMenu, {
+            get data() {
+              return state().data;
+            },
+            onDismiss: dismiss,
+            onSplit: handleSplit,
+            onClosePane: handleClosePane,
+            onUpdateProfile: handleUpdateProfile
+          })];
+        }
+      });
+    }
+  });
 }
 var _tmpl$$2 = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] pointer-events-auto select-none animate-in slide-in-from-bottom-3 fade-in duration-200"><div class="h-11 flex items-center gap-2.5 px-3 bg-white dark:bg-[#181818] text-neutral-800 dark:text-neutral-100 rounded-[12px] border border-neutral-200/90 dark:border-neutral-800 shadow-[inset_0_1px_0_rgba(255,255,255,1),0_10px_32px_-4px_rgba(0,0,0,0.12)] text-[12.5px] font-sans tracking-tight"><div class="w-6 h-6 flex items-center justify-center bg-neutral-100 dark:bg-neutral-800/80 rounded-[6px] border border-neutral-200/60 dark:border-neutral-700/60 shrink-0"></div><span class="max-w-[220px] truncate text-neutral-700 dark:text-neutral-200 font-medium">Closed <strong class="font-semibold text-neutral-900 dark:text-white"></strong></span><div class="w-[1px] h-4 bg-neutral-200 dark:bg-neutral-700 mx-0.5"></div><button class="h-7 px-2.5 bg-neutral-100 hover:bg-neutral-200/70 dark:bg-neutral-800 dark:hover:bg-neutral-700 text-neutral-800 dark:text-neutral-100 rounded-[7px] border border-neutral-300/60 dark:border-neutral-600/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] text-[11.5px] font-medium flex items-center gap-1.5 transition-all active:scale-95">Undo</button><button class="w-6 h-6 flex items-center justify-center text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded-[6px] transition-colors -mr-1"aria-label=Dismiss><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.25 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18>`);
 function ClosedItemToast(props) {
@@ -31708,26 +34096,9 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       }
     });
     window.api?.onNativeContextMenu?.((data) => {
-      const targetPaneId = webContentsRegistry.getPaneId(data?.webContentsId) || ws.activePaneId();
-      if (targetPaneId) {
-        if (ws.activePaneId() !== targetPaneId) {
-          ws.setActivePaneId(targetPaneId);
-        }
-        const el = document.getElementById("webview-" + targetPaneId);
-        const rect = el ? el.getBoundingClientRect() : { left: 0, top: 0 };
-        window.dispatchEvent(
-          new CustomEvent("app:pane-context-menu", {
-            detail: {
-              paneId: targetPaneId,
-              x: rect.left + data.x,
-              y: rect.top + data.y,
-              linkURL: data.linkURL || "",
-              srcURL: data.srcURL || "",
-              pageURL: data.pageURL || "",
-              selectionText: data.selectionText || ""
-            }
-          })
-        );
+      const targetPaneId = webContentsRegistry.getPaneId(data?.webContentsId) || data?.paneId || ws.activePaneId();
+      if (targetPaneId && ws.activePaneId() !== targetPaneId) {
+        ws.setActivePaneId(targetPaneId);
       }
     });
     window.api?.onSplitPaneWc?.((data) => {
@@ -31750,11 +34121,6 @@ function useAppIpc(ws, setCascadePrompt, setToast) {
       if (paneId) {
         window.dispatchEvent(new CustomEvent("pane.reloaded", { detail: paneId }));
       }
-    });
-    window.api?.onPaneContextMenu?.((data) => {
-      window.dispatchEvent(
-        new CustomEvent("app:pane-context-menu", { detail: data })
-      );
     });
     const handleCascadePrompt = (e) => {
       setCascadePrompt(e.detail);
@@ -32196,6 +34562,9 @@ function App() {
       cascadePrompt,
       setCascadePrompt
     }), null);
+    insert(_el$2, createComponent(ContextMenuContainer, {
+      ws
+    }), null);
     insert(_el$2, createComponent(Show, {
       get when() {
         return toast();
@@ -32383,34 +34752,42 @@ if (root) {
 }
 export {
   AppIcon as A,
-  DoubleBezel as D,
+  onCleanup as B,
+  style as C,
+  use as D,
+  Portal as E,
   For as F,
-  ModalShell$1 as M,
+  createMemo as G,
+  DoubleBezel as H,
+  ModalShell$1 as I,
+  Match as M,
   ProfileForm as P,
-  Show as S,
+  Switch as S,
   WorkspaceIcon as W,
-  createComponent as a,
-  createRenderEffect as b,
-  createSignal as c,
-  setLayoutStore as d,
+  checkForUpdates as a,
+  applyUpdate as b,
+  createComponent as c,
+  downloadUpdate as d,
   delegateEvents as e,
-  createEffect as f,
-  frecencyEngine as g,
-  getAppNameFromUrl as h,
-  insert as i,
-  addEventListener as j,
-  setStyleProperty as k,
-  layoutStore as l,
+  onMount as f,
+  insert as g,
+  Show as h,
+  initUpdateStore as i,
+  createRenderEffect as j,
+  createSignal as k,
+  setAttribute as l,
   memo as m,
-  activeShortcuts as n,
-  onMount as o,
-  className as p,
-  saveShortcut as q,
-  onCleanup as r,
-  setAttribute as s,
+  layoutStore as n,
+  openExternalUrl as o,
+  setLayoutStore as p,
+  createEffect as q,
+  frecencyEngine as r,
+  setStyleProperty as s,
   template as t,
-  style as u,
-  use as v,
-  Portal as w,
-  createMemo as x
+  updateStore as u,
+  getAppNameFromUrl as v,
+  addEventListener as w,
+  activeShortcuts as x,
+  className as y,
+  saveShortcut as z
 };
