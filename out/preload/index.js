@@ -369,7 +369,7 @@ function createIpcEvents(ipcRenderer) {
       );
     },
     onOpenInNewPane: (callback) => {
-      const handler = (_, url) => callback(url);
+      const handler = (_, data) => callback(data);
       ipcRenderer.on(IPC_CHANNELS.EVENTS.OPEN_IN_NEW_PANE, handler);
       return () => ipcRenderer.removeListener(
         IPC_CHANNELS.EVENTS.OPEN_IN_NEW_PANE,
@@ -572,40 +572,40 @@ const webviewHelpers = {
     }
   }
 };
-const CURSOR_ALLOWLIST = {
-  default: true,
-  pointer: true,
-  text: true,
-  crosshair: true,
-  wait: true,
-  help: true,
-  move: true,
-  "e-resize": true,
-  "n-resize": true,
-  "ne-resize": true,
-  "nw-resize": true,
-  "s-resize": true,
-  "se-resize": true,
-  "sw-resize": true,
-  "w-resize": true,
-  "ns-resize": true,
-  "ew-resize": true,
-  "nesw-resize": true,
-  "nwse-resize": true,
-  "col-resize": true,
-  "row-resize": true,
-  grab: true,
-  grabbing: true,
-  "not-allowed": true,
-  "zoom-in": true,
-  "zoom-out": true,
-  cell: true,
-  copy: true,
-  alias: true,
-  "context-menu": true,
-  none: true,
-  progress: true
-};
+const CURSOR_ALLOWLIST = /* @__PURE__ */ new Set([
+  "default",
+  "pointer",
+  "text",
+  "crosshair",
+  "wait",
+  "help",
+  "move",
+  "e-resize",
+  "n-resize",
+  "ne-resize",
+  "nw-resize",
+  "s-resize",
+  "se-resize",
+  "sw-resize",
+  "w-resize",
+  "ns-resize",
+  "ew-resize",
+  "nesw-resize",
+  "nwse-resize",
+  "col-resize",
+  "row-resize",
+  "grab",
+  "grabbing",
+  "not-allowed",
+  "zoom-in",
+  "zoom-out",
+  "cell",
+  "copy",
+  "alias",
+  "context-menu",
+  "none",
+  "progress"
+]);
 function modifiers(e) {
   return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 }
@@ -645,6 +645,7 @@ function buildForwardMsg(type, e) {
 }
 let gapInstalled = false;
 let isDraggingGuest = false;
+let wasInChrome = false;
 function installGapPointerForwarding() {
   if (gapInstalled) return;
   gapInstalled = true;
@@ -652,9 +653,11 @@ function installGapPointerForwarding() {
     "pointerdown",
     (ev) => {
       if (isChrome(ev.clientX, ev.clientY)) {
+        wasInChrome = true;
         electron.ipcRenderer.send("airspace:chrome-clicked");
         return;
       }
+      wasInChrome = false;
       if (ev.button === 0) {
         isDraggingGuest = true;
       }
@@ -677,11 +680,19 @@ function installGapPointerForwarding() {
         );
         return;
       }
-      if (isChrome(ev.clientX, ev.clientY)) {
+      const inChrome = isChrome(ev.clientX, ev.clientY);
+      if (inChrome) {
+        if (!wasInChrome) {
+          wasInChrome = true;
+          electron.ipcRenderer.send("airspace:chrome-entered");
+        }
         if (document.documentElement.style.cursor !== "default") {
           document.documentElement.style.cursor = "default";
         }
         return;
+      }
+      if (wasInChrome) {
+        wasInChrome = false;
       }
       electron.ipcRenderer.send(
         IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
@@ -740,17 +751,24 @@ function installGapPointerForwarding() {
   );
   window.addEventListener("blur", () => {
     isDraggingGuest = false;
+    wasInChrome = false;
   });
   window.addEventListener("pointercancel", () => {
     isDraggingGuest = false;
+    wasInChrome = false;
   });
 }
 let cursorInstalled = false;
+function toCssCursor(type) {
+  if (type === "pointer") return "default";
+  if (type === "hand") return "pointer";
+  return CURSOR_ALLOWLIST.has(type) ? type : "default";
+}
 function installCursorMirror() {
   if (cursorInstalled) return;
   cursorInstalled = true;
   electron.ipcRenderer.on(IPC_CHANNELS.OVERLAY.CURSOR, (_e, type) => {
-    document.documentElement.style.cursor = CURSOR_ALLOWLIST[type] === true ? type : "default";
+    document.documentElement.style.cursor = toCssCursor(type);
   });
 }
 electron.ipcRenderer.setMaxListeners(100);
@@ -815,6 +833,7 @@ const api = {
     applyUpdate: client.updater.applyUpdate,
     openExternal: client.updater.openExternal
   },
+  openExternal: client.updater.openExternal,
   onUpdateStateChanged: (callback) => {
     const handler = (_, data) => callback(data?.state);
     electron.ipcRenderer.on(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, handler);
@@ -1010,7 +1029,12 @@ const api = {
   onViewNetworkError: (callback) => {
     const handler = (e) => callback(e.detail);
     window.addEventListener("app:webview-network-error", handler);
-    return () => window.removeEventListener("app:webview-network-error", handler);
+    const ipcHandler = (_, data) => callback(data);
+    electron.ipcRenderer.on("pane.load-error", ipcHandler);
+    return () => {
+      window.removeEventListener("app:webview-network-error", handler);
+      electron.ipcRenderer.removeListener("pane.load-error", ipcHandler);
+    };
   },
   onPaneFocused: (callback) => {
     const handler = (e) => callback(e.detail);
@@ -1051,6 +1075,16 @@ const api = {
     const handler = (_e, d) => callback(d);
     electron.ipcRenderer.on("app:pane-restored", handler);
     return () => electron.ipcRenderer.removeListener("app:pane-restored", handler);
+  },
+  onPaneFrozen: (callback) => {
+    const handler = (_e, d) => callback(d);
+    electron.ipcRenderer.on("app:pane-frozen", handler);
+    return () => electron.ipcRenderer.removeListener("app:pane-frozen", handler);
+  },
+  onPaneThawed: (callback) => {
+    const handler = (_e, d) => callback(d);
+    electron.ipcRenderer.on("app:pane-thawed", handler);
+    return () => electron.ipcRenderer.removeListener("app:pane-thawed", handler);
   }
 };
 electron.ipcRenderer.on("app:env", (_e, env) => {
@@ -1077,6 +1111,9 @@ electron.ipcRenderer.on("audio:active-sources-changed", (_e, data) => {
 });
 electron.ipcRenderer.on("app:dynamic-media-status", (_e, data) => {
   window.dispatchEvent(new CustomEvent("app:dynamic-media-status", { detail: data }));
+});
+electron.ipcRenderer.on("app:window-restored", () => {
+  window.dispatchEvent(new CustomEvent("app:window-restored"));
 });
 if (process.contextIsolated) {
   try {

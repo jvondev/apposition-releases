@@ -810,6 +810,58 @@ function initPaneContextMenuProbe() {
     { capture: true, passive: false }
   );
 }
+function resolveAnchor(e) {
+  const target = e.target;
+  if (!target) return null;
+  const directAnchor = target.closest?.("a[href]");
+  if (directAnchor?.href) return directAnchor;
+  if (typeof e.composedPath === "function") {
+    const path = e.composedPath();
+    for (const node of path) {
+      if (node?.tagName === "A" && node?.href) {
+        return node;
+      }
+    }
+  }
+  return null;
+}
+function isValidWebUrl(href) {
+  if (!href) return false;
+  const lower = href.trim().toLowerCase();
+  if (lower.startsWith("javascript:") || lower === "#" || lower.startsWith("about:blank") || lower.startsWith("data:") || lower.startsWith("file:") || lower.startsWith("blob:")) {
+    return false;
+  }
+  const currentBase = window.location.href.split("#")[0];
+  if (href.startsWith(currentBase + "#")) {
+    return false;
+  }
+  return true;
+}
+function initPaneLinkIntentProbe() {
+  const handlePointerIntent = (e) => {
+    const isModifierLeftClick = e.button === 0 && (e.ctrlKey || e.metaKey);
+    const isMiddleClick = e.button === 1;
+    if (!isModifierLeftClick && !isMiddleClick) return;
+    const anchor = resolveAnchor(e);
+    if (!anchor || !isValidWebUrl(anchor.href)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+    electron.ipcRenderer.send("pane:link-intent", {
+      url: anchor.href,
+      isBackground: !e.shiftKey,
+      disposition: "split-or-tab"
+    });
+  };
+  window.addEventListener("click", handlePointerIntent, {
+    capture: true,
+    passive: false
+  });
+  window.addEventListener("auxclick", handlePointerIntent, {
+    capture: true,
+    passive: false
+  });
+}
 try {
   electron.webFrame.executeJavaScript(`(function() {
     try {
@@ -934,6 +986,7 @@ try {
   initIdentityHarvester();
   initSemanticTitleHarvester();
   initPaneContextMenuProbe();
+  initPaneLinkIntentProbe();
   try {
     class ProxiedNotification extends EventTarget {
       static permission = "granted";

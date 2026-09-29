@@ -1,8 +1,72 @@
 [
   {
+    "version": "1.3.3",
+    "tag": "v1.3.3",
+    "title": "v1.3.3: Persistent Active Tabs & Seamless Auto-Wake",
+    "publishedAt": "2026-09-29",
+    "categories": [
+      {
+        "category": "Features & Enhancements",
+        "items": [
+          {
+            "title": "Persistent Active Tab Continuity",
+            "description": "Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."
+          },
+          {
+            "title": "Background Resource Conservation",
+            "description": "When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."
+          },
+          {
+            "title": "Zero-Click Auto-Wake",
+            "description": "Sleeping tabs now wake up and resume their exact scroll position automatically when clicked or when restoring the app window, eliminating the need to click a wake button."
+          },
+          {
+            "title": "Memory Metrics in Command Palette",
+            "description": "Real-time memory metrics now display within the Command Palette, highlighting the exact amount of system RAM conserved by sleeping background tabs."
+          }
+        ]
+      },
+      {
+        "category": "Improvements & Fixes",
+        "items": [
+          {
+            "title": "Modifier & Middle-Click Split Routing",
+            "description": "Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."
+          },
+          {
+            "title": "Start Page Sleep Immunity",
+            "description": "Start pages and blank tabs are permanently immune to background sleep cycles, preventing unexpected blank reloading or redirect issues."
+          },
+          {
+            "title": "Smooth Omnibar Transition",
+            "description": "Omnibar expansion now transitions smoothly without sudden layout shifts or involuntary resizing when searching."
+          },
+          {
+            "title": "Webview Pointer & Cursor Precision",
+            "description": "Resolved edge cases causing cursor inversion or sticking during layout transitions and rapid mouse movements across split panels."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Persistent Active Tab Continuity",
+        "description": "Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."
+      },
+      {
+        "title": "Background Resource Conservation",
+        "description": "When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."
+      },
+      {
+        "title": "Modifier & Middle-Click Split Routing",
+        "description": "Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."
+      }
+    ]
+  },
+  {
     "version": "1.3.2",
     "tag": "v1.3.2",
-    "title": "Apposition v1.3.2",
+    "title": "Compact Context Menus, Precision Tools & Split-Screen Showcase",
     "publishedAt": "2026-09-15",
     "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.3.2/context-menu.webp",
     "categories": [
@@ -102,6 +166,95 @@
       {
         "title": "Native Context Arbiter",
         "description": "Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application's native menu on the first click, while a consecutive click opens Apposition's workspace menu."
+      }
+    ]
+  },
+  {
+    "version": "1.3.1",
+    "tag": "v1.3.1",
+    "title": "Persistent Media Continuity, Live Audio Equalizer & Tactile Edge Navigation",
+    "publishedAt": "2026-09-12",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Persistent Media Playback Continuity",
+            "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+          },
+          {
+            "title": "Interactive Audio Equalizer & Smart Indicator",
+            "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+          },
+          {
+            "title": "Communicator App Reload",
+            "description": "Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Fluid Drag-and-Drop Spatial Previews",
+            "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
+          },
+          {
+            "title": "Tactile Edge Navigation Shelves",
+            "description": "Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."
+          },
+          {
+            "title": "Real-Time Profile Details",
+            "description": "The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Automatic Account Identification",
+            "description": "Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."
+          },
+          {
+            "title": "Workspace Airspace & Transitions",
+            "description": "Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."
+          },
+          {
+            "title": "Continuous Background Web Sessions",
+            "description": "Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."
+          },
+          {
+            "title": "Communicator Popovers & Settings",
+            "description": "Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."
+          },
+          {
+            "title": "Stable Drag Focus & Screen-Edge Navigation",
+            "description": "Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."
+          },
+          {
+            "title": "Intelligent Semantic Tab Naming",
+            "description": "Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."
+          },
+          {
+            "title": "Intelligent Omnibar & Search Navigation",
+            "description": "Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Persistent Media Playback Continuity",
+        "description": "Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."
+      },
+      {
+        "title": "Interactive Audio Equalizer & Smart Indicator",
+        "description": "Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."
+      },
+      {
+        "title": "Fluid Drag-and-Drop Spatial Previews",
+        "description": "When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."
       }
     ]
   },

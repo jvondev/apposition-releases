@@ -7,12 +7,47 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; script-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; worker-src * 'self' blob: data: https: http:; child-src * 'self' blob: data: https: http:; frame-src * 'self' blob: data: https: http:; connect-src * 'self' data: blob: https: http: ws: wss:; style-src * 'self' 'unsafe-inline' https: http:; font-src * 'self' data: blob: https: http:; img-src * 'self' data: blob: https: http:; media-src * 'self' data: blob: https: http:;"
     />
-    <script type="module" crossorigin src="./assets/index-BvhkRUZr.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-BlqnSFEI.css">
+    <script type="module" crossorigin src="./assets/index-RPBD_bnd.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-22X0QI2F.css">
   </head>
   <body
     class="bg-transparent overflow-hidden text-neutral-900 antialiased font-sans"
   >
-    <div id="root"></div>
+    <div id="root"></div>
+    <script>
+      // Browser Development Mode Mock (kicks in only when native Electron preload is absent)
+      if (typeof window !== "undefined" && !window.api) {
+        const noop = () => {};
+        const asyncNoop = async () => ({ success: true });
+        window.api = new Proxy({}, {
+          get: (_, prop) => {
+            if (prop === "updater") {
+              return {
+                checkForUpdates: async () => null,
+                downloadUpdate: async () => null,
+                applyUpdate: async () => null,
+                openExternal: noop,
+                onUpdateAvailable: () => noop,
+                onUpdateDownloaded: () => noop,
+                onError: () => noop,
+              };
+            }
+            if (prop === "onAuthCompleted") return () => noop;
+            if (prop === "invokeTrpc") return async () => ({ success: true, data: [] });
+            if (prop === "view") return new Proxy({}, { get: () => asyncNoop });
+            return asyncNoop;
+          }
+        });
+        window.electron = {
+          ipcRenderer: {
+            send: noop,
+            on: () => noop,
+            once: () => noop,
+            invoke: asyncNoop,
+            removeListener: noop,
+          }
+        };
+      }
+    </script>
   </body>
 </html>
