@@ -1,5 +1,78 @@
 [
   {
+    "version": "1.3.5",
+    "tag": "v1.3.5",
+    "title": "Tab & Workspace Persistence, Active Profile Focus Rings & Clean Workspace Teardown",
+    "publishedAt": "2026-10-04",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Tab & Workspace Persistence",
+            "description": "Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."
+          },
+          {
+            "title": "Workflow State Preservation",
+            "description": "In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."
+          },
+          {
+            "title": "Background Media Continuity",
+            "description": "Background audio streams and active calls now remain connected without interruption or premature freezing when navigating away."
+          },
+          {
+            "title": "Active Profile Focus Rings",
+            "description": "Focus rings now dynamically reflect profile accent colors when switching accounts or air-gapped sessions."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Docked Canvas Inset Persistence",
+            "description": "Window layout preference for docked inset mode is now remembered and automatically restored on startup."
+          },
+          {
+            "title": "Process Responsiveness",
+            "description": "Streamlined background process scheduling for instant response times when multitasking across multiple workspaces."
+          },
+          {
+            "title": "High-Contrast Pricing Overview",
+            "description": "Refined pricing overview and license tier displays with high-contrast monochrome aesthetics and improved typography legibility."
+          },
+          {
+            "title": "Workspace Protection & Onboarding",
+            "description": "Added inline deletion confirmation to prevent accidental removals, enforced protection on your sole remaining workspace, and set new app installations to start with a single clean default workspace."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Workspace Teardown",
+            "description": "Resolved an issue where deleting a secondary workspace could leave behind a ghost icon and unresponsive tabs. Workspace teardown is now instantaneous and safely transitions to the fallback workspace."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Tab & Workspace Persistence",
+        "description": "Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."
+      },
+      {
+        "title": "Workflow State Preservation",
+        "description": "In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."
+      },
+      {
+        "title": "Docked Canvas Inset Persistence",
+        "description": "Window layout preference for docked inset mode is now remembered and automatically restored on startup."
+      }
+    ]
+  },
+  {
     "version": "1.3.4",
     "tag": "v1.3.4",
     "title": "Resilient Auto-Updates & Direct Profile Navigation",

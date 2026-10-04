@@ -1,6 +1,6 @@
 {
   "name": "apposition",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "description": "A smart digital workspace to organize web apps, accounts, and tasks in one place.",
   "main": "./out/main/index.js",
   "author": "jvondev <jvondev@users.noreply.github.com>",
@@ -18,6 +18,8 @@
     "ship": "node scripts/ship.js",
     "sync:refs": "node scripts/apposition-references.js",
     "start": "electron-vite preview",
+    "showcase": "cross-env APP_ENV=showcase electron-vite dev",
+    "showcase:clean": "node scripts/reset-showcase-db.mjs && cross-env APP_ENV=showcase electron-vite dev",
     "dev": "electron-vite dev",
     "dev:gatekeep": "cross-env FORCE_GATEKEEP=1 electron-vite dev",
     "dev:web": "pnpm --filter web dev",

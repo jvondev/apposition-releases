@@ -862,6 +862,264 @@ function initPaneLinkIntentProbe() {
     passive: false
   });
 }
+const SENSITIVE_KEYWORDS = /password|passcode|token|pin|secret|cvv|cvc|cardnumber|ssn/i;
+const SENSITIVE_AUTOCOMPLETE = ["current-password", "new-password", "cc-number", "cc-csc", "one-time-code"];
+function isSensitiveField(type, name, autocomplete, placeholder, ariaLabel) {
+  if (type === "password") return true;
+  if (name && SENSITIVE_KEYWORDS.test(name)) return true;
+  if (placeholder && SENSITIVE_KEYWORDS.test(placeholder)) return true;
+  if (ariaLabel && SENSITIVE_KEYWORDS.test(ariaLabel)) return true;
+  if (autocomplete && SENSITIVE_AUTOCOMPLETE.includes(autocomplete.toLowerCase())) return true;
+  return false;
+}
+function safeCssEscape(str) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(str);
+  }
+  return str.replace(/([!"#$%&'()*+,.\/:;<=>?@[\\\]^`{|}~])/g, "\\$1");
+}
+function getElementSelector(el) {
+  if (el.id) return `#${safeCssEscape(el.id)}`;
+  const name = el.getAttribute("name");
+  if (name) return `${el.tagName.toLowerCase()}[name="${safeCssEscape(name)}"]`;
+  let path = el.tagName.toLowerCase();
+  let parent = el.parentElement;
+  let current = el;
+  while (parent && parent !== document.body && parent !== document.documentElement) {
+    const siblings = Array.from(parent.children).filter((c) => c.tagName === current.tagName);
+    if (siblings.length > 1) {
+      const idx = siblings.indexOf(current) + 1;
+      path = `${parent.tagName.toLowerCase()} > ${current.tagName.toLowerCase()}:nth-of-type(${idx})`;
+    } else {
+      path = `${parent.tagName.toLowerCase()} > ${current.tagName.toLowerCase()}`;
+    }
+    current = parent;
+    parent = parent.parentElement;
+    if (path.length > 80) break;
+  }
+  return path;
+}
+function serializeShadowState(doc = document, win = window, observedScrollers) {
+  const forms = [];
+  const scrollContainers = [];
+  const elements = doc.querySelectorAll(
+    "input, textarea, select, [contenteditable='true']"
+  );
+  elements.forEach((el) => {
+    const tag = el.tagName.toLowerCase();
+    const type = el.type?.toLowerCase() || tag;
+    const name = el.getAttribute("name") || void 0;
+    const autocomplete = el.getAttribute("autocomplete") || void 0;
+    const placeholder = el.getAttribute("placeholder") || void 0;
+    const ariaLabel = el.getAttribute("aria-label") || void 0;
+    if (isSensitiveField(type, name, autocomplete, placeholder, ariaLabel)) return;
+    if (type === "hidden" || type === "button" || type === "submit" || type === "file") return;
+    const selector = getElementSelector(el);
+    if (tag === "input") {
+      const input = el;
+      if (type === "checkbox" || type === "radio") {
+        forms.push({ selector, name, id: el.id || void 0, type, value: input.value, checked: input.checked });
+      } else {
+        if (input.value) {
+          forms.push({ selector, name, id: el.id || void 0, type, value: input.value });
+        }
+      }
+    } else if (tag === "textarea") {
+      const textarea = el;
+      if (textarea.value) {
+        forms.push({ selector, name, id: el.id || void 0, type: "textarea", value: textarea.value });
+      }
+    } else if (tag === "select") {
+      const select = el;
+      forms.push({ selector, name, id: el.id || void 0, type: "select", value: select.value });
+    } else if (el.getAttribute("contenteditable") === "true") {
+      const html = el.innerHTML;
+      if (html && html.trim().length > 0) {
+        forms.push({ selector, id: el.id || void 0, type: "contenteditable", value: html });
+      }
+    }
+  });
+  const scrollers = observedScrollers ? Array.from(observedScrollers) : Array.from(doc.querySelectorAll("main, article, [role='main'], [style*='overflow'], [class*='overflow']"));
+  scrollers.forEach((el) => {
+    if (el.scrollTop > 5 || el.scrollLeft > 5) {
+      scrollContainers.push({
+        selector: getElementSelector(el),
+        scrollLeft: Math.round(el.scrollLeft),
+        scrollTop: Math.round(el.scrollTop)
+      });
+    }
+  });
+  let activeElement;
+  const active = doc.activeElement;
+  if (active && active !== doc.body && active !== doc.documentElement) {
+    const selector = getElementSelector(active);
+    let selectionStart;
+    let selectionEnd;
+    if ("selectionStart" in active && typeof active.selectionStart === "number") {
+      selectionStart = active.selectionStart ?? void 0;
+      selectionEnd = active.selectionEnd ?? void 0;
+    }
+    activeElement = { selector, selectionStart, selectionEnd };
+  }
+  return {
+    url: win.location.href,
+    title: doc.title,
+    timestamp: Date.now(),
+    windowScroll: {
+      x: Math.round(win.scrollX || doc.documentElement.scrollLeft || 0),
+      y: Math.round(win.scrollY || doc.documentElement.scrollTop || 0)
+    },
+    forms,
+    scrollContainers,
+    activeElement
+  };
+}
+function findElement(form, doc) {
+  if (form.id) {
+    const el = doc.getElementById(form.id);
+    if (el) return el;
+  }
+  if (form.name) {
+    const el = doc.querySelector(`[name="${safeCssEscape(form.name)}"]`);
+    if (el) return el;
+  }
+  if (form.selector) {
+    try {
+      const el = doc.querySelector(form.selector);
+      if (el) return el;
+    } catch {
+    }
+  }
+  return null;
+}
+function dispatchInputEvents(el) {
+  try {
+    el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+  } catch {
+  }
+}
+function rehydrateShadowState(snapshot, doc = document, win = window) {
+  if (!snapshot) return false;
+  for (const form of snapshot.forms) {
+    const el = findElement(form, doc);
+    if (!el) continue;
+    if (form.type === "checkbox" || form.type === "radio") {
+      const input = el;
+      if (typeof form.checked === "boolean") {
+        input.checked = form.checked;
+        dispatchInputEvents(input);
+      }
+    } else if (form.type === "textarea" || form.type === "select" || el.tagName === "INPUT") {
+      const input = el;
+      if (form.value !== void 0) {
+        input.value = form.value;
+        dispatchInputEvents(input);
+      }
+    } else if (form.type === "contenteditable") {
+      if (form.value && typeof form.value === "string") {
+        el.innerHTML = form.value;
+        dispatchInputEvents(el);
+      }
+    }
+  }
+  for (const sc of snapshot.scrollContainers) {
+    try {
+      const el = doc.querySelector(sc.selector);
+      if (el) {
+        el.scrollLeft = sc.scrollLeft;
+        el.scrollTop = sc.scrollTop;
+      }
+    } catch {
+    }
+  }
+  if (snapshot.windowScroll && (snapshot.windowScroll.x > 0 || snapshot.windowScroll.y > 0)) {
+    try {
+      win.scrollTo({
+        left: snapshot.windowScroll.x,
+        top: snapshot.windowScroll.y,
+        behavior: "instant"
+      });
+    } catch {
+    }
+  }
+  if (snapshot.activeElement) {
+    try {
+      const el = doc.querySelector(snapshot.activeElement.selector);
+      if (el && typeof el.focus === "function") {
+        el.focus();
+        if ("setSelectionRange" in el && typeof snapshot.activeElement.selectionStart === "number" && typeof snapshot.activeElement.selectionEnd === "number") {
+          el.setSelectionRange(
+            snapshot.activeElement.selectionStart,
+            snapshot.activeElement.selectionEnd
+          );
+        }
+      }
+    } catch {
+    }
+  }
+  return true;
+}
+function initShadowStateVault() {
+  let hasRestored = false;
+  let saveTimer = null;
+  const scrolledElements = /* @__PURE__ */ new Set();
+  window.addEventListener(
+    "scroll",
+    (e) => {
+      const target = e.target;
+      if (target && target instanceof HTMLElement && target !== document.body && target !== document.documentElement) {
+        scrolledElements.add(target);
+      }
+    },
+    { passive: true, capture: true }
+  );
+  const saveCurrentShadowState = () => {
+    try {
+      const snapshot = serializeShadowState(document, window, scrolledElements);
+      electron.ipcRenderer.send("vault:save-shadow-state", snapshot);
+    } catch {
+    }
+  };
+  const debouncedSave = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      saveCurrentShadowState();
+    }, 1e3);
+  };
+  const tryRestoreShadowState = async () => {
+    if (hasRestored) return;
+    try {
+      const snapshot = await electron.ipcRenderer.invoke("vault:get-shadow-state");
+      if (snapshot && snapshot.url === window.location.href) {
+        rehydrateShadowState(snapshot, document, window);
+        hasRestored = true;
+      }
+    } catch {
+    }
+  };
+  window.addEventListener("input", debouncedSave, { passive: true });
+  window.addEventListener("change", debouncedSave, { passive: true });
+  window.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveCurrentShadowState();
+  });
+  window.addEventListener("pagehide", saveCurrentShadowState);
+  window.addEventListener("beforeunload", saveCurrentShadowState);
+  if (document.readyState === "complete" || document.readyState === "interactive") {
+    tryRestoreShadowState();
+  } else {
+    window.addEventListener("DOMContentLoaded", tryRestoreShadowState, { once: true });
+    window.addEventListener("load", tryRestoreShadowState, { once: true });
+  }
+  electron.ipcRenderer.on("vault:capture-state", (_event, replyChannel) => {
+    try {
+      const snapshot = serializeShadowState(document, window);
+      electron.ipcRenderer.send(replyChannel || "vault:capture-state-reply", snapshot);
+    } catch {
+    }
+  });
+}
 try {
   electron.webFrame.executeJavaScript(`(function() {
     try {
@@ -982,6 +1240,7 @@ try {
   initMediaContinuity();
   initScrollContinuity();
   initMediaSensor();
+  initShadowStateVault();
   initManifestHarvester();
   initIdentityHarvester();
   initSemanticTitleHarvester();

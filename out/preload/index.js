@@ -25,7 +25,8 @@ const IPC_CHANNELS = {
     GET_NODES: "db.getNodes",
     SAVE_NODE: "db.saveNode",
     DELETE_NODE: "db.deleteNode",
-    SAVE_TAB_LAYOUT: "db.saveTabLayout"
+    SAVE_TAB_LAYOUT: "db.saveTabLayout",
+    SET_UI_MODE: "db.setUiMode"
   },
   WINDOW: {
     MINIMIZE: "window.minimize",
@@ -167,7 +168,8 @@ function createIpcClient(ipcRenderer) {
       getNodes: (tabId) => ipcRenderer.invoke(IPC_CHANNELS.DB.GET_NODES, tabId),
       saveNode: (node) => ipcRenderer.send(IPC_CHANNELS.DB.SAVE_NODE, node),
       deleteNode: (id) => ipcRenderer.send(IPC_CHANNELS.DB.DELETE_NODE, id),
-      saveTabLayout: (tabId, layoutState) => ipcRenderer.send(IPC_CHANNELS.DB.SAVE_TAB_LAYOUT, tabId, layoutState)
+      saveTabLayout: (tabId, layoutState) => ipcRenderer.send(IPC_CHANNELS.DB.SAVE_TAB_LAYOUT, tabId, layoutState),
+      setUiMode: (mode) => ipcRenderer.invoke(IPC_CHANNELS.DB.SET_UI_MODE, mode)
     },
     window: {
       minimize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.MINIMIZE),
@@ -804,6 +806,7 @@ const api = {
   saveNode: client.db.saveNode,
   deleteNode: client.db.deleteNode,
   saveTabLayout: client.db.saveTabLayout,
+  setUiMode: client.db.setUiMode,
   // Window Controls
   setIgnoreMouseEvents: client.window.setIgnoreMouseEvents,
   setWakeRegions: client.window.setWakeRegions,

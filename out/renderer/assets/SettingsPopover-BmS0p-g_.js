@@ -1,4 +1,4 @@
-import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, b as applyUpdate, o as openExternalUrl, t as template, e as delegateEvents, f as onMount, i as initUpdateStore, g as insert, h as Show, m as memo, j as createRenderEffect, s as setStyleProperty, k as createSignal, l as setAttribute, n as layoutStore, p as setLayoutStore, F as For, W as WorkspaceIcon, q as createEffect, A as AppIcon, r as frecencyEngine, v as getAppNameFromUrl, w as addEventListener, P as ProfileForm, x as activeShortcuts, y as className, z as saveShortcut, B as onCleanup, C as style, D as use, E as Portal } from "./index-oxVhEfYE.js";
+import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, b as applyUpdate, o as openExternalUrl, t as template, e as delegateEvents, f as onMount, i as initUpdateStore, g as insert, h as Show, m as memo, j as createRenderEffect, s as setStyleProperty, k as createSignal, l as setAttribute, n as layoutStore, p as setLayoutStore, F as For, W as WorkspaceIcon, q as createEffect, A as AppIcon, r as frecencyEngine, v as getAppNameFromUrl, w as addEventListener, x as getProviderDomain, y as getSortedIdentities, P as ProfileForm, z as activeShortcuts, B as className, C as saveShortcut, D as onCleanup, E as style, G as use, H as Portal } from "./index-Dxnrzc_q.js";
 var _tmpl$$8 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 active:scale-[0.98] border border-neutral-300/80 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Check for Updates`), _tmpl$2$8 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 opacity-70 cursor-not-allowed"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-neutral-600"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>Checking...`), _tmpl$3$8 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Download Update`), _tmpl$4$5 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg opacity-80 cursor-not-allowed">Downloading...`), _tmpl$5$4 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Restart to Apply`), _tmpl$6$4 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-neutral-900 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Download Package`), _tmpl$7$4 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Retry Check`);
 function UpdateActionButton() {
   return createComponent(Switch, {
@@ -70,13 +70,13 @@ function UpdateActionButton() {
   });
 }
 delegateEvents(["click"]);
-var _tmpl$$7 = /* @__PURE__ */ template(`<p class="text-[11px] text-neutral-400 mt-1 pl-3">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span><span class="font-medium text-neutral-800">`), _tmpl$3$7 = /* @__PURE__ */ template(`<p class=text-neutral-500>Contacting release server for latest version information...`), _tmpl$4$4 = /* @__PURE__ */ template(`<div class=space-y-1><p class="font-medium text-neutral-900">A new version (<!>) is ready to download.</p><p class="text-neutral-500 text-[11px]">Download and install to receive the latest features, improvements, and fixes.`), _tmpl$5$3 = /* @__PURE__ */ template(`<div class="space-y-2 pt-1"><div class="flex justify-between text-[11px] font-medium text-neutral-700"><span>Downloading update...</span><span>%</span></div><div class="w-full bg-neutral-200 h-2 rounded-full overflow-hidden border border-neutral-300/50"><div class="bg-neutral-900 h-full rounded-full transition-all duration-300 ease-out">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200/80 p-2.5 rounded-lg font-medium"><span class="w-2 h-2 rounded-full bg-emerald-600 shrink-0"></span><span>Update downloaded and verified. Restart Apposition to apply changes.`), _tmpl$7$3 = /* @__PURE__ */ template(`<p class="text-[11px] font-mono text-neutral-600 bg-neutral-100 px-2 py-1 rounded">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="space-y-1.5 bg-white border border-neutral-200 p-2.5 rounded-lg"><p class="font-medium text-neutral-900">Version <!> is available for manual download.`), _tmpl$9$2 = /* @__PURE__ */ template(`<p class="text-red-700 font-medium text-[11px]">`), _tmpl$0$1 = /* @__PURE__ */ template(`<div class="bg-neutral-50 border border-neutral-200/80 rounded-[14px] p-4.5 space-y-3.5 shadow-2xs"><div class="flex items-center justify-between"><div class="flex items-center gap-2"><span class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Application Updates</span><span class="text-[11px] font-mono font-medium text-neutral-600 bg-white border border-neutral-200 px-2 py-0.5 rounded-md shadow-2xs">v</span></div></div><div class="text-xs text-neutral-600">`);
+var _tmpl$$7 = /* @__PURE__ */ template(`<p class="text-[11px] text-neutral-400 mt-1 pl-3">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div><div class="flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span><span class="font-medium text-neutral-800">`), _tmpl$3$7 = /* @__PURE__ */ template(`<p class=text-neutral-500>Contacting release server for latest version information...`), _tmpl$4$4 = /* @__PURE__ */ template(`<div class=space-y-1><p class="font-medium text-neutral-900">A new version (<!>) is ready to download.</p><p class="text-neutral-500 text-[11px]">Download and install to receive the latest features, improvements, and fixes.`), _tmpl$5$3 = /* @__PURE__ */ template(`<div class="space-y-2 pt-1"><div class="flex justify-between text-[11px] font-medium text-neutral-700"><span>Downloading update...</span><span>%</span></div><div class="w-full bg-neutral-200 h-2 rounded-full overflow-hidden border border-neutral-300/50"><div class="bg-neutral-900 h-full rounded-full transition-all duration-300 ease-out">`), _tmpl$6$3 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 text-emerald-800 bg-emerald-50 border border-emerald-200/80 p-2.5 rounded-lg font-medium"><span class="w-2 h-2 rounded-full bg-emerald-600 shrink-0"></span><span>Update downloaded and verified. Restart Apposition to apply changes.`), _tmpl$7$3 = /* @__PURE__ */ template(`<p class="text-[11px] font-mono text-neutral-600 bg-neutral-100 px-2 py-1 rounded">`), _tmpl$8$3 = /* @__PURE__ */ template(`<div class="space-y-1.5 bg-white border border-neutral-200 p-2.5 rounded-lg"><p class="font-medium text-neutral-900">Version <!> is available for manual download.`), _tmpl$9$2 = /* @__PURE__ */ template(`<p class="text-red-700 font-medium text-[11px]">`), _tmpl$0$2 = /* @__PURE__ */ template(`<div class="bg-neutral-50 border border-neutral-200/80 rounded-[14px] p-4.5 space-y-3.5 shadow-2xs"><div class="flex items-center justify-between"><div class="flex items-center gap-2"><span class="text-xs font-semibold text-neutral-800 uppercase tracking-wider">Application Updates</span><span class="text-[11px] font-mono font-medium text-neutral-600 bg-white border border-neutral-200 px-2 py-0.5 rounded-md shadow-2xs">v</span></div></div><div class="text-xs text-neutral-600">`);
 function UpdateCard() {
   onMount(() => {
     initUpdateStore();
   });
   return (() => {
-    var _el$ = _tmpl$0$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
+    var _el$ = _tmpl$0$2(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling;
     _el$5.firstChild;
     var _el$7 = _el$2.nextSibling;
     insert(_el$5, () => updateStore.currentVersion, null);
@@ -189,7 +189,7 @@ function UpdateCard() {
     return _el$;
   })();
 }
-var _tmpl$$6 = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock unlimited workspaces, tabs, and incognito profiles.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class=mt-4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
+var _tmpl$$6 = /* @__PURE__ */ template(`<img class="w-20 h-20 rounded-full border-4 border-white shadow-sm object-cover">`), _tmpl$2$6 = /* @__PURE__ */ template(`<div class="absolute -bottom-2 -right-2 bg-neutral-900 text-white text-[9px] font-bold uppercase tracking-wider px-2 py-1 rounded-full border-2 border-white shadow-sm flex items-center gap-1"><svg width=10 height=10 viewBox="0 0 24 24"fill=currentColor class=text-yellow-400><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>PRO`), _tmpl$3$6 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-green-700 bg-green-50 border border-green-200 px-2.5 py-1 rounded-md flex items-center gap-1.5 shadow-sm"><span class="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span> Active`), _tmpl$4$3 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">License Key</span><div class="flex items-center gap-2"><button class="text-[10px] font-semibold text-neutral-400 hover:text-neutral-700 transition-colors">Refresh Status</button><span class=text-neutral-300>·</span><button class="text-[10px] font-semibold text-red-500 hover:text-red-700 transition-colors disabled:opacity-50"></button></div></div><div class="flex items-center justify-between bg-white rounded-lg border border-neutral-200 p-3 shadow-sm"><span class="font-mono text-sm font-medium text-neutral-700"></span><button class="text-xs font-medium text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100 px-3 py-1.5 rounded-md transition-colors">Copy`), _tmpl$5$2 = /* @__PURE__ */ template(`<div class="p-2.5 bg-amber-50/80 border border-amber-200/60 rounded-lg text-amber-800 text-[11px] flex items-center justify-between"><div class="flex items-center gap-2"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span><span>Offline Mode (7-Day Grace Lease)</span></div><span class="text-amber-700/80 text-[10px] font-mono">`), _tmpl$6$2 = /* @__PURE__ */ template(`<div class="pt-2 flex justify-between items-center text-sm"><span class=text-neutral-500>Renewal Date</span><span class="text-neutral-900 font-medium">`), _tmpl$7$2 = /* @__PURE__ */ template(`<div class="pt-4 text-center"><p class="text-sm text-neutral-500 mb-4">Upgrade to unlock multi-account switching, floating multi-panes, and priority updates.</p><button class="w-full py-2.5 bg-neutral-900 hover:bg-neutral-800 text-white text-sm font-medium rounded-lg shadow-sm transition-colors cursor-pointer">Upgrade to Pro`), _tmpl$8$2 = /* @__PURE__ */ template(`<div class="max-w-md mx-auto"><div class="flex flex-col items-center justify-center space-y-4 py-6"><div class=relative></div><div class=text-center><h3 class="text-lg font-semibold text-neutral-900"></h3><p class="text-sm text-neutral-500"></p></div></div><div class="mt-4 bg-neutral-50 border border-neutral-200/60 rounded-[16px] p-5 space-y-5"><div class="flex items-center justify-between pb-4 border-b border-neutral-200"><span class="text-xs font-semibold text-neutral-500 uppercase tracking-wider">Subscription</span></div></div><div class=mt-4>`), _tmpl$9$1 = /* @__PURE__ */ template(`<div class="w-20 h-20 rounded-full bg-blue-50 flex items-center justify-center border-4 border-white shadow-sm"><svg width=32 height=32 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.5 class=text-neutral-900><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$0$1 = /* @__PURE__ */ template(`<span class="text-xs font-medium text-neutral-600 bg-white border border-neutral-200 px-2.5 py-1 rounded-md shadow-sm">Free Plan`);
 function AccountTab(props) {
   const [deactivating, setDeactivating] = createSignal(false);
   const handleDeactivate = async () => {
@@ -258,7 +258,7 @@ function AccountTab(props) {
         return layoutStore.isPremium;
       },
       get fallback() {
-        return _tmpl$0();
+        return _tmpl$0$1();
       },
       get children() {
         return _tmpl$3$6();
@@ -336,7 +336,7 @@ function AccountTab(props) {
         var _el$27 = _tmpl$7$2(), _el$28 = _el$27.firstChild, _el$29 = _el$28.nextSibling;
         _el$29.$$click = () => {
           props.onClose();
-          setLayoutStore("paywallReason", "workspace");
+          setLayoutStore("paywallReason", null);
           setLayoutStore("showPaywall", true);
         };
         return _el$27;
@@ -516,78 +516,10 @@ function ProfileShortcutsManager(props) {
   })();
 }
 delegateEvents(["input", "click"]);
-var _tmpl$$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Default)`), _tmpl$2$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Incognito)`), _tmpl$3$3 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400">(+<!>)`), _tmpl$4$2 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-neutral-50/90 hover:bg-white border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all cursor-pointer min-w-0 group/pill"><div class="w-4 h-4 rounded-full bg-white border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><span class="text-xs font-normal text-neutral-800 truncate max-w-[190px]">`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-5 h-5 rounded-full bg-neutral-100 ring-2 ring-white border border-neutral-200 text-[8px] font-medium text-neutral-500">+`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="flex items-center -space-x-1.5 cursor-pointer pl-0.5">`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-8 h-8 rounded-xl text-white text-xs font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="text-sm font-medium text-neutral-900 truncate"></span></div></div></div><button class="px-3 py-1.5 text-xs font-normal text-neutral-600 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/70 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/50 shadow-2xs">Configure</button></div><div class="flex items-center justify-between pt-2 border-t border-neutral-100 min-h-[34px]"><div class="flex items-center gap-2 overflow-hidden min-w-0">`), _tmpl$8$1 = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-dashed border-neutral-200 text-xs font-normal text-neutral-400 hover:text-neutral-800 hover:border-neutral-400 transition-colors cursor-pointer"><span>+</span> Connect account`), _tmpl$9 = /* @__PURE__ */ template(`<div class="relative flex items-center justify-center w-5 h-5 rounded-full bg-white ring-2 ring-white border border-neutral-200/80 shadow-2xs overflow-hidden"><img class="w-3 h-3 object-contain">`);
-const PROVIDER_PRIORITY = {
-  google: 100,
-  github: 90,
-  microsoft: 80,
-  apple: 70,
-  slack: 60,
-  x: 50,
-  linear: 40,
-  figma: 39,
-  notion: 38,
-  chatgpt: 37,
-  canva: 36,
-  vercel: 35,
-  stripe: 34,
-  atlassian: 33,
-  discord: 30,
-  gitlab: 29
-};
-function getProviderDomain(id) {
-  switch (id) {
-    case "google":
-      return "google.com";
-    case "github":
-      return "github.com";
-    case "microsoft":
-      return "microsoft.com";
-    case "apple":
-      return "apple.com";
-    case "slack":
-      return "slack.com";
-    case "x":
-      return "x.com";
-    case "linear":
-      return "linear.app";
-    case "notion":
-      return "notion.so";
-    case "chatgpt":
-      return "chatgpt.com";
-    case "canva":
-      return "canva.com";
-    case "atlassian":
-      return "atlassian.com";
-    default:
-      return `${id}.com`;
-  }
-}
+var _tmpl$$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Default)`), _tmpl$2$3 = /* @__PURE__ */ template(`<span class="text-[11px] font-normal text-neutral-400">(Incognito)`), _tmpl$3$3 = /* @__PURE__ */ template(`<span class="text-[9px] font-semibold text-neutral-500 bg-neutral-100 border border-neutral-200/80 px-1.5 py-0.5 rounded leading-none tracking-wider">PRO (Inactive)`), _tmpl$4$2 = /* @__PURE__ */ template(`<button title="Delete Profile"class="p-1.5 text-neutral-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">`), _tmpl$5$1 = /* @__PURE__ */ template(`<span class="text-[10px] font-normal text-neutral-400">(+<!>)`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-2 px-2.5 py-1 rounded-lg bg-neutral-50/90 hover:bg-white border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] transition-all cursor-pointer min-w-0 group/pill"><div class="w-4 h-4 rounded-full bg-white border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><span class="text-xs font-normal text-neutral-800 truncate max-w-[190px]">`), _tmpl$7$1 = /* @__PURE__ */ template(`<div class="flex items-center justify-center w-5 h-5 rounded-full bg-neutral-100 ring-2 ring-white border border-neutral-200 text-[8px] font-medium text-neutral-500">+`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="flex items-center -space-x-1.5 cursor-pointer pl-0.5">`), _tmpl$9 = /* @__PURE__ */ template(`<div class="flex flex-col gap-3 p-4 bg-white rounded-2xl border border-neutral-200/80 shadow-xs hover:border-neutral-300 transition-all group"><div class="flex items-center justify-between"><div class="flex items-center gap-3 min-w-0"><div class="flex items-center justify-center w-8 h-8 rounded-xl text-white text-xs font-medium shadow-[inset_0_1px_1px_rgba(255,255,255,0.35)] shrink-0"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5 flex-wrap"><span class="text-sm font-medium text-neutral-900 truncate"></span></div></div></div><div class="flex items-center gap-1.5"><button class="px-3 py-1.5 text-xs font-normal text-neutral-600 hover:text-neutral-950 bg-neutral-100/80 hover:bg-neutral-200/70 rounded-lg transition-colors shrink-0 cursor-pointer border border-neutral-200/50 shadow-2xs">Configure</button></div></div><div class="flex items-center justify-between pt-2 border-t border-neutral-100 min-h-[34px]"><div class="flex items-center gap-2 overflow-hidden min-w-0">`), _tmpl$0 = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-dashed border-neutral-200 text-xs font-normal text-neutral-400 hover:text-neutral-800 hover:border-neutral-400 transition-colors cursor-pointer"><span>+</span> Connect account`), _tmpl$1 = /* @__PURE__ */ template(`<div class="relative flex items-center justify-center w-5 h-5 rounded-full bg-white ring-2 ring-white border border-neutral-200/80 shadow-2xs overflow-hidden"><img class="w-3 h-3 object-contain">`);
 function ProfileCard(props) {
   const [copied, setCopied] = createSignal(false);
-  const getIdentities = () => {
-    try {
-      return props.profile.identities_json ? JSON.parse(props.profile.identities_json) : {};
-    } catch {
-      return {};
-    }
-  };
-  const activeIdentitiesList = () => {
-    const ids = getIdentities();
-    const list = Object.entries(ids).map(([providerId, data]) => ({
-      providerId,
-      ...data
-    }));
-    return list.sort((a, b) => {
-      const aReal = Boolean(a.email?.includes("@") || a.handle?.startsWith("@") && !a.handle.includes("_user"));
-      const bReal = Boolean(b.email?.includes("@") || b.handle?.startsWith("@") && !b.handle.includes("_user"));
-      if (aReal && !bReal) return -1;
-      if (!aReal && bReal) return 1;
-      const pA = PROVIDER_PRIORITY[a.providerId] || 10;
-      const pB = PROVIDER_PRIORITY[b.providerId] || 10;
-      return pB - pA;
-    });
-  };
+  const activeIdentitiesList = () => getSortedIdentities(props.profile.identities_json);
   const isDefault = () => props.profile.id === "main";
   const primaryIdentity = () => activeIdentitiesList()[0];
   const secondaryIdentities = () => activeIdentitiesList().slice(1);
@@ -601,7 +533,7 @@ function ProfileCard(props) {
     }
   };
   return (() => {
-    var _el$ = _tmpl$7$1(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$0 = _el$3.nextSibling, _el$1 = _el$2.nextSibling, _el$10 = _el$1.firstChild;
+    var _el$ = _tmpl$9(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$5.firstChild, _el$7 = _el$6.firstChild, _el$1 = _el$3.nextSibling, _el$11 = _el$1.firstChild, _el$12 = _el$2.nextSibling, _el$13 = _el$12.firstChild;
     insert(_el$4, () => props.profile.name.charAt(0).toUpperCase());
     insert(_el$7, () => props.profile.name);
     insert(_el$6, createComponent(Show, {
@@ -620,93 +552,114 @@ function ProfileCard(props) {
         return _tmpl$2$3();
       }
     }), null);
-    addEventListener(_el$0, "click", props.onConfigure, true);
-    insert(_el$10, createComponent(Show, {
+    insert(_el$6, createComponent(Show, {
+      get when() {
+        return memo(() => !!!layoutStore.isPremium)() && !isDefault();
+      },
+      get children() {
+        return _tmpl$3$3();
+      }
+    }), null);
+    insert(_el$1, createComponent(Show, {
+      get when() {
+        return props.onDelete;
+      },
+      get children() {
+        var _el$10 = _tmpl$4$2();
+        _el$10.$$click = (e) => {
+          e.stopPropagation();
+          props.onDelete?.();
+        };
+        return _el$10;
+      }
+    }), _el$11);
+    addEventListener(_el$11, "click", props.onConfigure, true);
+    insert(_el$13, createComponent(Show, {
       get when() {
         return primaryIdentity();
       },
       get fallback() {
         return (() => {
-          var _el$22 = _tmpl$8$1();
-          addEventListener(_el$22, "click", props.onConfigure, true);
-          return _el$22;
+          var _el$25 = _tmpl$0();
+          addEventListener(_el$25, "click", props.onConfigure, true);
+          return _el$25;
         })();
       },
       get children() {
         return [(() => {
-          var _el$11 = _tmpl$4$2(), _el$12 = _el$11.firstChild, _el$13 = _el$12.firstChild, _el$14 = _el$12.nextSibling;
-          _el$11.$$click = handleCopyEmail;
-          _el$13.addEventListener("error", (e) => {
+          var _el$14 = _tmpl$6$1(), _el$15 = _el$14.firstChild, _el$16 = _el$15.firstChild, _el$17 = _el$15.nextSibling;
+          _el$14.$$click = handleCopyEmail;
+          _el$16.addEventListener("error", (e) => {
             e.currentTarget.style.display = "none";
           });
-          insert(_el$14, (() => {
+          insert(_el$17, (() => {
             var _c$ = memo(() => !!copied());
             return () => _c$() ? "✓ Copied" : primaryIdentity()?.email || primaryIdentity()?.handle;
           })());
-          insert(_el$11, createComponent(Show, {
+          insert(_el$14, createComponent(Show, {
             get when() {
               return memo(() => !!primaryIdentity()?.aliases?.length)() && !copied();
             },
             get children() {
-              var _el$15 = _tmpl$3$3(), _el$16 = _el$15.firstChild, _el$18 = _el$16.nextSibling;
-              _el$18.nextSibling;
-              insert(_el$15, () => primaryIdentity()?.aliases?.length, _el$18);
-              return _el$15;
+              var _el$18 = _tmpl$5$1(), _el$19 = _el$18.firstChild, _el$21 = _el$19.nextSibling;
+              _el$21.nextSibling;
+              insert(_el$18, () => primaryIdentity()?.aliases?.length, _el$21);
+              return _el$18;
             }
           }), null);
           createRenderEffect((_p$) => {
             var _v$ = `Click to copy: ${primaryIdentity()?.email || primaryIdentity()?.handle}`, _v$2 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(primaryIdentity()?.providerId)}&sz=64`, _v$3 = primaryIdentity()?.providerId;
-            _v$ !== _p$.e && setAttribute(_el$11, "title", _p$.e = _v$);
-            _v$2 !== _p$.t && setAttribute(_el$13, "src", _p$.t = _v$2);
-            _v$3 !== _p$.a && setAttribute(_el$13, "alt", _p$.a = _v$3);
+            _v$ !== _p$.e && setAttribute(_el$14, "title", _p$.e = _v$);
+            _v$2 !== _p$.t && setAttribute(_el$16, "src", _p$.t = _v$2);
+            _v$3 !== _p$.a && setAttribute(_el$16, "alt", _p$.a = _v$3);
             return _p$;
           }, {
             e: void 0,
             t: void 0,
             a: void 0
           });
-          return _el$11;
+          return _el$14;
         })(), createComponent(Show, {
           get when() {
             return secondaryIdentities().length > 0;
           },
           get children() {
-            var _el$19 = _tmpl$6$1();
-            addEventListener(_el$19, "click", props.onConfigure, true);
-            insert(_el$19, createComponent(For, {
+            var _el$22 = _tmpl$8$1();
+            addEventListener(_el$22, "click", props.onConfigure, true);
+            insert(_el$22, createComponent(For, {
               get each() {
                 return secondaryIdentities().slice(0, 3);
               },
               children: (s) => (() => {
-                var _el$23 = _tmpl$9(), _el$24 = _el$23.firstChild;
-                _el$24.addEventListener("error", (e) => {
+                var _el$26 = _tmpl$1(), _el$27 = _el$26.firstChild;
+                _el$27.addEventListener("error", (e) => {
                   e.currentTarget.style.display = "none";
                 });
                 createRenderEffect((_p$) => {
                   var _v$4 = `https://www.google.com/s2/favicons?domain=${getProviderDomain(s.providerId)}&sz=64`, _v$5 = s.providerId;
-                  _v$4 !== _p$.e && setAttribute(_el$24, "src", _p$.e = _v$4);
-                  _v$5 !== _p$.t && setAttribute(_el$24, "alt", _p$.t = _v$5);
+                  _v$4 !== _p$.e && setAttribute(_el$27, "src", _p$.e = _v$4);
+                  _v$5 !== _p$.t && setAttribute(_el$27, "alt", _p$.t = _v$5);
                   return _p$;
                 }, {
                   e: void 0,
                   t: void 0
                 });
-                return _el$23;
+                return _el$26;
               })()
             }), null);
-            insert(_el$19, createComponent(Show, {
+            insert(_el$22, createComponent(Show, {
               get when() {
                 return secondaryIdentities().length > 3;
               },
               get children() {
-                var _el$20 = _tmpl$5$1();
-                _el$20.firstChild;
-                insert(_el$20, () => secondaryIdentities().length - 3, null);
-                return _el$20;
+                var _el$23 = _tmpl$7$1();
+                _el$23.firstChild;
+                insert(_el$23, () => secondaryIdentities().length - 3, null);
+                return _el$23;
               }
             }), null);
-            createRenderEffect(() => setAttribute(_el$19, "title", secondaryIdentities().map((s) => `${s.providerId}: ${s.email || s.handle}`).join(", ")));
-            return _el$19;
+            createRenderEffect(() => setAttribute(_el$22, "title", secondaryIdentities().map((s) => `${s.providerId}: ${s.email || s.handle}`).join(", ")));
+            return _el$22;
           }
         })];
       }
@@ -787,7 +740,7 @@ function ProfilesTab(props) {
         return [(() => {
           var _el$2 = _tmpl$$2(), _el$3 = _el$2.firstChild, _el$4 = _el$3.nextSibling;
           _el$4.$$click = () => {
-            if (!layoutStore.isPremium && layoutStore.profiles.length >= 2) {
+            if (!layoutStore.isPremium && layoutStore.profiles.length >= 1) {
               props.onClose();
               setLayoutStore("paywallReason", "profile");
               setLayoutStore("showPaywall", true);
@@ -804,7 +757,10 @@ function ProfilesTab(props) {
             },
             children: (profile) => createComponent(ProfileCard, {
               profile,
-              onConfigure: () => props.setEditingProfileId(profile.id)
+              onConfigure: () => props.setEditingProfileId(profile.id),
+              get onDelete() {
+                return profile.id !== "main" ? () => props.handleDeleteProfile(profile.id) : void 0;
+              }
             })
           }));
           return _el$5;
