@@ -1,8 +1,60 @@
 [
   {
+    "version": "1.3.4",
+    "tag": "v1.3.4",
+    "title": "Resilient Auto-Updates & Direct Profile Navigation",
+    "publishedAt": "2026-10-04",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Direct Profile Switcher",
+            "description": "The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."
+          },
+          {
+            "title": "Hover Workspace Stack",
+            "description": "Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."
+          },
+          {
+            "title": "Precision Update Notifications",
+            "description": "Automatic version update notifications now proactively appear upon launch with a refined, distraction-free notification capsule that reflects our precision design language."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Resilient Multi-Tier Updates",
+            "description": "Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."
+          },
+          {
+            "title": "Unified Release Notes Bar",
+            "description": "Streamlined the Release Notes view into a single unified action bar, removing redundant update banners and ensuring zero duplicate action prompts."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Direct Profile Switcher",
+        "description": "The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."
+      },
+      {
+        "title": "Hover Workspace Stack",
+        "description": "Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."
+      },
+      {
+        "title": "Resilient Multi-Tier Updates",
+        "description": "Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."
+      }
+    ]
+  },
+  {
     "version": "1.3.3",
     "tag": "v1.3.3",
-    "title": "v1.3.3: Persistent Active Tabs & Seamless Auto-Wake",
+    "title": "Persistent Active Tabs & Seamless Auto-Wake",
     "publishedAt": "2026-09-29",
     "categories": [
       {

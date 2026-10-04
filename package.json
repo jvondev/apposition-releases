@@ -1,6 +1,6 @@
 {
   "name": "apposition",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "A smart digital workspace to organize web apps, accounts, and tasks in one place.",
   "main": "./out/main/index.js",
   "author": "jvondev <jvondev@users.noreply.github.com>",
@@ -22,6 +22,7 @@
     "dev:gatekeep": "cross-env FORCE_GATEKEEP=1 electron-vite dev",
     "dev:web": "pnpm --filter web dev",
     "dev:app:web": "vite -c vite.app.config.ts",
+    "qa": "node scripts/qa.mjs",
     "build": "npm run typecheck && electron-vite build",
     "build:web": "pnpm --filter web build",
     "rebuild": "electron-rebuild",
