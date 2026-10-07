@@ -51,11 +51,16 @@ const IPC_CHANNELS = {
     NAVIGATE: "view.navigate",
     FOCUS: "view.focusPane",
     SET_AUDIO_MUTED: "view.setAudioMuted",
+    REPARENT: "view.reparentPane",
     SET_DEVICE_EMULATION: "view.setDeviceEmulation",
     SET_NETWORK_THROTTLE: "view.setNetworkThrottle",
     EXTRACT_READER_MODE: "view.extractReaderMode",
     PICK_COLOR: "view.pickColor",
-    COPY_IMAGE: "view.copyImage"
+    COPY_IMAGE: "view.copyImage",
+    GO_BACK: "view.goBack",
+    GO_FORWARD: "view.goForward",
+    GO_TO_INDEX: "view.goToIndex",
+    GET_NAV_HISTORY: "view.getNavHistory"
   },
   SEARCH: {
     FIND_IN_ALL_PANES: "search.findInAllPanes",
@@ -72,11 +77,17 @@ const IPC_CHANNELS = {
     GET_LAST_SPLIT_SESSION: "catalog.getLastSplitSession"
   },
   MEMORY: {
-    GET_STATS: "memory.getStats"
+    GET_STATS: "memory.getStats",
+    SUSPEND_PANE: "memory.suspendPane",
+    RESUME_PANE: "memory.resumePane"
   },
   OVERLAY: {
     FORWARD_POINTER: "overlay.forwardPointer",
-    CURSOR: "overlay.cursor"
+    CURSOR: "overlay.cursor",
+    SHOW: "overlay.show",
+    HIDE: "overlay.hide",
+    INTENT: "overlay.intent",
+    SPECS: "overlay.specs"
   },
   LICENSING: {
     ACTIVATE: "licensing.activate",
@@ -85,9 +96,11 @@ const IPC_CHANNELS = {
     GET_KEY: "licensing.getKey",
     GET_STATE: "licensing.getState",
     CHECK_PREMIUM: "licensing.checkPremium",
+    GET_CAPABILITIES: "licensing.getCapabilities",
     IS_DEV: "licensing.isDev",
     GET_CHECKOUT_URL: "licensing.getCheckoutUrl",
-    SAVE_ATTRIBUTION: "licensing.saveAttribution"
+    SAVE_ATTRIBUTION: "licensing.saveAttribution",
+    CHECK_FOR_UPDATES: "updater.check"
   },
   CHANGELOG: {
     GET_STATUS: "changelog.getStatus",
@@ -122,7 +135,9 @@ const IPC_CHANNELS = {
   },
   EVENTS: {
     UPDATE_STATE_CHANGED: "app:update-state-changed",
+    AUTH_DETECTED: "pane.auth-detected",
     DEEP_LINK_WORKSPACE: "app.deep-link.workspace",
+    DEEP_LINK_LICENSE: "app.deep-link.license",
     OPEN_IN_NEW_PANE: "open-in-new-pane",
     TOAST: "app:toast",
     VIEW_NAVIGATED: "view.navigated",
@@ -132,6 +147,7 @@ const IPC_CHANNELS = {
     DEVTOOLS_CLOSED: "view.devtools-closed",
     AUTH_COMPLETED: "app.auth-completed",
     PROFILES_UPDATED: "app.profiles-updated",
+    PROFILE_IDENTITIES_UPDATED: "app.profile-identities-updated",
     CONTEXT_MENU_NATIVE: "view.context-menu-native",
     CONTEXT_MENU_SHOW: "view.context-menu-show",
     CONTEXT_MENU_DISMISS: "view.context-menu-dismiss",
@@ -194,12 +210,13 @@ function createIpcClient(ipcRenderer) {
       setAudioMuted: (paneId, muted) => ipcRenderer.send(IPC_CHANNELS.VIEW.SET_AUDIO_MUTED, paneId, muted)
     },
     licensing: {
-      activate: (key) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.ACTIVATE, key),
+      activate: (key, email) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.ACTIVATE, key, email),
       validate: (key) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.VALIDATE, key),
       deactivate: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.DEACTIVATE),
       getKey: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_KEY),
       getState: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_STATE),
       checkPremium: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.CHECK_PREMIUM),
+      getCapabilities: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_CAPABILITIES),
       isDev: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.IS_DEV),
       getCheckoutUrl: () => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.GET_CHECKOUT_URL),
       saveAttribution: (ref, affiliateId) => ipcRenderer.invoke(IPC_CHANNELS.LICENSING.SAVE_ATTRIBUTION, ref, affiliateId),
@@ -641,7 +658,7 @@ function buildForwardMsg(type, e) {
     y,
     button: e.button,
     buttons: e.buttons,
-    clickCount: e.detail,
+    clickCount: e.detail || 1,
     modifiers: mods
   };
 }
@@ -818,6 +835,11 @@ const api = {
   signalReady: () => electron.ipcRenderer.send("app:ui-mounted"),
   focusMainWindow: () => electron.ipcRenderer.send("app:focus-overlay-window"),
   focusOverlayWindow: () => electron.ipcRenderer.send("app:focus-overlay-window"),
+  // Showcase & Studio Automation
+  getShowcaseConfig: () => ({
+    action: process.env.SHOWCASE_ACTION || null,
+    query: process.env.SHOWCASE_QUERY || null
+  }),
   // Licensing & Updates
   activateLicenseKey: client.licensing.activate,
   validateLicenseKey: client.licensing.validate,
@@ -825,6 +847,7 @@ const api = {
   getLicenseKey: client.licensing.getKey,
   getLicenseState: client.licensing.getState,
   checkPremiumStatus: client.licensing.checkPremium,
+  getCapabilities: client.licensing.getCapabilities,
   isDev: client.licensing.isDev,
   getCheckoutUrl: client.licensing.getCheckoutUrl,
   saveAttribution: client.licensing.saveAttribution,
@@ -867,6 +890,25 @@ const api = {
   commitTearWindow: client.tearing.commit,
   // Webview Lifecycle & DOM Helpers
   ...webviewHelpers,
+  viewGoBack: (paneId) => {
+    if (api.isNativeViews) {
+      electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_BACK, paneId);
+    } else {
+      webviewHelpers.viewGoBack(paneId);
+    }
+  },
+  viewGoForward: (paneId) => {
+    if (api.isNativeViews) {
+      electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_FORWARD, paneId);
+    } else {
+      webviewHelpers.viewGoForward(paneId);
+    }
+  },
+  viewGoToIndex: (paneId, index) => {
+    electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_TO_INDEX, paneId, index);
+  },
+  viewGetNavHistory: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.GET_NAV_HISTORY, paneId),
+  viewCapture: (paneId) => electron.ipcRenderer.invoke("view.capture", paneId),
   viewDestroy: (paneId) => {
     const el = getWebview(paneId);
     if (el) {
@@ -899,7 +941,6 @@ const api = {
   },
   viewWake: (_paneId, _bounds) => {
   },
-  viewCapture: () => Promise.resolve(""),
   viewCaptureAllActive: () => Promise.resolve({}),
   viewHibernateAllActive: () => Promise.resolve({}),
   viewHibernate: () => Promise.resolve(""),
@@ -931,7 +972,30 @@ const api = {
   },
   registerWebContents: (paneId, wcId) => client.view.registerWebContents(paneId, wcId),
   view: {
-    createPane: (req) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.CREATE_PANE, req),
+    createPane: (req) => {
+      try {
+        const safeReq = {
+          paneId: String(req?.paneId || ""),
+          url: String(req?.url || ""),
+          partition: String(req?.partition || ""),
+          userAgent: String(req?.userAgent || ""),
+          rect: req?.rect ? {
+            x: Number(req.rect.x) || 0,
+            y: Number(req.rect.y) || 0,
+            width: Number(req.rect.width) || 0,
+            height: Number(req.rect.height) || 0
+          } : { x: -1e4, y: -1e4, width: 100, height: 100 },
+          navEntries: Array.isArray(req?.navEntries) ? req.navEntries.map((e) => ({
+            url: String(e?.url || ""),
+            title: String(e?.title || "")
+          })) : void 0,
+          navActiveIndex: typeof req?.navActiveIndex === "number" ? req.navActiveIndex : void 0
+        };
+        electron.ipcRenderer.send(IPC_CHANNELS.VIEW.CREATE_PANE, safeReq);
+      } catch (err) {
+        console.error("[preload] createPane IPC error:", err);
+      }
+    },
     setBounds: (paneId, bounds) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.SET_BOUNDS, paneId, bounds),
     destroyPane: (paneId) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.DESTROY_PANE, paneId),
     navigate: (paneId, url) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.NAVIGATE, paneId, url),
@@ -943,7 +1007,12 @@ const api = {
     setNetworkThrottle: (paneId, profile) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, paneId, profile),
     extractReaderMode: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, paneId),
     pickColor: (paneId, x, y) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.PICK_COLOR, paneId, x, y),
-    copyImage: (paneId, x, y, srcURL) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.COPY_IMAGE, paneId, x, y, srcURL)
+    copyImage: (paneId, x, y, srcURL) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.COPY_IMAGE, paneId, x, y, srcURL),
+    goBack: (paneId) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_BACK, paneId),
+    goForward: (paneId) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_FORWARD, paneId),
+    goToIndex: (paneId, index) => electron.ipcRenderer.send(IPC_CHANNELS.VIEW.GO_TO_INDEX, paneId, index),
+    getNavHistory: (paneId) => electron.ipcRenderer.invoke(IPC_CHANNELS.VIEW.GET_NAV_HISTORY, paneId),
+    capture: (paneId) => electron.ipcRenderer.invoke("view.capture", paneId)
   },
   // Multi-Pane Cross-Split Search & Memory Optimizer
   findInAllPanes: (query, opts) => electron.ipcRenderer.send(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, query, opts),
