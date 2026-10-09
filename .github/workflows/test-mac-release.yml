@@ -1,0 +1,56 @@
+name: Test macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version to test (e.g. v1.3.6 or "latest")'
+        required: false
+        default: 'latest'
+      arch:
+        description: 'Architecture to test'
+        required: true
+        type: choice
+        options:
+          - arm64
+          - x64
+        default: 'arm64'
+      runner_os:
+        description: 'macOS runner version'
+        required: true
+        type: choice
+        options:
+          - macos-14
+          - macos-15
+          - macos-13
+        default: 'macos-14'
+      enable_tmate:
+        description: 'Enable live interactive SSH/web debug session (tmate)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  test-mac:
+    name: Test on ${{ inputs.runner_os }} (${{ inputs.arch }})
+    runs-on: ${{ inputs.runner_os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Run macOS Release Validation
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x scripts/test-mac-release.sh
+          ./scripts/test-mac-release.sh "${{ inputs.version }}" "${{ inputs.arch }}"
+
+      - name: Interactive Debug Session (tmate)
+        if: ${{ inputs.enable_tmate }}
+        uses: mxschmitt/action-tmate@v3
+        with:
+          detached: false
