@@ -1,0 +1,23 @@
+name: WinGet Manual Dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release tag to publish to WinGet (e.g. v1.3.6)'
+        required: true
+        default: 'v1.3.6'
+
+jobs:
+  winget:
+    name: Submit to WinGet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: jvondev.apposition
+          installers-regex: 'Apposition-win-Setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: jvondev
+          release-tag: ${{ github.event.inputs.version }}
