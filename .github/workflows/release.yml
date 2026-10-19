@@ -91,3 +91,16 @@ jobs:
             dist/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  winget:
+    name: Submit to WinGet
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: jvondev.apposition
+          installers-regex: 'Apposition-win-Setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
+          fork-user: jvondev
