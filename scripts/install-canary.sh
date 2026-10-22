@@ -20,7 +20,10 @@ REPO="jvondev/apposition-releases"
 APP_DEST="/Applications/Apposition Canary.app"
 
 RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases")
-TAG=$(echo "$RELEASES_JSON" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+TAG="${1:-}"
+if [ -z "$TAG" ]; then
+    TAG=$(echo "$RELEASES_JSON" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
+fi
 
 if [ -z "$TAG" ]; then
     printf "\n  ❌ ${BOLD}Error:${RESET} Could not determine release tag from GitHub.\n\n"
