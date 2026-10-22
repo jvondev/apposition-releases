@@ -4406,8 +4406,11 @@ function centerInWorkArea(target, width, height) {
   const y = Math.round(target.y + (target.height - clampedHeight) / 2);
   return { x, y, width: clampedWidth, height: clampedHeight };
 }
+function isRectMatchingWorkArea(bounds, workArea, tolerance = 2) {
+  return Math.abs(bounds.x - workArea.x) <= tolerance && Math.abs(bounds.y - workArea.y) <= tolerance && Math.abs(bounds.width - workArea.width) <= tolerance && Math.abs(bounds.height - workArea.height) <= tolerance;
+}
 function resolveSafeWindowBounds(saved, displays, defaults = DEFAULT_WINDOW_DIMENSIONS, isMac = typeof process !== "undefined" && process.platform === "darwin") {
-  const isMaximized = saved != null ? Boolean(saved.isMaximized) : !isMac;
+  const isMaximized = saved != null ? Boolean(saved.isMaximized) : isMac ? false : true;
   const isFullScreen = Boolean(saved?.isFullScreen);
   const primary = displays.find((d) => d.isPrimary) || displays[0];
   if (!primary) {
@@ -4437,22 +4440,31 @@ function resolveSafeWindowBounds(saved, displays, defaults = DEFAULT_WINDOW_DIME
     isFullScreen
   };
 }
+function toggleZoomBounds(current, workArea, lastNormal) {
+  if (isRectMatchingWorkArea(current, workArea)) {
+    const fallback = centerInWorkArea(workArea, 1200, 800);
+    const valid = isFiniteRect(lastNormal) && !isRectMatchingWorkArea(lastNormal, workArea);
+    const restore = valid ? lastNormal : fallback;
+    return { nextBounds: restore, isMaximized: false, nextNormal: restore };
+  }
+  return {
+    nextBounds: workArea,
+    isMaximized: true,
+    nextNormal: isFiniteRect(current) ? current : lastNormal
+  };
+}
 const log = createLogger("WINDOW");
 class WindowStateManager {
   activeWindow = null;
   lastNormalBounds = { x: 0, y: 0, width: 1200, height: 800 };
   maximized = false;
   fullScreen = false;
+  frozen = false;
   debounceTimer = null;
   displayRemovedListener = null;
   mapDisplays(displays) {
-    const primaryId = electron.screen.getPrimaryDisplay()?.id;
-    return displays.map((d) => ({
-      id: d.id,
-      bounds: d.bounds,
-      workArea: d.workArea,
-      isPrimary: d.id === primaryId
-    }));
+    const pid = electron.screen.getPrimaryDisplay()?.id;
+    return displays.map((d) => ({ id: d.id, bounds: d.bounds, workArea: d.workArea, isPrimary: d.id === pid }));
   }
   getInitialState() {
     const displays = this.mapDisplays(electron.screen.getAllDisplays());
@@ -4470,23 +4482,34 @@ class WindowStateManager {
   shouldFullScreen() {
     return this.fullScreen;
   }
+  freezeForClose() {
+    this.frozen = true;
+  }
+  unfreeze() {
+    this.frozen = false;
+  }
+  toggleMacZoom(win) {
+    if (!win || win.isDestroyed()) return;
+    const workArea = electron.screen.getDisplayMatching(win.getBounds()).workArea;
+    const { nextBounds, isMaximized, nextNormal } = toggleZoomBounds(win.getBounds(), workArea, this.lastNormalBounds);
+    this.lastNormalBounds = nextNormal;
+    this.maximized = isMaximized;
+    win.setBounds(nextBounds);
+    this.scheduleDebouncedSave(100);
+    global.appOverlayView?.webContents.send("window:maximize-changed", isMaximized);
+  }
   manage(win) {
     this.activeWindow = win;
-    if (this.maximized) {
-      try {
-        win.maximize();
-      } catch {
-      }
-    } else if (this.fullScreen) {
-      try {
-        win.setFullScreen(true);
-      } catch {
-      }
+    try {
+      if (this.maximized && process.platform !== "darwin") win.maximize();
+      else if (this.fullScreen) win.setFullScreen(true);
+    } catch {
     }
     const onBoundsChange = () => {
-      if (!win || win.isDestroyed() || win.isMinimized()) return;
-      if (win.isMaximized() || win.isFullScreen()) {
-        this.maximized = win.isMaximized();
+      if (this.frozen || !win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
+      const isMax = win.isMaximized() || process.platform === "darwin" && isRectMatchingWorkArea(win.getBounds(), electron.screen.getDisplayMatching(win.getBounds()).workArea);
+      if (isMax || win.isFullScreen()) {
+        this.maximized = isMax;
         this.fullScreen = win.isFullScreen();
         this.scheduleDebouncedSave();
         return;
@@ -4525,6 +4548,7 @@ class WindowStateManager {
       this.scheduleDebouncedSave(100);
     });
     win.on("leave-full-screen", () => {
+      if (this.frozen) return;
       this.fullScreen = false;
       this.scheduleDebouncedSave(100);
     });
@@ -4571,7 +4595,8 @@ class WindowStateManager {
     }
     if (!this.lastNormalBounds || !isFiniteRect(this.lastNormalBounds)) return;
     if (this.activeWindow && !this.activeWindow.isDestroyed()) {
-      if (this.activeWindow.isMaximized()) {
+      const isMax = this.activeWindow.isMaximized() || process.platform === "darwin" && isRectMatchingWorkArea(this.activeWindow.getBounds(), electron.screen.getDisplayMatching(this.activeWindow.getBounds()).workArea);
+      if (isMax) {
         this.maximized = true;
       } else if (!this.activeWindow.isMinimized()) {
         this.maximized = false;
@@ -4675,7 +4700,7 @@ function initWindowManagerIpc() {
     const win = global.mainWindow;
     if (win && !win.isDestroyed()) {
       if (process.platform === "darwin") {
-        win.setFullScreen(!win.isFullScreen());
+        windowStateManager.toggleMacZoom(win);
       } else {
         if (win.isMaximized()) {
           win.unmaximize();
@@ -4731,11 +4756,13 @@ function resolveAppIcon() {
 }
 function createWindow() {
   const initial = windowStateManager.getInitialState();
+  const primary = electron.screen.getPrimaryDisplay();
+  const target = process.platform !== "darwin" && initial.isMaximized && primary?.workArea ? primary.workArea : initial.bounds;
   const win = new electron.BrowserWindow({
-    x: initial.bounds.x,
-    y: initial.bounds.y,
-    width: initial.bounds.width,
-    height: initial.bounds.height,
+    x: target.x,
+    y: target.y,
+    width: target.width,
+    height: target.height,
     icon: resolveAppIcon(),
     transparent: false,
     backgroundColor: "#F7F7F5",
@@ -4764,11 +4791,25 @@ function createWindow() {
   win.on("close", (event) => {
     if (process.platform === "darwin" && !global.isQuittingApp) {
       event.preventDefault();
-      win.hide();
+      if (win.isFullScreen()) {
+        windowStateManager.freezeForClose();
+        const finishHide = () => {
+          if (!win.isDestroyed()) {
+            win.hide();
+            windowStateManager.unfreeze();
+          }
+        };
+        win.once("leave-full-screen", finishHide);
+        setTimeout(finishHide, 600);
+        win.setFullScreen(false);
+      } else {
+        win.hide();
+      }
       FocusArbiter.blur(win);
       hibernationEngine.setAppMinimized(true);
       return;
     }
+    FocusArbiter.blur(win);
   });
   win.on("minimize", () => hibernationEngine.setAppMinimized(true));
   win.on("restore", () => hibernationEngine.setAppMinimized(false));
@@ -9735,6 +9776,9 @@ const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.8","tag":"v1.3.
 function initChangelogIpc() {
   electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
     const currentVersion = electron.app.getVersion();
+    if (currentVersion.includes("-")) {
+      return { shouldShowWhatsNew: false, currentVersion, lastSeenVersion: currentVersion };
+    }
     const lastSeen = getLastSeenVersion();
     const evaluation = evaluateUpgradeState(lastSeen, currentVersion);
     if (evaluation.isFreshInstall) {
@@ -9759,8 +9803,8 @@ function initChangelogIpc() {
       lastSeenVersion: lastSeen
     };
   });
-  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, (_, version2) => {
-    const targetVersion = version2 || electron.app.getVersion();
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, () => {
+    const targetVersion = electron.app.getVersion();
     setLastSeenVersion(targetVersion);
     return { success: true, version: targetVersion };
   });
@@ -11004,7 +11048,7 @@ class UpdateEngine {
     if (this.activeCheck) return this.activeCheck;
     this.activeCheck = (async () => {
       const currentVersion = electron.app.getVersion();
-      const isDev2 = !electron.app.isPackaged;
+      const isDev2 = !electron.app.isPackaged || currentVersion.includes("-");
       if (isDev2) {
         const devState = { status: "idle", currentVersion, lastCheckedAt: Date.now(), isDev: true };
         this.broadcast(devState);
@@ -11549,11 +11593,18 @@ const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || proc
 initMainSentry(isDevMode);
 const isShowcase = process.env.APP_ENV === "showcase";
 const isolatedDir = process.env.APP_ISOLATED_DIR;
+const isCanary = electron.app.getVersion().includes("-") || process.env.APP_ENV === "test";
 if (isShowcase || isolatedDir) {
   electron.app.setName("Apposition Showcase");
   try {
     const targetDir = isolatedDir || path.join(electron.app.getPath("appData"), "AppositionShowcase");
     electron.app.setPath("userData", targetDir);
+  } catch {
+  }
+} else if (isCanary) {
+  electron.app.setName("Apposition Canary");
+  try {
+    electron.app.setPath("userData", path.join(electron.app.getPath("appData"), "AppositionCanary"));
   } catch {
   }
 } else if (isDevMode) {
@@ -11576,14 +11627,12 @@ if (!gotTheLock) {
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
         isShown = true;
-        if (process.platform === "darwin") {
-          win.setFullScreen(true);
-        } else if (windowStateManager.shouldMaximize()) {
-          win.maximize();
-        } else if (windowStateManager.shouldFullScreen()) {
-          win.setFullScreen(true);
-        }
         win.show();
+        if (windowStateManager.shouldFullScreen()) {
+          win.setFullScreen(true);
+        } else if (windowStateManager.shouldMaximize() && process.platform !== "darwin") {
+          win.maximize();
+        }
         syncAppOverlayBounds(win);
       }
     };
@@ -11608,12 +11657,16 @@ if (!gotTheLock) {
       syncPanes();
       global.appOverlayView?.webContents.send("app:window-restored");
     });
-    electron.screen.on("display-metrics-changed", () => {
-      syncAppOverlayBounds(win);
-      reRoundAllPanes(win);
-      repositionTransientOverlays(win);
-    });
+    const onMetrics = () => {
+      if (!win.isDestroyed()) {
+        syncAppOverlayBounds(win);
+        reRoundAllPanes(win);
+        repositionTransientOverlays(win);
+      }
+    };
+    electron.screen.on("display-metrics-changed", onMetrics);
     win.on("closed", () => {
+      electron.screen.removeListener("display-metrics-changed", onMetrics);
       unregisterAppShortcuts();
       composers.delete(win.id);
       global.mainWindow = null;
@@ -11682,10 +11735,11 @@ if (!gotTheLock) {
   });
   electron.app.on("window-all-closed", async () => {
     try {
+      windowStateManager.flushSync();
       await flushAllSessions();
       destroyAllViews();
     } catch {
     }
-    if (process.platform !== "darwin") electron.app.quit();
+    electron.app.quit();
   });
 }
