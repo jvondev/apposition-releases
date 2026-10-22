@@ -68,7 +68,7 @@ jobs:
             vpk download github --repoUrl https://github.com/jvondev/apposition-releases --outputDir dist/releases || true
             
             # 5. Pack with Velopack
-            MAIN_EXE=$(find dist/win-unpacked -maxdepth 1 -name "*.exe" ! -name "elevate.exe" | head -n 1 | xargs -n 1 basename)
+            MAIN_EXE=$(find dist/win-unpacked -maxdepth 1 -name "*.exe" ! -name "elevate.exe" -exec basename "{}" \; | head -n 1)
             PACK_ID="Apposition"
             if [[ "$VERSION" == *"-"* ]]; then
               PACK_ID="AppositionCanary"
