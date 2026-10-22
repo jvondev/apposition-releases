@@ -19,13 +19,6 @@ OS_VER=$(sw_vers -productVersion 2>/dev/null || uname -r)
 REPO="jvondev/apposition-releases"
 APP_DEST="/Applications/Apposition.app"
 
-echo ""
-printf "  ${BOLD}Apposition${RESET}  ${DIM}•  Separate Client Logins & Split-Screen Workstation${RESET}\n"
-printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${DIM}Hardware:${RESET} %s   ${DIM}OS:${RESET} macOS %s\n\n" "${ARCH_LABEL}" "${OS_VER}"
-
-# Step 1: Resolve release
-printf "  ${WHITE}[1/3]${RESET} Resolving latest release... "
 LATEST_RELEASE=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
 VERSION=$(echo "$LATEST_RELEASE" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 
@@ -33,7 +26,14 @@ if [ -z "$VERSION" ]; then
     printf "\n  ❌ ${BOLD}Error:${RESET} Could not determine latest release version.\n\n"
     exit 1
 fi
-printf "${WHITE}%s${RESET}\n" "${VERSION}"
+
+echo ""
+printf "  ${BOLD}Apposition %s${RESET}  ${DIM}•  Separate Client Logins & Split-Screen Workstation${RESET}\n" "${VERSION}"
+printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
+printf "  ${DIM}Hardware:${RESET} %s   ${DIM}OS:${RESET} macOS %s\n\n" "${ARCH_LABEL}" "${OS_VER}"
+
+# Step 1: Resolve release
+printf "  ${WHITE}[1/3]${RESET} Latest release: ${WHITE}%s${RESET}\n" "${VERSION}"
 
 # Resolve Asset URL
 DMG_URL=""
@@ -150,7 +150,7 @@ printf "${WHITE}Done${RESET}\n\n"
 
 # Completion Card
 printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${BOLD}✓ Apposition Installed!${RESET}\n\n"
+printf "  ${BOLD}✓ Apposition %s Installed!${RESET}\n\n" "${VERSION}"
 printf "  ${DIM}Spotlight:${RESET}  Press ${WHITE}Cmd + Space${RESET}, type ${WHITE}\"Apposition\"${RESET}\n"
 printf "  ${DIM}Shortcut:${RESET}   ${WHITE}Cmd + K${RESET} to switch workspaces instantly\n"
 printf "  ${DIM}Status:${RESET}     Launching Apposition now...\n"

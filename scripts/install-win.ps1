@@ -3,21 +3,21 @@
 
 $ErrorActionPreference = "Stop"
 
-Write-Host ""
-Write-Host "  Apposition" -ForegroundColor White -NoNewline
-Write-Host "  •  Separate Client Logins & Split-Screen Workstation" -ForegroundColor DarkGray
-Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-Write-Host ""
-
 $repo = "jvondev/apposition-releases"
 $apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 
 try {
     # Step 1: Query release
-    Write-Host "  [1/3] Resolving latest release... " -ForegroundColor White -NoNewline
     $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing -Headers @{ "User-Agent" = "Apposition-Installer" }
     $version = $release.tag_name
-    Write-Host "$version" -ForegroundColor White
+
+    Write-Host ""
+    Write-Host "  Apposition $version" -ForegroundColor White -NoNewline
+    Write-Host "  •  Separate Client Logins & Split-Screen Workstation" -ForegroundColor DarkGray
+    Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host ""
+
+    Write-Host "  [1/3] Target release: $version" -ForegroundColor White
 
     $asset = $release.assets | Where-Object { $_.name -like "*.exe" -and $_.name -notlike "*.blockmap" } | Select-Object -First 1
     if (-not $asset) {
@@ -65,7 +65,7 @@ try {
 
     # Completion Card
     Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkGray
-    Write-Host "  ✓ Apposition Installed!" -ForegroundColor White
+    Write-Host "  ✓ Apposition $version Installed!" -ForegroundColor White
     Write-Host ""
     Write-Host "  Status:  Setup is launching. Follow prompts to finish." -ForegroundColor Gray
     Write-Host "  ────────────────────────────────────────────────────────" -ForegroundColor DarkGray

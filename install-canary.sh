@@ -19,13 +19,6 @@ OS_VER=$(sw_vers -productVersion 2>/dev/null || uname -r)
 REPO="jvondev/apposition-releases"
 APP_DEST="/Applications/Apposition Canary.app"
 
-echo ""
-printf "  ${BOLD}Apposition Canary${RESET}  ${DIM}•  Isolated Pre-Release Sandbox${RESET}\n"
-printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${DIM}Hardware:${RESET} %s   ${DIM}OS:${RESET} macOS %s\n\n" "${ARCH_LABEL}" "${OS_VER}"
-
-# Step 1: Resolve release
-printf "  ${WHITE}[1/3]${RESET} Resolving latest canary release... "
 RELEASES_JSON=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases")
 TAG=$(echo "$RELEASES_JSON" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 
@@ -33,7 +26,14 @@ if [ -z "$TAG" ]; then
     printf "\n  ❌ ${BOLD}Error:${RESET} Could not determine release tag from GitHub.\n\n"
     exit 1
 fi
-printf "${WHITE}%s${RESET}\n" "${TAG}"
+
+echo ""
+printf "  ${BOLD}Apposition Canary %s${RESET}  ${DIM}•  Isolated Pre-Release Sandbox${RESET}\n" "${TAG}"
+printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
+printf "  ${DIM}Hardware:${RESET} %s   ${DIM}OS:${RESET} macOS %s\n\n" "${ARCH_LABEL}" "${OS_VER}"
+
+# Step 1: Resolve release
+printf "  ${WHITE}[1/3]${RESET} Target release: ${WHITE}%s${RESET} (Pre-Release)\n" "${TAG}"
 
 # Resolve Asset URL
 DMG_URL=""
@@ -151,7 +151,7 @@ printf "${WHITE}Done${RESET}\n\n"
 
 # Completion Card
 printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${BOLD}✓ Apposition Canary Installed!${RESET}\n\n"
+printf "  ${BOLD}✓ Apposition Canary %s Installed!${RESET}\n\n" "${TAG}"
 printf "  ${DIM}Sandbox:${RESET}    ~/Library/Application Support/AppositionCanary/\n"
 printf "  ${DIM}Production:${RESET} Your normal Apposition.app is 100%% untouched\n"
 printf "  ${DIM}Status:${RESET}     Launching Apposition Canary now...\n"

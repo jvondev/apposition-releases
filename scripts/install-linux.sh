@@ -22,13 +22,6 @@ DESKTOP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor/512x512/apps"
 mkdir -p "$BIN_DIR" "$APP_DIR" "$DESKTOP_DIR" "$ICON_DIR"
 
-echo ""
-printf "  ${BOLD}Apposition${RESET}  ${DIM}•  Separate Client Logins & Split-Screen Workstation${RESET}\n"
-printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${DIM}Hardware:${RESET} %s   ${DIM}Target:${RESET} Linux AppImage\n\n" "${ARCH_LABEL}"
-
-# Step 1: Resolve release
-printf "  ${WHITE}[1/3]${RESET} Resolving latest release... "
 LATEST_RELEASE=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")
 VERSION=$(echo "$LATEST_RELEASE" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
 
@@ -36,7 +29,14 @@ if [ -z "$VERSION" ]; then
     printf "\n  ❌ ${BOLD}Error:${RESET} Could not determine latest release version.\n\n"
     exit 1
 fi
-printf "${WHITE}%s${RESET}\n" "${VERSION}"
+
+echo ""
+printf "  ${BOLD}Apposition %s${RESET}  ${DIM}•  Separate Client Logins & Split-Screen Workstation${RESET}\n" "${VERSION}"
+printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
+printf "  ${DIM}Hardware:${RESET} %s   ${DIM}Target:${RESET} Linux AppImage\n\n" "${ARCH_LABEL}"
+
+# Step 1: Resolve release
+printf "  ${WHITE}[1/3]${RESET} Latest release: ${WHITE}%s${RESET}\n" "${VERSION}"
 
 APPIMAGE_PATH="${APP_DIR}/Apposition-${VERSION}.AppImage"
 SYMLINK_PATH="${BIN_DIR}/apposition"
@@ -138,7 +138,7 @@ printf "${WHITE}Done${RESET}\n\n"
 
 # Completion Card
 printf "  ${DARK}────────────────────────────────────────────────────────${RESET}\n"
-printf "  ${BOLD}✓ Apposition Installed!${RESET}\n\n"
+printf "  ${BOLD}✓ Apposition %s Installed!${RESET}\n\n" "${VERSION}"
 printf "  ${DIM}Binary:${RESET}     %s\n" "${SYMLINK_PATH}"
 printf "  ${DIM}Desktop:${RESET}    Search \"Apposition\" in your application launcher\n"
 printf "  ${DIM}Status:${RESET}     Launching Apposition now...\n"
