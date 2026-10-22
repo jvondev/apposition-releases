@@ -1,7 +1,12 @@
-import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, b as applyUpdate, o as openExternalUrl, t as template, e as delegateEvents, f as onMount, i as initUpdateStore, g as insert, h as Show, m as memo, j as createRenderEffect, s as setStyleProperty, F as For, k as className, l as setLayoutStore, n as setAttribute, p as layoutStore, q as createSignal, W as WorkspaceIcon, r as createEffect, A as AppIcon, v as frecencyEngine, w as getAppNameFromUrl, x as addEventListener, y as getProviderDomain, z as getSortedIdentities, P as ProfileForm, B as setActiveShortcuts, D as DEFAULT_SHORTCUTS, C as activeShortcuts, E as isMacPlatform, G as saveShortcut, H as onCleanup, I as style, J as use, K as Portal } from "./index-BHRlBLS5.js";
-import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-DG28Pycc.js";
-var _tmpl$$a = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 active:scale-[0.98] border border-neutral-300/80 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Check for Updates`), _tmpl$2$a = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 opacity-70 cursor-not-allowed"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-neutral-600"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>Checking...`), _tmpl$3$a = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Download Update`), _tmpl$4$7 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg opacity-80 cursor-not-allowed">Downloading...`), _tmpl$5$6 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Restart to Apply`), _tmpl$6$5 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-neutral-900 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Download Package`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Retry Check`);
+import { c as createSignal, a as createComponent, S as Switch, M as Match, b as checkForUpdates, u as updateStore, d as downloadUpdate, i as insert, m as memo, e as createRenderEffect, f as className, o as openExternalUrl, g as applyUpdate, t as template, h as delegateEvents, j as onMount, k as initUpdateStore, l as Show, s as setStyleProperty, F as For, n as setLayoutStore, p as setAttribute, q as layoutStore, W as WorkspaceIcon, r as createEffect, A as AppIcon, v as frecencyEngine, w as getAppNameFromUrl, x as addEventListener, y as getProviderDomain, z as getSortedIdentities, P as ProfileForm, B as setActiveShortcuts, D as DEFAULT_SHORTCUTS, C as activeShortcuts, E as isMacPlatform, G as saveShortcut, H as onCleanup, I as style, J as use, K as Portal } from "./index-CwYSp-OO.js";
+import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-C_rW3RCh.js";
+var _tmpl$$a = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 active:scale-[0.98] border border-neutral-300/80 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Check for Updates`), _tmpl$2$a = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 opacity-70 cursor-not-allowed"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-neutral-600"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>Checking...`), _tmpl$3$a = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Download Update`), _tmpl$4$7 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg opacity-80 cursor-not-allowed">Downloading...`), _tmpl$5$6 = /* @__PURE__ */ template(`<button>`), _tmpl$6$5 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-neutral-900 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Download Package`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Retry Check`), _tmpl$8$3 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-white"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$9$1 = /* @__PURE__ */ template(`<span>Restarting...`);
 function UpdateActionButton() {
+  const [isApplying, setIsApplying] = createSignal(false);
+  const handleApply = async () => {
+    setIsApplying(true);
+    await applyUpdate();
+  };
   return createComponent(Switch, {
     get children() {
       return [createComponent(Match, {
@@ -42,7 +47,20 @@ function UpdateActionButton() {
         },
         get children() {
           var _el$5 = _tmpl$5$6();
-          _el$5.$$click = () => applyUpdate();
+          _el$5.$$click = handleApply;
+          insert(_el$5, (() => {
+            var _c$ = memo(() => !!isApplying());
+            return () => _c$() ? [_tmpl$8$3(), _tmpl$9$1()] : "Restart to Apply";
+          })());
+          createRenderEffect((_p$) => {
+            var _v$ = isApplying(), _v$2 = `text-xs font-semibold text-white bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all flex items-center gap-1.5 ${isApplying() ? "opacity-80 cursor-wait" : "cursor-pointer"}`;
+            _v$ !== _p$.e && (_el$5.disabled = _p$.e = _v$);
+            _v$2 !== _p$.t && className(_el$5, _p$.t = _v$2);
+            return _p$;
+          }, {
+            e: void 0,
+            t: void 0
+          });
           return _el$5;
         }
       }), createComponent(Match, {
