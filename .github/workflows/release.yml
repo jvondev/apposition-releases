@@ -68,7 +68,12 @@ jobs:
             vpk download github --repoUrl https://github.com/jvondev/apposition-releases --outputDir dist/releases || true
             
             # 5. Pack with Velopack
-            vpk pack --packId Apposition --packVersion "$VERSION" --packDir dist/win-unpacked --mainExe Apposition.exe --icon assets/icon.ico --outputDir dist/releases
+            MAIN_EXE=$(find dist/win-unpacked -maxdepth 1 -name "*.exe" ! -name "elevate.exe" | head -n 1 | xargs -n 1 basename)
+            PACK_ID="Apposition"
+            if [[ "$VERSION" == *"-"* ]]; then
+              PACK_ID="AppositionCanary"
+            fi
+            vpk pack --packId "$PACK_ID" --packVersion "$VERSION" --packDir dist/win-unpacked --mainExe "$MAIN_EXE" --icon assets/icon.ico --outputDir dist/releases
             
             # 6. Upload Velopack release assets & binary deltas to GitHub (merge into tag release)
             vpk upload github --repoUrl https://github.com/jvondev/apposition-releases --token "${{ secrets.GITHUB_TOKEN }}" --tag "${{ github.ref_name }}" --merge --publish --outputDir dist/releases
