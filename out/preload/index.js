@@ -32,6 +32,9 @@ const IPC_CHANNELS = {
     MINIMIZE: "window.minimize",
     MAXIMIZE: "window.maximize",
     CLOSE: "window.close",
+    TOGGLE_FULLSCREEN: "window.toggle-fullscreen",
+    SET_FULLSCREEN: "window.set-fullscreen",
+    IS_FULLSCREEN: "window.is-fullscreen",
     OPEN_EXTERNAL: "window.openExternal",
     SET_IGNORE_MOUSE_EVENTS: "set-ignore-mouse-events",
     SET_WAKE_REGIONS: "set-wake-regions",
@@ -134,6 +137,8 @@ const IPC_CHANNELS = {
     OPEN_EXTERNAL: "updater.openExternal"
   },
   EVENTS: {
+    FULLSCREEN_CHANGED: "window:fullscreen-changed",
+    MAXIMIZE_CHANGED: "window:maximize-changed",
     UPDATE_STATE_CHANGED: "app:update-state-changed",
     AUTH_DETECTED: "pane.auth-detected",
     DEEP_LINK_WORKSPACE: "app.deep-link.workspace",
@@ -191,6 +196,9 @@ function createIpcClient(ipcRenderer) {
       minimize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.MINIMIZE),
       maximize: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.MAXIMIZE),
       close: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.CLOSE),
+      toggleFullScreen: () => ipcRenderer.send(IPC_CHANNELS.WINDOW.TOGGLE_FULLSCREEN),
+      setFullScreen: (flag) => ipcRenderer.send(IPC_CHANNELS.WINDOW.SET_FULLSCREEN, flag),
+      isFullScreen: () => ipcRenderer.invoke(IPC_CHANNELS.WINDOW.IS_FULLSCREEN),
       openExternal: (url) => ipcRenderer.send(IPC_CHANNELS.WINDOW.OPEN_EXTERNAL, url),
       setIgnoreMouseEvents: (ignore, options) => ipcRenderer.send(IPC_CHANNELS.WINDOW.SET_IGNORE_MOUSE_EVENTS, ignore, options),
       setWakeRegions: (rects) => ipcRenderer.send(IPC_CHANNELS.WINDOW.SET_WAKE_REGIONS, rects),
@@ -793,13 +801,17 @@ function installCursorMirror() {
 electron.ipcRenderer.setMaxListeners(100);
 const panePreloadUrl = `file://${path.join(__dirname, "pane.js").replace(/\\/g, "/")}`;
 const chromeVersion = process.versions.chrome && Number(process.versions.chrome.split(".")[0]) >= 144 ? process.versions.chrome : "144.0.7550.80";
-const defaultUserAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
+const defaultUserAgent = process.platform === "darwin" ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36` : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 const client = createIpcClient(electron.ipcRenderer);
 const events = createIpcEvents(electron.ipcRenderer);
 const api = {
   panePreloadUrl,
   defaultUserAgent,
   isNativeViews: true,
+  platform: process.platform,
+  isMac: process.platform === "darwin",
+  isWindows: process.platform === "win32",
+  isLinux: process.platform === "linux",
   // Flat DB access
   getInitialAppState: client.db.getInitialAppState,
   getWorkspaces: client.db.getWorkspaces,
@@ -824,12 +836,28 @@ const api = {
   deleteNode: client.db.deleteNode,
   saveTabLayout: client.db.saveTabLayout,
   setUiMode: client.db.setUiMode,
+  // Proxy Diagnostics & Telemetry
+  testProxyConnection: (proxyString) => electron.ipcRenderer.invoke("proxy.test-connection", proxyString),
+  getProxyTelemetry: (host) => electron.ipcRenderer.invoke("proxy.get-telemetry", host),
   // Window Controls
   setIgnoreMouseEvents: client.window.setIgnoreMouseEvents,
   setWakeRegions: client.window.setWakeRegions,
   minimizeWindow: client.window.minimize,
   maximizeWindow: client.window.maximize,
   closeWindow: client.window.close,
+  toggleFullScreen: client.window.toggleFullScreen,
+  setFullScreen: client.window.setFullScreen,
+  isFullScreen: client.window.isFullScreen,
+  onFullScreenChanged: (callback) => {
+    const handler = (_, data) => callback(data);
+    electron.ipcRenderer.on(IPC_CHANNELS.EVENTS.FULLSCREEN_CHANGED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.FULLSCREEN_CHANGED, handler);
+  },
+  onMaximizeChanged: (callback) => {
+    const handler = (_, data) => callback(data);
+    electron.ipcRenderer.on(IPC_CHANNELS.EVENTS.MAXIMIZE_CHANGED, handler);
+    return () => electron.ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.MAXIMIZE_CHANGED, handler);
+  },
   openInternalDevTools: client.window.openInternalDevTools,
   closeInternalDevTools: client.window.closeInternalDevTools,
   signalReady: () => electron.ipcRenderer.send("app:ui-mounted"),

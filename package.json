@@ -1,6 +1,6 @@
 {
   "name": "apposition",
-  "version": "1.3.6",
+  "version": "1.3.7",
   "description": "A smart digital workspace to organize web apps, accounts, and tasks in one place.",
   "main": "./out/main/index.js",
   "author": "jvondev <jvondev@users.noreply.github.com>",
@@ -20,6 +20,7 @@
     "start": "electron-vite preview",
     "showcase": "cross-env APP_ENV=showcase electron-vite dev",
     "showcase:clean": "node scripts/reset-showcase-db.mjs && cross-env APP_ENV=showcase electron-vite dev",
+    "showcase:cards": "node scripts/marketing/showcaseCapture.mjs",
     "showcase:1": "node scripts/marketing/studio.mjs appsumo-01-command-center --dev",
     "showcase:2": "node scripts/marketing/studio.mjs appsumo-02-client-isolation --dev",
     "showcase:3": "node scripts/marketing/studio.mjs appsumo-03-omnibox-switcher --dev",

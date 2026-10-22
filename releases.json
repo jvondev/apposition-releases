@@ -1,5 +1,82 @@
 [
   {
+    "version": "1.3.7",
+    "tag": "v1.3.7",
+    "title": "Dedicated Proxy Routing, Global Identity Sync & Smart Screen Splitting",
+    "publishedAt": "2026-10-22",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Dedicated Proxy Routing & Verification",
+            "description": "Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."
+          },
+          {
+            "title": "Global Identity & Localized Browsing",
+            "description": "Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."
+          },
+          {
+            "title": "Advanced Connection Privacy",
+            "description": "Added comprehensive privacy shielding to keep local network addresses, connected hardware identities, and real machine locations completely hidden from websites when browsing through custom profiles."
+          },
+          {
+            "title": "Instant Side-by-Side Screen Splitting",
+            "description": "Pressing `⌘T` (or `Ctrl+T` on Windows) on a single screen now automatically splits the workspace side-by-side into a dual-view layout, while pressing it when multiple screens are already open creates a clean new tab."
+          },
+          {
+            "title": "Direct New Tab Creation",
+            "description": "Added a dedicated `⌘N` (or `Ctrl+N` on Windows) shortcut to immediately open a blank tab from any screen without altering your existing side-by-side layout."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Profile Management & Workstation Layout",
+            "description": "Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."
+          },
+          {
+            "title": "Native macOS Keyboard Experience",
+            "description": "Aligned all keyboard shortcuts with standard macOS and Safari conventions, enabling native Command (`⌘`) key mappings for tabs, history navigation, panel closing, and developer inspection."
+          },
+          {
+            "title": "Clear Command Palette Overlay & Shortcuts",
+            "description": "Removed background darkening scrim so split-views stay visible during quick search, and added arrow key navigation hints alongside Escape and Enter."
+          },
+          {
+            "title": "Unified Window Controls",
+            "description": "Streamlined window controls into a unified, distraction-free top-right layout across macOS, Windows, and Linux for consistent minimizing, maximizing, and closing."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Edge-to-Edge Window Maximization",
+            "description": "Resolved an issue on macOS where maximizing the window left the Dock and System Menu Bar visible; the application now launches and expands into a distraction-free, edge-to-edge workspace."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Dedicated Proxy Routing & Verification",
+        "description": "Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."
+      },
+      {
+        "title": "Global Identity & Localized Browsing",
+        "description": "Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."
+      },
+      {
+        "title": "Profile Management & Workstation Layout",
+        "description": "Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."
+      }
+    ]
+  },
+  {
     "version": "1.3.6",
     "tag": "v1.3.6",
     "title": "Multi-Tier License Activation, Multi-Device Seat Management & Precision Text Selection",
