@@ -1915,6 +1915,10 @@
     cursor: text;
   }
 
+  .cursor-wait {
+    cursor: wait;
+  }
+
   .resize {
     resize: both;
   }

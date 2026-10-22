@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-DixN9oPA.js","./UniversalActivationCard-DG28Pycc.js","./PaywallPopover-WBOp6y0O.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-DqMW5y2s.js","./UniversalActivationCard-C_rW3RCh.js","./PaywallPopover-UB5Y4J_R.js"])))=>i.map(i=>d[i]);
 const sharedConfig = {
   context: void 0,
   registry: void 0,
@@ -27762,10 +27762,10 @@ function ReaderModeModal() {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-DixN9oPA.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-B9Zcv5b6.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-_BcPynbR.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-WBOp6y0O.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-DqMW5y2s.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-D2ydoJvU.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-BUFSrNDS.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-UB5Y4J_R.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
@@ -36665,23 +36665,23 @@ export {
   ProfileForm as P,
   Switch as S,
   WorkspaceIcon as W,
-  checkForUpdates as a,
-  applyUpdate as b,
-  createComponent as c,
+  createComponent as a,
+  checkForUpdates as b,
+  createSignal as c,
   downloadUpdate as d,
-  delegateEvents as e,
-  onMount as f,
-  insert as g,
-  Show as h,
-  initUpdateStore as i,
-  createRenderEffect as j,
-  className as k,
-  setLayoutStore as l,
+  createRenderEffect as e,
+  className as f,
+  applyUpdate as g,
+  delegateEvents as h,
+  insert as i,
+  onMount as j,
+  initUpdateStore as k,
+  Show as l,
   memo as m,
-  setAttribute as n,
+  setLayoutStore as n,
   openExternalUrl as o,
-  layoutStore as p,
-  createSignal as q,
+  setAttribute as p,
+  layoutStore as q,
   createEffect as r,
   setStyleProperty as s,
   template as t,
