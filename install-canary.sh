@@ -35,15 +35,14 @@ printf "  ${DIM}Hardware:${RESET} %s   ${DIM}OS:${RESET} macOS %s\n\n" "${ARCH_L
 # Step 1: Resolve release
 printf "  ${WHITE}[1/3]${RESET} Target release: ${WHITE}%s${RESET} (Pre-Release)\n" "${TAG}"
 
-# Resolve Asset URL
+# Resolve Asset URL strictly belonging to target release tag
 DMG_URL=""
 if [ "$ARCH" = "arm64" ]; then
-    DMG_URL=$(echo "$RELEASES_JSON" | grep "browser_download_url" | grep -i "${TAG}" | grep -i "arm64.*\.dmg\"" | head -n 1 | cut -d '"' -f 4 || true)
+    DMG_URL=$(echo "$RELEASES_JSON" | grep "browser_download_url" | grep -i "/download/${TAG}/" | grep -i "arm64.*\.dmg\"" | head -n 1 | cut -d '"' -f 4 || true)
 fi
 if [ -z "$DMG_URL" ]; then
-    DMG_URL=$(echo "$RELEASES_JSON" | grep "browser_download_url" | grep -i "arm64.*\.dmg\"" | head -n 1 | cut -d '"' -f 4 || true)
+    DMG_URL=$(echo "$RELEASES_JSON" | grep "browser_download_url" | grep -i "/download/${TAG}/" | grep -i "\.dmg\"" | head -n 1 | cut -d '"' -f 4 || true)
 fi
-[ -z "$DMG_URL" ] && DMG_URL=$(echo "$RELEASES_JSON" | grep "browser_download_url" | grep -i "\.dmg\"" | head -n 1 | cut -d '"' -f 4 || true)
 
 if [ -z "$DMG_URL" ]; then
     printf "  ❌ ${BOLD}Error:${RESET} No .dmg asset found for release %s yet.\n" "${TAG}"
