@@ -4761,14 +4761,22 @@ function createWindow() {
   global.mainWindow = win;
   global.overlayWindow = win;
   registerComposer(win);
+  let isLeavingFullScreenForClose = false;
   win.on("close", (event) => {
-    if (process.platform === "darwin" && !global.isQuittingApp) {
-      event.preventDefault();
-      win.hide();
-      FocusArbiter.blur(win);
-      hibernationEngine.setAppMinimized(true);
-      return;
+    if (process.platform === "darwin" && win.isFullScreen() && !global.isQuittingApp) {
+      if (!isLeavingFullScreenForClose) {
+        isLeavingFullScreenForClose = true;
+        event.preventDefault();
+        const finishClose = () => {
+          if (!win.isDestroyed()) win.close();
+        };
+        win.once("leave-full-screen", finishClose);
+        setTimeout(finishClose, 600);
+        win.setFullScreen(false);
+        return;
+      }
     }
+    FocusArbiter.blur(win);
   });
   win.on("minimize", () => hibernationEngine.setAppMinimized(true));
   win.on("restore", () => hibernationEngine.setAppMinimized(false));
@@ -11549,11 +11557,18 @@ const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || proc
 initMainSentry(isDevMode);
 const isShowcase = process.env.APP_ENV === "showcase";
 const isolatedDir = process.env.APP_ISOLATED_DIR;
+const isCanary = electron.app.getVersion().includes("-") || process.env.APP_ENV === "test";
 if (isShowcase || isolatedDir) {
   electron.app.setName("Apposition Showcase");
   try {
     const targetDir = isolatedDir || path.join(electron.app.getPath("appData"), "AppositionShowcase");
     electron.app.setPath("userData", targetDir);
+  } catch {
+  }
+} else if (isCanary) {
+  electron.app.setName("Apposition Canary");
+  try {
+    electron.app.setPath("userData", path.join(electron.app.getPath("appData"), "AppositionCanary"));
   } catch {
   }
 } else if (isDevMode) {
@@ -11576,12 +11591,10 @@ if (!gotTheLock) {
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
         isShown = true;
-        if (process.platform === "darwin") {
+        if (windowStateManager.shouldFullScreen()) {
           win.setFullScreen(true);
         } else if (windowStateManager.shouldMaximize()) {
           win.maximize();
-        } else if (windowStateManager.shouldFullScreen()) {
-          win.setFullScreen(true);
         }
         win.show();
         syncAppOverlayBounds(win);
@@ -11608,12 +11621,16 @@ if (!gotTheLock) {
       syncPanes();
       global.appOverlayView?.webContents.send("app:window-restored");
     });
-    electron.screen.on("display-metrics-changed", () => {
-      syncAppOverlayBounds(win);
-      reRoundAllPanes(win);
-      repositionTransientOverlays(win);
-    });
+    const onMetrics = () => {
+      if (!win.isDestroyed()) {
+        syncAppOverlayBounds(win);
+        reRoundAllPanes(win);
+        repositionTransientOverlays(win);
+      }
+    };
+    electron.screen.on("display-metrics-changed", onMetrics);
     win.on("closed", () => {
+      electron.screen.removeListener("display-metrics-changed", onMetrics);
       unregisterAppShortcuts();
       composers.delete(win.id);
       global.mainWindow = null;
@@ -11682,10 +11699,11 @@ if (!gotTheLock) {
   });
   electron.app.on("window-all-closed", async () => {
     try {
+      windowStateManager.flushSync();
       await flushAllSessions();
       destroyAllViews();
     } catch {
     }
-    if (process.platform !== "darwin") electron.app.quit();
+    electron.app.quit();
   });
 }
