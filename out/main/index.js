@@ -9,11 +9,11 @@ require("readline");
 const Database = require("better-sqlite3");
 const crypto = require("crypto");
 const os = require("os");
+const Sentry = require("@sentry/electron/main");
 const promises = require("fs/promises");
 const http = require("http");
 const util = require("util");
 const https = require("https");
-const Sentry = require("@sentry/electron/main");
 const server = require("@trpc/server");
 const zod = require("zod");
 function _interopNamespaceDefault(e) {
@@ -2060,6 +2060,84 @@ function getLastSplitSession(workspaceId) {
     return null;
   }
 }
+class ViewRegistryImpl {
+  activeViews = /* @__PURE__ */ new Map();
+  webContentsIdToPaneId = /* @__PURE__ */ new Map();
+  viewProfiles = /* @__PURE__ */ new Map();
+  stashedBounds = /* @__PURE__ */ new Map();
+  hibernatedViews = /* @__PURE__ */ new Map();
+  getView(paneId) {
+    return this.activeViews.get(paneId);
+  }
+  hasView(paneId) {
+    return this.activeViews.has(paneId);
+  }
+  registerView(paneId, view, profileId) {
+    this.activeViews.set(paneId, view);
+    this.webContentsIdToPaneId.set(view.webContents.id, paneId);
+    this.viewProfiles.set(paneId, profileId);
+  }
+  unregisterView(paneId, keepHibernated = false) {
+    const view = this.activeViews.get(paneId);
+    if (view) {
+      this.webContentsIdToPaneId.delete(view.webContents.id);
+      this.activeViews.delete(paneId);
+      if (!keepHibernated) {
+        this.viewProfiles.delete(paneId);
+        this.stashedBounds.delete(paneId);
+        this.hibernatedViews.delete(paneId);
+      }
+    }
+    return view;
+  }
+  getPaneIdByWebContentsId(wcId) {
+    return this.webContentsIdToPaneId.get(wcId);
+  }
+  getProfile(paneId) {
+    return this.viewProfiles.get(paneId);
+  }
+  setProfile(paneId, profileId) {
+    this.viewProfiles.set(paneId, profileId);
+  }
+  stashBounds(paneId, bounds) {
+    this.stashedBounds.set(paneId, bounds);
+  }
+  getStashedBounds(paneId) {
+    return this.stashedBounds.get(paneId);
+  }
+  setHibernated(paneId, data) {
+    this.hibernatedViews.set(paneId, data);
+  }
+  getHibernated(paneId) {
+    return this.hibernatedViews.get(paneId);
+  }
+  isHibernated(paneId) {
+    return this.hibernatedViews.has(paneId);
+  }
+  deleteHibernated(paneId) {
+    this.hibernatedViews.delete(paneId);
+  }
+  getAllActiveViews() {
+    return this.activeViews;
+  }
+}
+const viewRegistry = new ViewRegistryImpl();
+const activeViews = viewRegistry.activeViews;
+viewRegistry.webContentsIdToPaneId;
+const viewProfile = viewRegistry.viewProfiles;
+viewRegistry.stashedBounds;
+viewRegistry.hibernatedViews;
+function destroyAllViews() {
+  for (const [paneId, view] of Array.from(viewRegistry.activeViews.entries())) {
+    try {
+      viewRegistry.unregisterView(paneId);
+      if (!view.webContents.isDestroyed()) {
+        view.webContents.close();
+      }
+    } catch {
+    }
+  }
+}
 const FREE_CAPABILITIES = Object.freeze({
   tier: "free",
   maxWorkspaces: 2,
@@ -2250,983 +2328,6 @@ const IPC_CHANNELS = {
     VIEW_LOADED: "view.loaded"
   }
 };
-function getMachineKeyFilePath() {
-  try {
-    const userDataPath = electron.app.getPath("userData");
-    return path.join(userDataPath, "apposition_machine.key");
-  } catch {
-    return path.join(process.cwd(), "apposition_machine.key");
-  }
-}
-function getOrCreateMachineKey() {
-  const keyPath = getMachineKeyFilePath();
-  if (fs.existsSync(keyPath)) {
-    try {
-      const hex = fs.readFileSync(keyPath, "utf8").trim();
-      if (hex.length === 64) return Buffer.from(hex, "hex");
-    } catch {
-    }
-  }
-  const newKey = crypto.randomBytes(32);
-  try {
-    const dir = path.join(keyPath, "..");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(keyPath, newKey.toString("hex"), "utf8");
-  } catch {
-  }
-  return newKey;
-}
-function fallbackEncrypt(text) {
-  try {
-    const key = getOrCreateMachineKey();
-    const iv = crypto.randomBytes(12);
-    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-    let encrypted = cipher.update(text, "utf8", "hex");
-    encrypted += cipher.final("hex");
-    const authTag = cipher.getAuthTag().toString("hex");
-    return `$ENC:v1:fb:${iv.toString("hex")}:${encrypted}:${authTag}`;
-  } catch {
-    return text;
-  }
-}
-function fallbackDecrypt(raw) {
-  try {
-    const key = getOrCreateMachineKey();
-    const parts = raw.replace("$ENC:v1:fb:", "").split(":");
-    if (parts.length !== 3) return "";
-    const iv = Buffer.from(parts[0], "hex");
-    const encrypted = parts[1];
-    const authTag = Buffer.from(parts[2], "hex");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-    decipher.setAuthTag(authTag);
-    let decrypted = decipher.update(encrypted, "hex", "utf8");
-    decrypted += decipher.final("utf8");
-    return decrypted;
-  } catch {
-    return "";
-  }
-}
-function encrypt(text) {
-  if (!text) return "";
-  try {
-    if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
-      const encryptedBuffer = electron.safeStorage.encryptString(text);
-      return `$ENC:v1:${encryptedBuffer.toString("base64")}`;
-    }
-  } catch {
-  }
-  return fallbackEncrypt(text);
-}
-function decrypt(encryptedText) {
-  if (!encryptedText) return "";
-  try {
-    if (encryptedText.startsWith("$ENC:v1:") && !encryptedText.startsWith("$ENC:v1:fb:")) {
-      if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
-        const base64 = encryptedText.slice(8);
-        const buf = Buffer.from(base64, "base64");
-        return electron.safeStorage.decryptString(buf);
-      }
-    }
-    if (encryptedText.startsWith("$ENC:v1:fb:")) {
-      return fallbackDecrypt(encryptedText);
-    }
-    if (encryptedText.split(":").length === 3) {
-      return fallbackDecrypt(encryptedText);
-    }
-  } catch {
-  }
-  return "";
-}
-function signHardwarePayload(payload, machineGuid) {
-  const key = getOrCreateMachineKey();
-  return crypto.createHmac("sha256", Buffer.concat([key, Buffer.from(machineGuid)])).update(payload).digest("hex");
-}
-function verifyHardwareSignature(payload, machineGuid, signature) {
-  try {
-    const expected = signHardwarePayload(payload, machineGuid);
-    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
-  } catch {
-    return false;
-  }
-}
-let cachedMachineGuid = null;
-function getFallbackSeedPath() {
-  try {
-    const userData = electron.app.getPath("userData");
-    return path.join(userData, ".apposition_guid_seed");
-  } catch {
-    return path.join(os.tmpdir(), ".apposition_guid_seed");
-  }
-}
-function getOrGenerateFallbackSeed() {
-  const seedPath = getFallbackSeedPath();
-  if (fs.existsSync(seedPath)) {
-    try {
-      const seed = fs.readFileSync(seedPath, "utf8").trim();
-      if (seed.length >= 32) return seed;
-    } catch {
-    }
-  }
-  const newSeed = crypto.randomBytes(32).toString("hex");
-  try {
-    const dir = path.join(seedPath, "..");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(seedPath, newSeed, "utf8");
-  } catch {
-  }
-  return newSeed;
-}
-function readPlatformHardwareId() {
-  const platform = os.platform();
-  if (platform === "linux") {
-    for (const p of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
-      if (fs.existsSync(p)) {
-        try {
-          const content = fs.readFileSync(p, "utf8").trim();
-          if (content) return content;
-        } catch {
-        }
-      }
-    }
-  }
-  const cpus = os.cpus();
-  const cpuModel = cpus && cpus.length > 0 ? cpus[0].model : "unknown-cpu";
-  const composite = [
-    platform,
-    os.arch(),
-    os.hostname(),
-    os.homedir(),
-    cpuModel,
-    getOrGenerateFallbackSeed()
-  ].join(":");
-  return composite;
-}
-function getMachineGuid() {
-  if (cachedMachineGuid) {
-    return cachedMachineGuid;
-  }
-  try {
-    const rawId = readPlatformHardwareId();
-    const hash = crypto.createHash("sha256").update(`apposition:${rawId}:freemius_v1`).digest("hex").slice(0, 32);
-    cachedMachineGuid = `node-${hash}`;
-  } catch {
-    cachedMachineGuid = `node-${crypto.randomBytes(16).toString("hex")}`;
-  }
-  return cachedMachineGuid;
-}
-function getDeviceLabel() {
-  try {
-    return `${os.platform()}-${os.arch()}-${os.hostname()}`;
-  } catch {
-    return "Desktop-App-User";
-  }
-}
-const FREEMIUS_APP_ID = process.env.MAIN_VITE_FREEMIUS_APP_ID || process.env.FREEMIUS_APP_ID || "38794";
-const FREEMIUS_API_URL = process.env.MAIN_VITE_FREEMIUS_API_URL || "https://api.freemius.com";
-const FREEMIUS_AUTH_TOKEN = process.env.MAIN_VITE_FREEMIUS_BEARER_TOKEN || process.env.FREEMIUS_BEARER_TOKEN || "";
-function getFreemiusUid(machineGuid) {
-  return crypto.createHash("md5").update(machineGuid).digest("hex");
-}
-function getFreemiusHeaders() {
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json"
-  };
-  if (FREEMIUS_AUTH_TOKEN) {
-    headers["Authorization"] = `Bearer ${FREEMIUS_AUTH_TOKEN}`;
-  }
-  return headers;
-}
-function isFreemiusEmailRequired(data) {
-  if (!data) return false;
-  const errCode = (data.error?.code || data.code || "").toString().toLowerCase();
-  const rawErrMsg = (data.error?.message || data.message || "").toString().toLowerCase();
-  return errCode === "user_email_required" || errCode === "missing_user_email" || errCode === "user_required" || errCode === "missing_user" || errCode === "email_missing" || errCode === "requires_email" || errCode === "first_name_required" || errCode === "last_name_required" || rawErrMsg.includes("user_email") || rawErrMsg.includes("email is required") || rawErrMsg.includes("email required") || rawErrMsg.includes("requires an email") || rawErrMsg.includes("first_name is a required parameter") || rawErrMsg.includes("last_name is a required parameter") || rawErrMsg.includes("first_name");
-}
-function formatFreemiusErrorMessage(data, status) {
-  const code = data?.error?.code || data?.code;
-  let msg = data?.error?.message || data?.message;
-  if (code === "license_utilized") {
-    return "License seat limit reached. Please deactivate another device.";
-  }
-  if (code === "license_expired") {
-    return "This license has expired.";
-  }
-  if (code === "invalid_license_key" || code === "license_not_found") {
-    return "Invalid license key. Please check your key and try again.";
-  }
-  if (code === "rate_limit_exceeded" || status === 429) {
-    return "Too many activation attempts. Please wait a moment and try again.";
-  }
-  if (!msg) {
-    return status === 402 || status === 403 ? "License seat limit reached or license expired." : `Activation failed (HTTP ${status})`;
-  }
-  return msg;
-}
-const REQUEST_TIMEOUT_MS = 15e3;
-async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel, version2 = "1.2.4", appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL, userEmail) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const cleanKey = licenseKey.trim();
-    const uid = getFreemiusUid(machineGuid);
-    const endpoint = `${apiUrl}/v1/products/${appId}/licenses/activate.json`;
-    const payload = {
-      uid,
-      license_key: cleanKey,
-      url: machineGuid,
-      title: deviceLabel,
-      version: version2
-    };
-    if (userEmail && userEmail.trim()) {
-      const cleanEmail = userEmail.trim();
-      payload.user_email = cleanEmail;
-      const emailUser = cleanEmail.split("@")[0] || "User";
-      const parts = emailUser.split(/[._-]/);
-      payload.first_name = parts[0] || "User";
-      payload.last_name = (parts.length > 1 ? parts.slice(1).join(" ") : "") || "Workstation";
-    }
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: getFreemiusHeaders(),
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    const data = await response.json().catch(() => ({}));
-    if (isFreemiusEmailRequired(data)) {
-      return {
-        success: false,
-        data,
-        requiresEmail: true,
-        error: "Please enter your email to complete activation."
-      };
-    }
-    if (!response.ok) {
-      const errMsg = formatFreemiusErrorMessage(data, response.status);
-      return { success: false, data, error: errMsg };
-    }
-    const installId = data.id || data.install_id;
-    if (data.is_active === false) {
-      return {
-        success: false,
-        data,
-        error: "License installation is currently inactive."
-      };
-    }
-    return {
-      success: true,
-      data: {
-        ...data,
-        id: installId,
-        plan_id: data.plan_id || data.license_plan_id
-      }
-    };
-  } catch (err) {
-    const isTimeout = err?.name === "AbortError";
-    return {
-      success: false,
-      error: isTimeout ? "Activation request timed out. Please check your network." : err?.message || "Network offline. Could not connect to Freemius."
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function validateFreemiusInstallation(installationId, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
-    const response = await fetch(endpoint, {
-      method: "GET",
-      headers: getFreemiusHeaders(),
-      signal: controller.signal
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const errMsg = formatFreemiusErrorMessage(data, response.status);
-      return { success: false, data, error: errMsg };
-    }
-    const isActive = data.is_active !== false;
-    return {
-      success: isActive,
-      data: {
-        ...data,
-        id: data.id || data.install_id || installationId,
-        plan_id: data.plan_id || data.license_plan_id
-      },
-      error: isActive ? void 0 : "Installation is inactive or deactivated."
-    };
-  } catch (err) {
-    return {
-      success: false,
-      error: err?.message || "Network offline. Could not reach Freemius API."
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-async function deactivateFreemiusInstallation(installationId, licenseKey, machineGuid, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
-  try {
-    if (licenseKey && machineGuid) {
-      const endpoint2 = `${apiUrl}/v1/products/${appId}/licenses/deactivate.json`;
-      const response2 = await fetch(endpoint2, {
-        method: "POST",
-        headers: getFreemiusHeaders(),
-        body: JSON.stringify({
-          uid: getFreemiusUid(machineGuid),
-          license_key: licenseKey.trim(),
-          install_id: installationId
-        })
-      });
-      if (!response2.ok && response2.status !== 404) {
-        const data = await response2.json().catch(() => ({}));
-        return {
-          success: false,
-          error: formatFreemiusErrorMessage(data, response2.status)
-        };
-      }
-      return { success: true };
-    }
-    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
-    const response = await fetch(endpoint, {
-      method: "DELETE",
-      headers: getFreemiusHeaders()
-    });
-    if (!response.ok && response.status !== 404) {
-      const data = await response.json().catch(() => ({}));
-      return {
-        success: false,
-        error: formatFreemiusErrorMessage(data, response.status)
-      };
-    }
-    return { success: true };
-  } catch (err) {
-    return {
-      success: false,
-      error: err?.message || "Network offline. Could not reach Freemius API."
-    };
-  }
-}
-function getSavedLicenseKey() {
-  try {
-    const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_key'").get();
-    if (row && row.value) return decrypt(row.value);
-  } catch (e) {
-    console.error("Failed to get saved license key", e);
-  }
-  return null;
-}
-function saveLicenseKey(key) {
-  try {
-    const encryptedKey = encrypt(key);
-    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_key', ?)").run(
-      encryptedKey
-    );
-  } catch (e) {
-    console.error("Failed to save license key", e);
-  }
-}
-function deleteLicenseKey() {
-  try {
-    db.prepare("DELETE FROM licensing WHERE key = 'license_key'").run();
-    db.prepare("DELETE FROM licensing WHERE key = 'license_state'").run();
-    db.prepare("DELETE FROM licensing WHERE key = 'hardware_lease'").run();
-    db.prepare("DELETE FROM licensing WHERE key = 'last_validated'").run();
-  } catch (e) {
-    console.error("Failed to delete license key", e);
-  }
-}
-function getSavedLicenseState() {
-  try {
-    const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_state'").get();
-    if (row && row.value) {
-      const decrypted = decrypt(row.value);
-      return decrypted ? JSON.parse(decrypted) : null;
-    }
-  } catch (e) {
-    console.error("Failed to get saved license state", e);
-  }
-  return null;
-}
-function saveLicenseState(state) {
-  try {
-    const serialized = JSON.stringify(state);
-    const encryptedState = encrypt(serialized);
-    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_state', ?)").run(
-      encryptedState
-    );
-  } catch (e) {
-    console.error("Failed to save license state", e);
-  }
-}
-function getHardwareLease() {
-  try {
-    const row = db.prepare("SELECT value FROM licensing WHERE key = 'hardware_lease'").get();
-    if (row && row.value) {
-      const decrypted = decrypt(row.value);
-      return decrypted ? JSON.parse(decrypted) : null;
-    }
-  } catch (e) {
-    console.error("Failed to get hardware lease ticket", e);
-  }
-  return null;
-}
-function saveHardwareLease(ticket) {
-  try {
-    const serialized = JSON.stringify(ticket);
-    const encrypted = encrypt(serialized);
-    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('hardware_lease', ?)").run(
-      encrypted
-    );
-  } catch (e) {
-    console.error("Failed to save hardware lease ticket", e);
-  }
-}
-function saveAttribution(params) {
-  try {
-    const serialized = JSON.stringify(params);
-    const encrypted = encrypt(serialized);
-    db.prepare(
-      "INSERT OR REPLACE INTO licensing (key, value) VALUES ('affiliate_attribution', ?)"
-    ).run(encrypted);
-  } catch (e) {
-    console.error("Failed to save affiliate attribution", e);
-  }
-}
-const DEFAULT_CHECKOUT_URL = process.env.MAIN_VITE_FREEMIUS_CHECKOUT_URL || process.env.RENDERER_VITE_FREEMIUS_CHECKOUT_URL || "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
-let memoryAttribution = null;
-function parseAttributionFromUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl.includes("://") ? rawUrl : `https://dummy/${rawUrl}`);
-    const ref = parsed.searchParams.get("ref") || parsed.searchParams.get("via");
-    const affiliateId = parsed.searchParams.get("affiliate_id") || parsed.searchParams.get("aff_id");
-    if (ref || affiliateId) {
-      return {
-        ref: ref || void 0,
-        affiliateId: affiliateId || void 0,
-        capturedAt: Date.now()
-      };
-    }
-  } catch {
-  }
-  return null;
-}
-function setMemoryAttribution(params) {
-  memoryAttribution = {
-    ...memoryAttribution,
-    ...params,
-    capturedAt: Date.now()
-  };
-}
-function getMemoryAttribution() {
-  return memoryAttribution;
-}
-function buildFreemiusCheckoutUrl(baseCheckoutUrl = DEFAULT_CHECKOUT_URL, attribution = memoryAttribution) {
-  try {
-    const url = new URL(baseCheckoutUrl);
-    if (attribution?.ref) {
-      url.searchParams.set("ref", attribution.ref);
-    }
-    if (attribution?.affiliateId) {
-      url.searchParams.set("affiliate_id", attribution.affiliateId);
-    }
-    url.searchParams.set("title", getDeviceLabel());
-    url.searchParams.set("url", getMachineGuid());
-    return url.toString();
-  } catch {
-    return baseCheckoutUrl;
-  }
-}
-const OFFLINE_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1e3;
-const ONLINE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1e3;
-const isDevMode$1 = () => utils.is.dev;
-const shouldBypassGatekeep = () => utils.is.dev && process.env.FORCE_GATEKEEP !== "1";
-const getCheckoutUrl = () => buildFreemiusCheckoutUrl(void 0, getMemoryAttribution());
-async function activateLicenseKey(key, email) {
-  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
-  const cleanKey = key.trim();
-  const machineGuid = getMachineGuid();
-  const deviceLabel = getDeviceLabel();
-  const appVersion = electron.app.getVersion?.() || "1.2.4";
-  const res = await activateFreemiusInstallation(
-    cleanKey,
-    machineGuid,
-    deviceLabel,
-    appVersion,
-    void 0,
-    void 0,
-    email
-  );
-  if (!res.success || !res.data?.id) {
-    return {
-      success: false,
-      requiresEmail: res.requiresEmail ?? false,
-      error: res.error || "Activation failed."
-    };
-  }
-  const now = Date.now();
-  const installationId = res.data.id;
-  const planId = res.data.plan_id || null;
-  const payload = `${cleanKey}:${installationId}:${planId}:${machineGuid}:${now}`;
-  const lease = {
-    licenseKey: cleanKey,
-    installationId,
-    planId,
-    machineGuid,
-    deviceLabel,
-    lastValidatedAt: now,
-    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
-    monotonicCounter: Math.floor(process.uptime()),
-    signature: signHardwarePayload(payload, machineGuid),
-    isActive: true
-  };
-  saveLicenseKey(cleanKey);
-  saveHardwareLease(lease);
-  saveLicenseState({
-    activated: true,
-    lastChecked: now,
-    key: cleanKey,
-    installationId,
-    planId,
-    customerEmail: email?.trim() || null,
-    label: deviceLabel,
-    machineGuid,
-    expiresAt: res.data.expiration || null,
-    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
-    isGracePeriod: false
-  });
-  return { success: true, isPremium: true };
-}
-async function validateLicenseKey(key) {
-  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
-  const cleanKey = key.trim();
-  const lease = getHardwareLease();
-  const cached = getSavedLicenseState();
-  const installationId = lease?.installationId || cached?.installationId;
-  if (installationId) {
-    const apiRes = await validateFreemiusInstallation(installationId);
-    if (apiRes.success && apiRes.data) {
-      const now = Date.now();
-      const guid = getMachineGuid();
-      const payload = `${cleanKey}:${installationId}:${lease?.planId || null}:${guid}:${now}`;
-      if (lease) {
-        saveHardwareLease({
-          ...lease,
-          lastValidatedAt: now,
-          graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
-          signature: signHardwarePayload(payload, guid)
-        });
-      }
-      saveLicenseKey(cleanKey);
-      saveLicenseState({
-        ...cached,
-        activated: true,
-        lastChecked: now,
-        key: cleanKey,
-        installationId,
-        expiresAt: apiRes.data.expiration || cached?.expiresAt || null,
-        graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
-        isGracePeriod: false
-      });
-      return { success: true, isPremium: true };
-    }
-    if (apiRes.error && !apiRes.error.toLowerCase().includes("offline")) {
-      deleteLicenseKey();
-      return { success: false, error: apiRes.error, isPremium: false };
-    }
-  }
-  return evaluateOfflineGrace(cleanKey);
-}
-function evaluateOfflineGrace(key) {
-  const lease = getHardwareLease();
-  const cached = getSavedLicenseState();
-  if (lease && lease.isActive && lease.licenseKey === key) {
-    const guid = getMachineGuid();
-    const payload = `${key}:${lease.installationId}:${lease.planId || null}:${lease.machineGuid}:${lease.lastValidatedAt}`;
-    if (lease.machineGuid === guid && verifyHardwareSignature(payload, guid, lease.signature)) {
-      if (Date.now() - lease.lastValidatedAt <= OFFLINE_GRACE_PERIOD_MS) {
-        if (cached) saveLicenseState({ ...cached, isGracePeriod: true });
-        return { success: true, isPremium: true };
-      }
-      return { success: false, error: "Offline grace period expired. Please connect to the internet." };
-    }
-  }
-  if (cached && cached.activated && cached.key === key) {
-    if (Date.now() - (cached.lastChecked || 0) <= OFFLINE_GRACE_PERIOD_MS) {
-      return { success: true, isPremium: true };
-    }
-    return { success: false, error: "Offline grace period expired. Please connect to the internet." };
-  }
-  return { success: false, error: "Network offline and no valid license lease found." };
-}
-async function deactivateLicenseKey() {
-  const lease = getHardwareLease();
-  const cached = getSavedLicenseState();
-  const installationId = lease?.installationId || cached?.installationId;
-  if (installationId) {
-    const key = lease?.licenseKey || cached?.key || getSavedLicenseKey();
-    const guid = lease?.machineGuid || getMachineGuid();
-    await deactivateFreemiusInstallation(installationId, key || void 0, guid).catch(() => {
-    });
-  }
-  deleteLicenseKey();
-  return { success: true, isPremium: false };
-}
-async function checkPremiumStatus() {
-  try {
-    if (shouldBypassGatekeep()) return true;
-    const key = getSavedLicenseKey();
-    if (!key) return false;
-    const cached = getSavedLicenseState();
-    if (!cached || !cached.activated) return false;
-    if (process.env.FORCE_GATEKEEP === "1") {
-      const validation2 = await validateLicenseKey(key);
-      return validation2.success;
-    }
-    if (Date.now() - (cached.lastChecked || 0) < ONLINE_CHECK_INTERVAL_MS) return true;
-    const validation = await validateLicenseKey(key);
-    return validation.success;
-  } catch (e) {
-    console.error("[Licensing] checkPremiumStatus fallback:", e);
-    return false;
-  }
-}
-const FREEMIUS_PLAN_IDS = {
-  APPSUMO_T1: 70966,
-  APPSUMO_T2: 70967,
-  APPSUMO_T3: 70968,
-  APPSUMO_T1_PRICING: 96960,
-  APPSUMO_T2_PRICING: 96962,
-  APPSUMO_T3_PRICING: 96964,
-  WEB_PRO: 65379
-};
-function resolveCapabilities(planId, isPremiumActive = false) {
-  if (shouldBypassGatekeep()) {
-    return TIER_3_CAPABILITIES;
-  }
-  const numericId = Number(planId);
-  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T3 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T3_PRICING) {
-    return TIER_3_CAPABILITIES;
-  }
-  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T2 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T2_PRICING) {
-    return TIER_2_CAPABILITIES;
-  }
-  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T1 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T1_PRICING) {
-    return TIER_1_CAPABILITIES;
-  }
-  if (numericId === FREEMIUS_PLAN_IDS.WEB_PRO) {
-    return TIER_3_CAPABILITIES;
-  }
-  if (isPremiumActive) {
-    return TIER_3_CAPABILITIES;
-  }
-  return FREE_CAPABILITIES;
-}
-function getCurrentCapabilities() {
-  if (shouldBypassGatekeep()) {
-    return TIER_3_CAPABILITIES;
-  }
-  const key = getSavedLicenseKey();
-  if (!key) {
-    return FREE_CAPABILITIES;
-  }
-  const lease = getHardwareLease();
-  const cached = getSavedLicenseState();
-  const isActivated = Boolean(cached?.activated || lease && lease.isActive);
-  const planId = lease?.planId ?? cached?.planId ?? null;
-  return resolveCapabilities(planId, isActivated);
-}
-class ViewRegistryImpl {
-  activeViews = /* @__PURE__ */ new Map();
-  webContentsIdToPaneId = /* @__PURE__ */ new Map();
-  viewProfiles = /* @__PURE__ */ new Map();
-  stashedBounds = /* @__PURE__ */ new Map();
-  hibernatedViews = /* @__PURE__ */ new Map();
-  getView(paneId) {
-    return this.activeViews.get(paneId);
-  }
-  hasView(paneId) {
-    return this.activeViews.has(paneId);
-  }
-  registerView(paneId, view, profileId) {
-    this.activeViews.set(paneId, view);
-    this.webContentsIdToPaneId.set(view.webContents.id, paneId);
-    this.viewProfiles.set(paneId, profileId);
-  }
-  unregisterView(paneId, keepHibernated = false) {
-    const view = this.activeViews.get(paneId);
-    if (view) {
-      this.webContentsIdToPaneId.delete(view.webContents.id);
-      this.activeViews.delete(paneId);
-      if (!keepHibernated) {
-        this.viewProfiles.delete(paneId);
-        this.stashedBounds.delete(paneId);
-        this.hibernatedViews.delete(paneId);
-      }
-    }
-    return view;
-  }
-  getPaneIdByWebContentsId(wcId) {
-    return this.webContentsIdToPaneId.get(wcId);
-  }
-  getProfile(paneId) {
-    return this.viewProfiles.get(paneId);
-  }
-  setProfile(paneId, profileId) {
-    this.viewProfiles.set(paneId, profileId);
-  }
-  stashBounds(paneId, bounds) {
-    this.stashedBounds.set(paneId, bounds);
-  }
-  getStashedBounds(paneId) {
-    return this.stashedBounds.get(paneId);
-  }
-  setHibernated(paneId, data) {
-    this.hibernatedViews.set(paneId, data);
-  }
-  getHibernated(paneId) {
-    return this.hibernatedViews.get(paneId);
-  }
-  isHibernated(paneId) {
-    return this.hibernatedViews.has(paneId);
-  }
-  deleteHibernated(paneId) {
-    this.hibernatedViews.delete(paneId);
-  }
-  getAllActiveViews() {
-    return this.activeViews;
-  }
-}
-const viewRegistry = new ViewRegistryImpl();
-const activeViews = viewRegistry.activeViews;
-viewRegistry.webContentsIdToPaneId;
-const viewProfile = viewRegistry.viewProfiles;
-viewRegistry.stashedBounds;
-viewRegistry.hibernatedViews;
-const APP_OVERLAY_ID = "__appOverlay";
-function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
-  if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
-  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
-  const px = cssX * scale;
-  const py = cssY * scale;
-  if (s.communicator) {
-    const cr = s.communicator.rect;
-    const insideComm = px >= cr.x && px < cr.x + cr.width && py >= cr.y && py < cr.y + cr.height;
-    if (insideComm) {
-      return { paneId: s.communicator.id, cssLeft: cr.cssLeft, cssTop: cr.cssTop };
-    }
-  }
-  let hit;
-  for (const [paneId, r] of s.panes) {
-    if (r.x <= -5e3 || r.width <= 1 || r.height <= 1) continue;
-    const inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
-    if (inside) hit = { paneId, cssLeft: r.cssLeft, cssTop: r.cssTop };
-  }
-  return hit;
-}
-function devicePixelRatioFor(win) {
-  try {
-    if (win.isDestroyed()) return 1;
-    const factor = electron.screen.getDisplayMatching(win.getBounds()).scaleFactor;
-    return Number.isFinite(factor) && factor > 0 ? factor : 1;
-  } catch {
-    return 1;
-  }
-}
-const composers = /* @__PURE__ */ new Map();
-function registerComposer(win) {
-  const existing = composers.get(win.id);
-  if (existing) return existing;
-  const state = {
-    views: /* @__PURE__ */ new Map(),
-    hidden: /* @__PURE__ */ new Set(),
-    stack: { panes: /* @__PURE__ */ new Map(), transientOrder: [] },
-    paneCss: /* @__PURE__ */ new Map()
-  };
-  composers.set(win.id, state);
-  win.once("closed", () => composers.delete(win.id));
-  return state;
-}
-function attach(win, v, index) {
-  if (win.isDestroyed()) return;
-  const children = win.contentView.children;
-  if (children.includes(v)) return;
-  const at = Math.max(0, Math.min(index ?? children.length, children.length));
-  win.contentView.addChildView(v, at);
-}
-function detach(win, v) {
-  if (win.isDestroyed()) return;
-  if (win.contentView.children.includes(v)) win.contentView.removeChildView(v);
-}
-function setAppOverlay(win, view) {
-  const s = registerComposer(win);
-  if (!view) {
-    const prev = s.views.get(APP_OVERLAY_ID);
-    if (prev) detach(win, prev);
-    s.views.delete(APP_OVERLAY_ID);
-    s.stack.appOverlayId = void 0;
-    return;
-  }
-  s.views.set(APP_OVERLAY_ID, view);
-  attach(win, view);
-  s.stack.appOverlayId = APP_OVERLAY_ID;
-}
-function setTransientOverlay(win, id, view) {
-  const s = registerComposer(win);
-  s.views.set(id, view);
-  attach(win, view);
-  if (!s.stack.transientOrder.includes(id)) s.stack.transientOrder.push(id);
-  s.hidden.delete(id);
-}
-function hideTransient(win, id) {
-  const s = registerComposer(win);
-  s.hidden.add(id);
-  const at = s.stack.transientOrder.indexOf(id);
-  if (at !== -1) s.stack.transientOrder.splice(at, 1);
-}
-function placePane(win, paneId, view, rect) {
-  const s = registerComposer(win);
-  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
-  s.hidden.delete(paneId);
-  s.stack.panes.set(paneId, r);
-  s.views.set(paneId, view);
-  const dpr = devicePixelRatioFor(win);
-  const w = r.width / dpr;
-  const h = r.height / dpr;
-  const overlay = s.views.get(APP_OVERLAY_ID);
-  const children = win.isDestroyed() ? [] : win.contentView.children;
-  const overlayIdx = overlay ? children.indexOf(overlay) : -1;
-  const commView = s.stack.communicator ? s.views.get(s.stack.communicator.id) : void 0;
-  const commIdx = commView ? children.indexOf(commView) : -1;
-  let at;
-  if (commIdx !== -1) at = commIdx;
-  else if (overlayIdx !== -1) at = overlayIdx;
-  else at = children.length;
-  attach(win, view, at);
-  if (typeof view.setBorderRadius === "function") {
-    view.setBorderRadius(12);
-  }
-  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
-  if (rect && isValidPhysicalRect(cssRect)) {
-    s.paneCss.set(paneId, cssRect);
-    view.setBounds(cssRect);
-  }
-}
-function hidePane(win, paneId) {
-  const s = registerComposer(win);
-  s.hidden.add(paneId);
-  s.stack.panes.delete(paneId);
-  s.paneCss.delete(paneId);
-  const view = s.views.get(paneId);
-  if (view) {
-    detach(win, view);
-    try {
-      view.setVisible(false);
-    } catch {
-    }
-  }
-}
-function placeCommunicator(win, appId, view, rect) {
-  const s = registerComposer(win);
-  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
-  s.stack.communicator = { id: appId, rect: r };
-  s.views.set(appId, view);
-  const dpr = devicePixelRatioFor(win);
-  const w = r.width / dpr;
-  const h = r.height / dpr;
-  const overlay = s.views.get(APP_OVERLAY_ID);
-  const children = win.isDestroyed() ? [] : win.contentView.children;
-  const at = overlay ? children.indexOf(overlay) : children.length;
-  attach(win, view, at !== -1 ? at : children.length);
-  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
-  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
-}
-function removePane(win, paneId) {
-  const s = registerComposer(win);
-  const view = s.views.get(paneId);
-  if (view) detach(win, view);
-  s.views.delete(paneId);
-  s.hidden.delete(paneId);
-  s.stack.panes.delete(paneId);
-  s.paneCss.delete(paneId);
-  if (s.stack.communicator?.id === paneId) {
-    s.stack.communicator = void 0;
-  }
-}
-const removeCommunicator = removePane;
-function hitTestPaneAt(win, cssX, cssY, dpr = devicePixelRatioFor(win)) {
-  const s = registerComposer(win);
-  const hit = hitTestPaneAtPhysical(s.stack, cssX, cssY, dpr);
-  if (!hit || s.hidden.has(hit.paneId)) return void 0;
-  const view = s.views.get(hit.paneId);
-  if (!view) return void 0;
-  return { ...hit, view };
-}
-function reRoundAllPanes(win) {
-  const s = registerComposer(win);
-  const dpr = devicePixelRatioFor(win);
-  for (const [paneId, css] of s.paneCss) {
-    const view = s.views.get(paneId);
-    if (!view || s.hidden.has(paneId)) continue;
-    if (!isValidPhysicalRect(css)) continue;
-    view.setBounds(css);
-    const phys = toPhysicalRect(css, dpr);
-    s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
-  }
-}
-function invalidateAllPanes(win) {
-  const s = registerComposer(win);
-  for (const [paneId, view] of s.views) {
-    if (!s.hidden.has(paneId) && !view.webContents.isDestroyed()) {
-      view.webContents.invalidate();
-    }
-  }
-}
-const wcPaneMap = /* @__PURE__ */ new Map();
-const lastPaneCursor = /* @__PURE__ */ new Map();
-let currentHoveredPaneId;
-function registerPaneWebContents(paneId, wc) {
-  wcPaneMap.set(wc.id, paneId);
-}
-function unregisterPaneWebContents(wcId) {
-  const paneId = wcPaneMap.get(wcId);
-  if (paneId) {
-    lastPaneCursor.delete(paneId);
-    wcPaneMap.delete(wcId);
-  }
-  if (currentHoveredPaneId === paneId) {
-    currentHoveredPaneId = void 0;
-  }
-}
-function setHoveredPaneId(paneId) {
-  if (currentHoveredPaneId === paneId) return;
-  currentHoveredPaneId = paneId;
-  const overlayWc = global.appOverlayView?.webContents;
-  if (!overlayWc || overlayWc.isDestroyed()) return;
-  if (paneId) {
-    const cursor = lastPaneCursor.get(paneId) || "default";
-    overlayWc.send(IPC_CHANNELS.OVERLAY.CURSOR, cursor);
-  } else {
-    overlayWc.send(IPC_CHANNELS.OVERLAY.CURSOR, "default");
-  }
-}
-function bindGuestCursor(wc, explicitPaneId) {
-  if (explicitPaneId) {
-    registerPaneWebContents(explicitPaneId, wc);
-  }
-  wc.on("cursor-changed", (_e, type) => {
-    const paneId = explicitPaneId || wcPaneMap.get(wc.id);
-    if (paneId) {
-      lastPaneCursor.set(paneId, type);
-    }
-    if (!currentHoveredPaneId || paneId === currentHoveredPaneId) {
-      global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type);
-    }
-  });
-  wc.once("destroyed", () => {
-    unregisterPaneWebContents(wc.id);
-  });
-}
 function normalizeUrl(url) {
   if (!url) return "";
   try {
@@ -3953,6 +3054,185 @@ function pointerArbiterReducer(state, action, maxIntervalMs = MULTI_CLICK_CONFIG
       return [state, { clickCount: state.clickCount }];
   }
 }
+const APP_OVERLAY_ID = "__appOverlay";
+function hitTestPaneAtPhysical(s, cssX, cssY, dpr) {
+  if (!Number.isFinite(cssX) || !Number.isFinite(cssY)) return void 0;
+  const scale = Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+  const px = cssX * scale;
+  const py = cssY * scale;
+  if (s.communicator) {
+    const cr = s.communicator.rect;
+    const insideComm = px >= cr.x && px < cr.x + cr.width && py >= cr.y && py < cr.y + cr.height;
+    if (insideComm) {
+      return { paneId: s.communicator.id, cssLeft: cr.cssLeft, cssTop: cr.cssTop };
+    }
+  }
+  let hit;
+  for (const [paneId, r] of s.panes) {
+    if (r.x <= -5e3 || r.width <= 1 || r.height <= 1) continue;
+    const inside = px >= r.x && px < r.x + r.width && py >= r.y && py < r.y + r.height;
+    if (inside) hit = { paneId, cssLeft: r.cssLeft, cssTop: r.cssTop };
+  }
+  return hit;
+}
+function devicePixelRatioFor(win) {
+  try {
+    if (win.isDestroyed()) return 1;
+    const factor = electron.screen.getDisplayMatching(win.getBounds()).scaleFactor;
+    return Number.isFinite(factor) && factor > 0 ? factor : 1;
+  } catch {
+    return 1;
+  }
+}
+const composers = /* @__PURE__ */ new Map();
+function registerComposer(win) {
+  const existing = composers.get(win.id);
+  if (existing) return existing;
+  const state = {
+    views: /* @__PURE__ */ new Map(),
+    hidden: /* @__PURE__ */ new Set(),
+    stack: { panes: /* @__PURE__ */ new Map(), transientOrder: [] },
+    paneCss: /* @__PURE__ */ new Map()
+  };
+  composers.set(win.id, state);
+  win.once("closed", () => composers.delete(win.id));
+  return state;
+}
+function attach(win, v, index) {
+  if (win.isDestroyed()) return;
+  const children = win.contentView.children;
+  if (children.includes(v)) return;
+  const at = Math.max(0, Math.min(index ?? children.length, children.length));
+  win.contentView.addChildView(v, at);
+}
+function detach(win, v) {
+  if (win.isDestroyed()) return;
+  if (win.contentView.children.includes(v)) win.contentView.removeChildView(v);
+}
+function setAppOverlay(win, view) {
+  const s = registerComposer(win);
+  if (!view) {
+    const prev = s.views.get(APP_OVERLAY_ID);
+    if (prev) detach(win, prev);
+    s.views.delete(APP_OVERLAY_ID);
+    s.stack.appOverlayId = void 0;
+    return;
+  }
+  s.views.set(APP_OVERLAY_ID, view);
+  attach(win, view);
+  s.stack.appOverlayId = APP_OVERLAY_ID;
+}
+function setTransientOverlay(win, id, view) {
+  const s = registerComposer(win);
+  s.views.set(id, view);
+  attach(win, view);
+  if (!s.stack.transientOrder.includes(id)) s.stack.transientOrder.push(id);
+  s.hidden.delete(id);
+}
+function hideTransient(win, id) {
+  const s = registerComposer(win);
+  s.hidden.add(id);
+  const at = s.stack.transientOrder.indexOf(id);
+  if (at !== -1) s.stack.transientOrder.splice(at, 1);
+}
+function placePane(win, paneId, view, rect) {
+  const s = registerComposer(win);
+  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
+  s.hidden.delete(paneId);
+  s.stack.panes.set(paneId, r);
+  s.views.set(paneId, view);
+  const dpr = devicePixelRatioFor(win);
+  const w = r.width / dpr;
+  const h = r.height / dpr;
+  const overlay = s.views.get(APP_OVERLAY_ID);
+  const children = win.isDestroyed() ? [] : win.contentView.children;
+  const overlayIdx = overlay ? children.indexOf(overlay) : -1;
+  const commView = s.stack.communicator ? s.views.get(s.stack.communicator.id) : void 0;
+  const commIdx = commView ? children.indexOf(commView) : -1;
+  let at;
+  if (commIdx !== -1) at = commIdx;
+  else if (overlayIdx !== -1) at = overlayIdx;
+  else at = children.length;
+  attach(win, view, at);
+  if (typeof view.setBorderRadius === "function") {
+    view.setBorderRadius(12);
+  }
+  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
+  if (rect && isValidPhysicalRect(cssRect)) {
+    s.paneCss.set(paneId, cssRect);
+    view.setBounds(cssRect);
+  }
+}
+function hidePane(win, paneId) {
+  const s = registerComposer(win);
+  s.hidden.add(paneId);
+  s.stack.panes.delete(paneId);
+  s.paneCss.delete(paneId);
+  const view = s.views.get(paneId);
+  if (view) {
+    detach(win, view);
+    try {
+      view.setVisible(false);
+    } catch {
+    }
+  }
+}
+function placeCommunicator(win, appId, view, rect) {
+  const s = registerComposer(win);
+  const r = rect ?? { x: 0, y: 0, width: 0, height: 0, cssLeft: 0, cssTop: 0 };
+  s.stack.communicator = { id: appId, rect: r };
+  s.views.set(appId, view);
+  const dpr = devicePixelRatioFor(win);
+  const w = r.width / dpr;
+  const h = r.height / dpr;
+  const overlay = s.views.get(APP_OVERLAY_ID);
+  const children = win.isDestroyed() ? [] : win.contentView.children;
+  const at = overlay ? children.indexOf(overlay) : children.length;
+  attach(win, view, at !== -1 ? at : children.length);
+  const cssRect = { x: r.cssLeft, y: r.cssTop, width: w, height: h };
+  if (rect && isValidPhysicalRect(cssRect)) view.setBounds(cssRect);
+}
+function removePane(win, paneId) {
+  const s = registerComposer(win);
+  const view = s.views.get(paneId);
+  if (view) detach(win, view);
+  s.views.delete(paneId);
+  s.hidden.delete(paneId);
+  s.stack.panes.delete(paneId);
+  s.paneCss.delete(paneId);
+  if (s.stack.communicator?.id === paneId) {
+    s.stack.communicator = void 0;
+  }
+}
+const removeCommunicator = removePane;
+function hitTestPaneAt(win, cssX, cssY, dpr = devicePixelRatioFor(win)) {
+  const s = registerComposer(win);
+  const hit = hitTestPaneAtPhysical(s.stack, cssX, cssY, dpr);
+  if (!hit || s.hidden.has(hit.paneId)) return void 0;
+  const view = s.views.get(hit.paneId);
+  if (!view) return void 0;
+  return { ...hit, view };
+}
+function reRoundAllPanes(win) {
+  const s = registerComposer(win);
+  const dpr = devicePixelRatioFor(win);
+  for (const [paneId, css] of s.paneCss) {
+    const view = s.views.get(paneId);
+    if (!view || s.hidden.has(paneId)) continue;
+    if (!isValidPhysicalRect(css)) continue;
+    view.setBounds(css);
+    const phys = toPhysicalRect(css, dpr);
+    s.stack.panes.set(paneId, { ...phys, cssLeft: css.x, cssTop: css.y });
+  }
+}
+function invalidateAllPanes(win) {
+  const s = registerComposer(win);
+  for (const [paneId, view] of s.views) {
+    if (!s.hidden.has(paneId) && !view.webContents.isDestroyed()) {
+      view.webContents.invalidate();
+    }
+  }
+}
 function toCdpButton(button, isMove = false, buttons = 0) {
   if (isMove) {
     if ((buttons & 1) !== 0) return "left";
@@ -3975,6 +3255,73 @@ function toElectronModifiers(modifiers) {
   if ((modifiers & 4) !== 0) list.push("meta");
   if ((modifiers & 8) !== 0) list.push("shift");
   return list;
+}
+const activePaneIdByWin = /* @__PURE__ */ new Map();
+const pendingFocusByWin = /* @__PURE__ */ new Map();
+class FocusArbiter {
+  static focusOverlay(win) {
+    const targetWin = win || global.mainWindow;
+    if (!targetWin || targetWin.isDestroyed()) return;
+    setAirspaceFocusEmulation(targetWin, false);
+    const ov = global.appOverlayView?.webContents;
+    if (ov && !ov.isDestroyed()) {
+      ov.focus();
+    }
+  }
+  static focusGuest(win, paneId) {
+    if (!win || win.isDestroyed() || !paneId) return;
+    const s = composers.get(win.id);
+    const view = s?.views.get(paneId);
+    if (!view || view.webContents.isDestroyed()) {
+      pendingFocusByWin.set(win.id, paneId);
+      return;
+    }
+    pendingFocusByWin.delete(win.id);
+    const prevPaneId = activePaneIdByWin.get(win.id);
+    if (prevPaneId && prevPaneId !== paneId) {
+      const prevView = s?.views.get(prevPaneId);
+      if (prevView && !prevView.webContents.isDestroyed() && prevView.webContents.debugger.isAttached()) {
+        prevView.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {
+        });
+      }
+    }
+    activePaneIdByWin.set(win.id, paneId);
+    hibernationEngine.setActivePane(paneId);
+    if (hibernationEngine.isFrozen(paneId)) {
+      hibernationEngine.thawPane(paneId).catch(() => {
+      });
+    }
+    const dbg = ensureDebugger(view);
+    if (dbg) {
+      dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+      });
+    }
+    view.webContents.focus();
+    global.appOverlayView?.webContents.send("pane.focused", paneId);
+  }
+  static handlePendingGuestFocus(win, paneId) {
+    if (!win || win.isDestroyed()) return;
+    if (pendingFocusByWin.get(win.id) === paneId) {
+      this.focusGuest(win, paneId);
+    }
+  }
+  static getActivePaneId(winId) {
+    return activePaneIdByWin.get(winId);
+  }
+  static handlePaneDestroyed(win, paneId) {
+    if (!win || win.isDestroyed()) return;
+    if (pendingFocusByWin.get(win.id) === paneId) {
+      pendingFocusByWin.delete(win.id);
+    }
+    if (activePaneIdByWin.get(win.id) === paneId) {
+      activePaneIdByWin.delete(win.id);
+      this.focusOverlay(win);
+    }
+  }
+  static blur(win) {
+    if (!win || win.isDestroyed()) return;
+    setAirspaceFocusEmulation(win, false);
+  }
 }
 let currentState = initialContextMenuState;
 let fallbackTimer = null;
@@ -4077,102 +3424,211 @@ function initContextMenuCoordinator(getWindow) {
     win.on("blur", () => dispatch({ type: "DISMISS" }));
   }
 }
-const captureViewSafely = async (view) => {
-  if (!view || view.webContents.isDestroyed()) return "";
-  try {
-    const bounds = view.getBounds();
-    if (bounds.width <= 0 || bounds.height <= 0) return "";
-    const capturePromise = view.webContents.capturePage({
-      x: 0,
-      y: 0,
-      width: bounds.width,
-      height: bounds.height
-    });
-    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 800));
-    const img = await Promise.race([capturePromise, timeoutPromise]);
-    if (img && !img.isEmpty()) {
-      let finalImg = img;
-      const size = img.getSize();
-      if (size.width > 1200) {
-        finalImg = img.resize({ width: 1200 });
-      }
-      return `data:image/jpeg;base64,${finalImg.toJPEG(75).toString("base64")}`;
-    }
-  } catch (err) {
-    console.warn("[capture] capturePage failed:", err);
+const wcPaneMap = /* @__PURE__ */ new Map();
+const lastPaneCursor = /* @__PURE__ */ new Map();
+let currentHoveredPaneId;
+function registerPaneWebContents(paneId, wc) {
+  wcPaneMap.set(wc.id, paneId);
+}
+function unregisterPaneWebContents(wcId) {
+  const paneId = wcPaneMap.get(wcId);
+  if (paneId) {
+    lastPaneCursor.delete(paneId);
+    wcPaneMap.delete(wcId);
   }
-  return "";
-};
-function initCaptureIpc() {
-  electron.ipcMain.on("view.screenshot", async (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
+  if (currentHoveredPaneId === paneId) {
+    currentHoveredPaneId = void 0;
+  }
+}
+function setHoveredPaneId(paneId) {
+  if (currentHoveredPaneId === paneId) return;
+  currentHoveredPaneId = paneId;
+  const overlayWc = global.appOverlayView?.webContents;
+  if (!overlayWc || overlayWc.isDestroyed()) return;
+  if (paneId) {
+    const cursor = lastPaneCursor.get(paneId) || "default";
+    overlayWc.send(IPC_CHANNELS.OVERLAY.CURSOR, cursor);
+  } else {
+    overlayWc.send(IPC_CHANNELS.OVERLAY.CURSOR, "default");
+  }
+}
+function bindGuestCursor(wc, explicitPaneId) {
+  if (explicitPaneId) {
+    registerPaneWebContents(explicitPaneId, wc);
+  }
+  wc.on("cursor-changed", (_e, type) => {
+    const paneId = explicitPaneId || wcPaneMap.get(wc.id);
+    if (paneId) {
+      lastPaneCursor.set(paneId, type);
+    }
+    if (!currentHoveredPaneId || paneId === currentHoveredPaneId) {
+      global.appOverlayView?.webContents.send(IPC_CHANNELS.OVERLAY.CURSOR, type);
+    }
+  });
+  wc.once("destroyed", () => {
+    unregisterPaneWebContents(wc.id);
+  });
+}
+const multiClickStateByWin = /* @__PURE__ */ new Map();
+function setAirspaceFocusEmulation(win, enabled) {
+  if (!win || win.isDestroyed()) return;
+  const s = composers.get(win.id);
+  if (!s) return;
+  for (const v of s.views.values()) {
+    if (!v.webContents.isDestroyed() && v.webContents.debugger.isAttached()) {
+      v.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled }).catch(() => {
+      });
+    }
+  }
+}
+function initPointerForwarder(getWindow) {
+  electron.ipcMain.on("airspace:chrome-clicked", () => {
+    setHoveredPaneId(void 0);
+    const win = getWindow();
+    if (win) multiClickStateByWin.delete(win.id);
+    FocusArbiter.focusOverlay(win);
+  });
+  electron.ipcMain.on("airspace:chrome-entered", () => {
+    setHoveredPaneId(void 0);
+    const win = getWindow();
+    if (win) multiClickStateByWin.delete(win.id);
+  });
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
+    const win = getWindow();
+    if (!win) return;
+    const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
+    if (!hit) {
+      setHoveredPaneId(void 0);
+      multiClickStateByWin.delete(win.id);
+      return;
+    }
+    setHoveredPaneId(hit.paneId);
+    if (msg.type !== "mousemove" || Boolean(msg.buttons && msg.buttons > 0)) {
+      hibernationEngine.registerActivity(hit.paneId);
+    }
+    const view = composers.get(win.id)?.views.get(hit.paneId);
+    if (!view || view.webContents.isDestroyed()) return;
+    ensureDebugger(view);
+    const bounds = view.getBounds();
+    const originX = bounds.width > 0 ? bounds.x : hit.cssLeft;
+    const originY = bounds.height > 0 ? bounds.y : hit.cssTop;
+    const localX = Math.round(msg.x - originX);
+    const localY = Math.round(msg.y - originY);
+    const electronMods = toElectronModifiers(msg.modifiers);
+    if (msg.type === "wheel") {
       try {
-        const image = await view.webContents.capturePage();
-        const { clipboard } = require("electron");
-        clipboard.writeImage(image);
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("app:toast", {
-            message: "Screenshot copied to clipboard",
-            type: "success"
-          });
+        view.webContents.sendInputEvent({
+          type: "mouseWheel",
+          x: localX,
+          y: localY,
+          deltaX: -(msg.deltaX || 0),
+          deltaY: -(msg.deltaY || 0),
+          modifiers: electronMods,
+          canScroll: true
+        });
+      } catch {
+      }
+    } else {
+      if (msg.type === "mousedown") {
+        FocusArbiter.focusGuest(win, hit.paneId);
+        if (msg.button === 0) {
+          resetContextMenuYieldState();
         }
-      } catch (err) {
-        console.error("Failed to capture screenshot", err);
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("app:toast", {
-            message: "Failed to copy screenshot",
-            type: "error"
-          });
+      }
+      if (msg.button === 2 && (msg.modifiers & 8) !== 0) {
+        return;
+      }
+      const isMove = msg.type === "mousemove";
+      const btn = toCdpButton(msg.button, isMove, msg.buttons);
+      let clickCount = isMove ? 0 : 1;
+      if (msg.type === "mousedown" && btn !== "none") {
+        const prevState = multiClickStateByWin.get(win.id) ?? initialMultiClickState;
+        const [nextState, outcome] = pointerArbiterReducer(prevState, {
+          type: "POINTER_DOWN",
+          paneId: hit.paneId,
+          button: msg.button,
+          x: localX,
+          y: localY,
+          now: Date.now()
+        });
+        multiClickStateByWin.set(win.id, nextState);
+        clickCount = outcome.clickCount;
+      } else if (msg.type === "mouseup" && btn !== "none") {
+        const prevState = multiClickStateByWin.get(win.id) ?? initialMultiClickState;
+        const [nextState, outcome] = pointerArbiterReducer(prevState, {
+          type: "POINTER_UP",
+          paneId: hit.paneId,
+          button: msg.button,
+          x: localX,
+          y: localY,
+          now: Date.now()
+        });
+        multiClickStateByWin.set(win.id, nextState);
+        clickCount = outcome.clickCount;
+      }
+      const dbg = ensureDebugger(view);
+      if (dbg) {
+        dbg.sendCommand("Input.dispatchMouseEvent", {
+          type: msg.type === "mousedown" ? "mousePressed" : msg.type === "mouseup" ? "mouseReleased" : "mouseMoved",
+          x: localX,
+          y: localY,
+          button: btn,
+          buttons: msg.buttons,
+          clickCount,
+          modifiers: toCdpModifiers(msg.modifiers),
+          pointerType: "mouse"
+        }).catch(() => {
+        });
+      } else {
+        try {
+          if (isMove) {
+            view.webContents.sendInputEvent({
+              type: "mouseMove",
+              x: localX,
+              y: localY,
+              modifiers: electronMods
+            });
+          } else if (msg.type === "mousedown") {
+            if (btn !== "none") {
+              view.webContents.sendInputEvent({
+                type: "mouseDown",
+                x: localX,
+                y: localY,
+                button: btn,
+                clickCount,
+                modifiers: electronMods
+              });
+            }
+          } else if (msg.type === "mouseup") {
+            if (btn !== "none") {
+              view.webContents.sendInputEvent({
+                type: "mouseUp",
+                x: localX,
+                y: localY,
+                button: btn,
+                clickCount,
+                modifiers: electronMods
+              });
+            }
+          }
+        } catch {
         }
       }
     }
   });
-  electron.ipcMain.handle(
-    "view.capture",
-    async (_event, paneId) => {
-      const view = activeViews.get(paneId);
-      if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
-      const dataURL = await captureViewSafely(view);
-      return dataURL;
+}
+function ensureDebugger(view) {
+  const dbg = view.webContents.debugger;
+  if (!dbg.isAttached()) {
+    try {
+      dbg.attach("1.3");
+    } catch {
+      return void 0;
     }
-  );
-  electron.ipcMain.handle(
-    "view.captureAllActive",
-    async () => {
-      const captures = {};
-      for (const [paneId, view] of activeViews) {
-        if (view.webContents.isDestroyed()) continue;
-        const bounds = view.getBounds();
-        if (bounds.width > 0 && bounds.height > 0) {
-          const dataURL = await captureViewSafely(view);
-          if (dataURL) captures[paneId] = dataURL;
-        }
-      }
-      return captures;
-    }
-  );
-  electron.ipcMain.handle(
-    "view.hibernateAllActive",
-    async () => {
-      const captures = {};
-      const paneIds = Array.from(activeViews.keys());
-      for (const paneId of paneIds) {
-        await hibernationEngine.hibernatePane(paneId);
-        const desc = viewRegistry.getHibernated(paneId);
-        if (desc) captures[paneId] = desc.dataURL;
-      }
-      return captures;
-    }
-  );
-  electron.ipcMain.handle(
-    "view.hibernate",
-    async (_event, paneId) => {
-      await hibernationEngine.hibernatePane(paneId);
-      const desc = viewRegistry.getHibernated(paneId);
-      return desc?.dataURL || "";
-    }
-  );
+  }
+  dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+  });
+  return dbg;
 }
 class CryoVault {
   lastKnownValidBounds = /* @__PURE__ */ new Map();
@@ -4722,233 +4178,189 @@ class HibernationEngine {
   }
 }
 const hibernationEngine = new HibernationEngine();
-const multiClickStateByWin = /* @__PURE__ */ new Map();
-function setAirspaceFocusEmulation(win, enabled) {
-  if (!win || win.isDestroyed()) return;
-  const s = composers.get(win.id);
-  if (!s) return;
-  for (const v of s.views.values()) {
-    if (!v.webContents.isDestroyed() && v.webContents.debugger.isAttached()) {
-      v.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled }).catch(() => {
-      });
-    }
-  }
-}
-function initPointerForwarder(getWindow) {
-  electron.ipcMain.on("airspace:chrome-clicked", () => {
-    setHoveredPaneId(void 0);
-    const win = getWindow();
-    if (win) multiClickStateByWin.delete(win.id);
-    FocusArbiter.focusOverlay(win);
-  });
-  electron.ipcMain.on("airspace:chrome-entered", () => {
-    setHoveredPaneId(void 0);
-    const win = getWindow();
-    if (win) multiClickStateByWin.delete(win.id);
-  });
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, (_e, msg) => {
-    const win = getWindow();
-    if (!win) return;
-    const hit = hitTestPaneAt(win, msg.x, msg.y, devicePixelRatioFor(win));
-    if (!hit) {
-      setHoveredPaneId(void 0);
-      multiClickStateByWin.delete(win.id);
-      return;
-    }
-    setHoveredPaneId(hit.paneId);
-    if (msg.type !== "mousemove" || Boolean(msg.buttons && msg.buttons > 0)) {
-      hibernationEngine.registerActivity(hit.paneId);
-    }
-    const view = composers.get(win.id)?.views.get(hit.paneId);
-    if (!view || view.webContents.isDestroyed()) return;
-    ensureDebugger(view);
+const captureViewSafely = async (view) => {
+  if (!view || view.webContents.isDestroyed()) return "";
+  try {
     const bounds = view.getBounds();
-    const originX = bounds.width > 0 ? bounds.x : hit.cssLeft;
-    const originY = bounds.height > 0 ? bounds.y : hit.cssTop;
-    const localX = Math.round(msg.x - originX);
-    const localY = Math.round(msg.y - originY);
-    const electronMods = toElectronModifiers(msg.modifiers);
-    if (msg.type === "wheel") {
+    if (bounds.width <= 0 || bounds.height <= 0) return "";
+    const capturePromise = view.webContents.capturePage({
+      x: 0,
+      y: 0,
+      width: bounds.width,
+      height: bounds.height
+    });
+    const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve(null), 800));
+    const img = await Promise.race([capturePromise, timeoutPromise]);
+    if (img && !img.isEmpty()) {
+      let finalImg = img;
+      const size = img.getSize();
+      if (size.width > 1200) {
+        finalImg = img.resize({ width: 1200 });
+      }
+      return `data:image/jpeg;base64,${finalImg.toJPEG(75).toString("base64")}`;
+    }
+  } catch (err) {
+    console.warn("[capture] capturePage failed:", err);
+  }
+  return "";
+};
+function initCaptureIpc() {
+  electron.ipcMain.on("view.screenshot", async (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
       try {
-        view.webContents.sendInputEvent({
-          type: "mouseWheel",
-          x: localX,
-          y: localY,
-          deltaX: -(msg.deltaX || 0),
-          deltaY: -(msg.deltaY || 0),
-          modifiers: electronMods,
-          canScroll: true
-        });
-      } catch {
-      }
-    } else {
-      if (msg.type === "mousedown") {
-        FocusArbiter.focusGuest(win, hit.paneId);
-        if (msg.button === 0) {
-          resetContextMenuYieldState();
+        const image = await view.webContents.capturePage();
+        const { clipboard } = require("electron");
+        clipboard.writeImage(image);
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
+            message: "Screenshot copied to clipboard",
+            type: "success"
+          });
         }
-      }
-      if (msg.button === 2 && (msg.modifiers & 8) !== 0) {
-        return;
-      }
-      const isMove = msg.type === "mousemove";
-      const btn = toCdpButton(msg.button, isMove, msg.buttons);
-      let clickCount = isMove ? 0 : 1;
-      if (msg.type === "mousedown" && btn !== "none") {
-        const prevState = multiClickStateByWin.get(win.id) ?? initialMultiClickState;
-        const [nextState, outcome] = pointerArbiterReducer(prevState, {
-          type: "POINTER_DOWN",
-          paneId: hit.paneId,
-          button: msg.button,
-          x: localX,
-          y: localY,
-          now: Date.now()
-        });
-        multiClickStateByWin.set(win.id, nextState);
-        clickCount = outcome.clickCount;
-      } else if (msg.type === "mouseup" && btn !== "none") {
-        const prevState = multiClickStateByWin.get(win.id) ?? initialMultiClickState;
-        const [nextState, outcome] = pointerArbiterReducer(prevState, {
-          type: "POINTER_UP",
-          paneId: hit.paneId,
-          button: msg.button,
-          x: localX,
-          y: localY,
-          now: Date.now()
-        });
-        multiClickStateByWin.set(win.id, nextState);
-        clickCount = outcome.clickCount;
-      }
-      const dbg = ensureDebugger(view);
-      if (dbg) {
-        dbg.sendCommand("Input.dispatchMouseEvent", {
-          type: msg.type === "mousedown" ? "mousePressed" : msg.type === "mouseup" ? "mouseReleased" : "mouseMoved",
-          x: localX,
-          y: localY,
-          button: btn,
-          buttons: msg.buttons,
-          clickCount,
-          modifiers: toCdpModifiers(msg.modifiers),
-          pointerType: "mouse"
-        }).catch(() => {
-        });
-      } else {
-        try {
-          if (isMove) {
-            view.webContents.sendInputEvent({
-              type: "mouseMove",
-              x: localX,
-              y: localY,
-              modifiers: electronMods
-            });
-          } else if (msg.type === "mousedown") {
-            if (btn !== "none") {
-              view.webContents.sendInputEvent({
-                type: "mouseDown",
-                x: localX,
-                y: localY,
-                button: btn,
-                clickCount,
-                modifiers: electronMods
-              });
-            }
-          } else if (msg.type === "mouseup") {
-            if (btn !== "none") {
-              view.webContents.sendInputEvent({
-                type: "mouseUp",
-                x: localX,
-                y: localY,
-                button: btn,
-                clickCount,
-                modifiers: electronMods
-              });
-            }
-          }
-        } catch {
+      } catch (err) {
+        console.error("Failed to capture screenshot", err);
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("app:toast", {
+            message: "Failed to copy screenshot",
+            type: "error"
+          });
         }
       }
     }
   });
-}
-function ensureDebugger(view) {
-  const dbg = view.webContents.debugger;
-  if (!dbg.isAttached()) {
-    try {
-      dbg.attach("1.3");
-    } catch {
-      return void 0;
+  electron.ipcMain.handle(
+    "view.capture",
+    async (_event, paneId) => {
+      const view = activeViews.get(paneId);
+      if (!view || view.webContents.isDestroyed()) return Promise.resolve("");
+      const dataURL = await captureViewSafely(view);
+      return dataURL;
     }
-  }
-  dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
+  );
+  electron.ipcMain.handle(
+    "view.captureAllActive",
+    async () => {
+      const captures = {};
+      for (const [paneId, view] of activeViews) {
+        if (view.webContents.isDestroyed()) continue;
+        const bounds = view.getBounds();
+        if (bounds.width > 0 && bounds.height > 0) {
+          const dataURL = await captureViewSafely(view);
+          if (dataURL) captures[paneId] = dataURL;
+        }
+      }
+      return captures;
+    }
+  );
+  electron.ipcMain.handle(
+    "view.hibernateAllActive",
+    async () => {
+      const captures = {};
+      const paneIds = Array.from(activeViews.keys());
+      for (const paneId of paneIds) {
+        await hibernationEngine.hibernatePane(paneId);
+        const desc = viewRegistry.getHibernated(paneId);
+        if (desc) captures[paneId] = desc.dataURL;
+      }
+      return captures;
+    }
+  );
+  electron.ipcMain.handle(
+    "view.hibernate",
+    async (_event, paneId) => {
+      await hibernationEngine.hibernatePane(paneId);
+      const desc = viewRegistry.getHibernated(paneId);
+      return desc?.dataURL || "";
+    }
+  );
+}
+createLogger("VIEW");
+function initViewIpc() {
+  electron.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
+    if (paneId && typeof wcId === "number") {
+      viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
+    }
   });
-  return dbg;
-}
-const activePaneIdByWin = /* @__PURE__ */ new Map();
-const pendingFocusByWin = /* @__PURE__ */ new Map();
-class FocusArbiter {
-  static focusOverlay(win) {
-    const targetWin = win || global.mainWindow;
-    if (!targetWin || targetWin.isDestroyed()) return;
-    setAirspaceFocusEmulation(targetWin, false);
-    const ov = global.appOverlayView?.webContents;
-    if (ov && !ov.isDestroyed()) {
-      ov.focus();
-    }
-  }
-  static focusGuest(win, paneId) {
-    if (!win || win.isDestroyed() || !paneId) return;
-    const s = composers.get(win.id);
-    const view = s?.views.get(paneId);
-    if (!view || view.webContents.isDestroyed()) {
-      pendingFocusByWin.set(win.id, paneId);
-      return;
-    }
-    pendingFocusByWin.delete(win.id);
-    const prevPaneId = activePaneIdByWin.get(win.id);
-    if (prevPaneId && prevPaneId !== paneId) {
-      const prevView = s?.views.get(prevPaneId);
-      if (prevView && !prevView.webContents.isDestroyed() && prevView.webContents.debugger.isAttached()) {
-        prevView.webContents.debugger.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {
-        });
+  electron.ipcMain.on("pane.clicked", (event) => {
+    for (const [paneId, view] of activeViews) {
+      if (view.webContents === event.sender) {
+        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
+          global.overlayWindow.webContents.send("pane.focused", paneId);
+        }
+        break;
       }
     }
-    activePaneIdByWin.set(win.id, paneId);
-    hibernationEngine.setActivePane(paneId);
-    if (hibernationEngine.isFrozen(paneId)) {
-      hibernationEngine.thawPane(paneId).catch(() => {
-      });
+  });
+  electron.ipcMain.on("view.openDevTools", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (!view || view.webContents.isDestroyed()) return;
+    if (view.webContents.isDevToolsOpened()) return;
+    activeViews.forEach((v) => {
+      if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
+        v.webContents.closeDevTools();
+      }
+    });
+    view.webContents.openDevTools({ mode: "undocked" });
+  });
+  electron.ipcMain.on("view.closeDevTools", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.closeDevTools();
     }
-    const dbg = ensureDebugger(view);
-    if (dbg) {
-      dbg.sendCommand("Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {
-      });
+  });
+  electron.ipcMain.on("view.hideDevTools", () => {
+    activeViews.forEach((v) => {
+      if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
+    });
+  });
+  electron.ipcMain.on("view.zoomIn", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      const level = view.webContents.getZoomLevel();
+      view.webContents.setZoomLevel(level + 0.5);
     }
-    view.webContents.focus();
-    global.appOverlayView?.webContents.send("pane.focused", paneId);
-  }
-  static handlePendingGuestFocus(win, paneId) {
-    if (!win || win.isDestroyed()) return;
-    if (pendingFocusByWin.get(win.id) === paneId) {
-      this.focusGuest(win, paneId);
+  });
+  electron.ipcMain.on("view.zoomOut", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      const level = view.webContents.getZoomLevel();
+      view.webContents.setZoomLevel(level - 0.5);
     }
-  }
-  static getActivePaneId(winId) {
-    return activePaneIdByWin.get(winId);
-  }
-  static handlePaneDestroyed(win, paneId) {
-    if (!win || win.isDestroyed()) return;
-    if (pendingFocusByWin.get(win.id) === paneId) {
-      pendingFocusByWin.delete(win.id);
+  });
+  electron.ipcMain.on("view.zoomReset", (_, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setZoomLevel(0);
     }
-    if (activePaneIdByWin.get(win.id) === paneId) {
-      activePaneIdByWin.delete(win.id);
-      this.focusOverlay(win);
+  });
+  electron.ipcMain.on("view.sleep", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setBackgroundThrottling(true);
+      view.webContents.setAudioMuted(true);
+      view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
     }
-  }
-  static blur(win) {
-    if (!win || win.isDestroyed()) return;
-    setAirspaceFocusEmulation(win, false);
-  }
+  });
+  electron.ipcMain.on("view.wake", (_event, paneId, bounds) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.setBackgroundThrottling(false);
+      view.webContents.setAudioMuted(false);
+      if (bounds) view.setBounds(bounds);
+    }
+  });
+  electron.ipcMain.removeAllListeners("auth:trigger-autofill");
+  electron.ipcMain.on("auth:trigger-autofill", (_event, paneId) => {
+    const view = activeViews.get(paneId);
+    if (view && !view.webContents.isDestroyed()) {
+      view.webContents.send("auth:trigger-autofill");
+    }
+  });
+}
+function initViewManager() {
+  initCaptureIpc();
+  initViewIpc();
 }
 const DEFAULT_WINDOW_DIMENSIONS = {
   x: 0,
@@ -5318,7 +4730,6 @@ function resolveAppIcon() {
   return process.platform === "win32" ? ico : png;
 }
 function createWindow() {
-  process.platform === "darwin";
   const initial = windowStateManager.getInitialState();
   const win = new electron.BrowserWindow({
     x: initial.bounds.x,
@@ -5350,6 +4761,15 @@ function createWindow() {
   global.mainWindow = win;
   global.overlayWindow = win;
   registerComposer(win);
+  win.on("close", (event) => {
+    if (process.platform === "darwin" && !global.isQuittingApp) {
+      event.preventDefault();
+      win.hide();
+      FocusArbiter.blur(win);
+      hibernationEngine.setAppMinimized(true);
+      return;
+    }
+  });
   win.on("minimize", () => hibernationEngine.setAppMinimized(true));
   win.on("restore", () => hibernationEngine.setAppMinimized(false));
   win.on("blur", () => FocusArbiter.blur(win));
@@ -5438,675 +4858,1008 @@ function syncAppOverlayBounds(win) {
     view.setBounds({ x: 0, y: 0, width: w, height: h });
   }
 }
-function getSafeClipboard() {
-  const c = electron__namespace.clipboard || electron__namespace.default?.clipboard || electron.clipboard;
-  if (c && (typeof c.write === "function" || typeof c.writeImage === "function" || typeof c.writeText === "function")) {
-    return c;
-  }
-  try {
-    const req = typeof require !== "undefined" ? require("electron") : null;
-    return req?.clipboard || req?.default?.clipboard || c;
-  } catch {
-    return c;
-  }
-}
-function getSafeClipboardItem() {
-  const ci = electron__namespace.ClipboardItem || electron__namespace.default?.ClipboardItem || electron.ClipboardItem;
-  if (ci && typeof ci === "function") return ci;
-  try {
-    const req = typeof require !== "undefined" ? require("electron") : null;
-    return req?.ClipboardItem || req?.default?.ClipboardItem || ci;
-  } catch {
-    return ci;
-  }
-}
-function getSafeNativeImage() {
-  const ni = electron__namespace.nativeImage || electron__namespace.default?.nativeImage || electron.nativeImage;
-  if (ni && typeof ni.createFromBuffer === "function") return ni;
-  try {
-    const req = typeof require !== "undefined" ? require("electron") : null;
-    return req?.nativeImage || req?.default?.nativeImage || ni;
-  } catch {
-    return ni;
-  }
-}
-function getSafeNet() {
-  const n = electron__namespace.net || electron__namespace.default?.net || electron.net;
-  if (n && typeof n.fetch === "function") return n;
-  try {
-    const req = typeof require !== "undefined" ? require("electron") : null;
-    return req?.net || req?.default?.net || n;
-  } catch {
-    return n;
-  }
-}
-async function writeImageToClipboard(pngBuffer, dataUrl) {
-  if (!pngBuffer || pngBuffer.length === 0) return false;
-  const clip = getSafeClipboard();
-  if (!clip) return false;
-  const resolvedDataUrl = dataUrl || `data:image/png;base64,${Buffer.from(pngBuffer).toString("base64")}`;
-  const ClipboardItemClass = getSafeClipboardItem();
-  if (typeof clip.write === "function" && typeof ClipboardItemClass === "function") {
+const DEFAULT_CACHE_QUOTA_BYTES = 250 * 1024 * 1024;
+class StorageQuotaService {
+  isPruning = false;
+  async prunePartition(partition, thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
     try {
-      const pngBlob = new Blob([pngBuffer], { type: "image/png" });
-      const htmlBlob = new Blob([`<img src="${resolvedDataUrl}" alt="Copied Image" />`], {
-        type: "text/html"
-      });
-      const item = new ClipboardItemClass({
-        "image/png": pngBlob,
-        "text/html": htmlBlob
-      });
-      await clip.write([item]);
-      return true;
+      const ses = electron.session.fromPartition(partition);
+      const cacheSize = await ses.getCacheSize();
+      if (cacheSize > thresholdBytes) {
+        logger$5.info(
+          `[StorageQuota] Partition ${partition} cache (${Math.round(cacheSize / 1024 / 1024)}MB) exceeds quota (${Math.round(thresholdBytes / 1024 / 1024)}MB). Pruning transient caches...`
+        );
+        await ses.clearStorageData({
+          storages: ["shadercache", "serviceworkers", "cachestorage"]
+        });
+        await ses.clearCache();
+        logger$5.info(`[StorageQuota] Partition ${partition} cache successfully pruned.`);
+        return true;
+      }
     } catch (err) {
-      console.warn("[clipboardService] W3C clip.write failed, trying legacy fallback:", err);
+      logger$5.debug(`[StorageQuota] Failed to prune partition ${partition}:`, err);
+    }
+    return false;
+  }
+  async pruneAllPartitions(thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
+    if (this.isPruning) return;
+    this.isPruning = true;
+    try {
+      const profiles = getProfiles() || [];
+      const partitions = /* @__PURE__ */ new Set([
+        "persist:main",
+        ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+      ]);
+      for (const part of partitions) {
+        await this.prunePartition(part, thresholdBytes);
+      }
+    } finally {
+      this.isPruning = false;
     }
   }
-  try {
-    const nativeImg = getSafeNativeImage()?.createFromBuffer(Buffer.from(pngBuffer));
-    if (nativeImg && !nativeImg.isEmpty()) {
-      if (typeof clip.writeImage === "function") {
-        clip.writeImage(nativeImg);
-        return true;
-      }
-      if (typeof clip.write === "function") {
-        clip.write({
-          image: nativeImg,
-          html: `<img src="${resolvedDataUrl}" />`
-        });
-        return true;
-      }
-    }
-  } catch (fallbackErr) {
-    console.warn("[clipboardService] Legacy writeImage fallback failed:", fallbackErr);
+  initBackgroundPruner() {
+    setInterval(() => {
+      this.pruneAllPartitions().catch(() => {
+      });
+    }, 15 * 60 * 1e3);
   }
-  return false;
 }
-async function captureWebContentsCdp(wc, options = { fullPage: true, copyToClipboard: true }) {
-  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+const storageQuota = new StorageQuotaService();
+async function flushAllSessions() {
   try {
-    let image;
-    let buffer;
-    if (!options.fullPage) {
-      image = await wc.capturePage();
-      buffer = image.toPNG();
-    } else {
-      const dbg = wc.debugger;
-      let attached = false;
+    const profiles = getProfiles();
+    const partitions = /* @__PURE__ */ new Set([
+      "persist:main",
+      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+    ]);
+    for (const part of partitions) {
       try {
-        if (!dbg.isAttached()) {
-          dbg.attach("1.3");
-          attached = true;
-        }
-        await dbg.sendCommand("Page.enable");
-        const screenshotData = await dbg.sendCommand("Page.captureScreenshot", {
-          format: options.format || "png",
-          quality: options.quality || 95,
-          captureBeyondViewport: true
-        });
-        buffer = Buffer.from(screenshotData.data, "base64");
-        image = getSafeNativeImage().createFromBuffer(buffer);
-      } finally {
-        if (attached && dbg.isAttached()) {
-          try {
-            dbg.detach();
-          } catch {
-          }
-        }
+        const ses = electron.session.fromPartition(part);
+        await ses.flushStorageData();
+      } catch (err) {
+        logger$5.debug(`Flush failed for ${part}`, err);
       }
     }
-    if (!image || image.isEmpty()) {
-      return { success: false, error: "Captured image is empty" };
-    }
-    if (options.copyToClipboard) {
-      await writeImageToClipboard(buffer, image.toDataURL());
-    }
-    let filePath = options.savePath;
-    if (!filePath && !options.copyToClipboard) {
-      const fileName = `screenshot-${Date.now()}.${options.format || "png"}`;
-      filePath = path.join(electron.app.getPath("pictures"), fileName);
-      await promises.writeFile(filePath, buffer);
-    } else if (filePath) {
-      await promises.writeFile(filePath, buffer);
-    }
-    return {
-      success: true,
-      dataUrl: image.toDataURL(),
-      filePath
-    };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
+    await electron.session.defaultSession.flushStorageData();
+  } catch (e) {
+    logger$5.warn("Failed to flush session storage", e);
   }
 }
-class MultiPaneSearchCoordinator {
-  activeQuery = "";
-  paneResults = /* @__PURE__ */ new Map();
-  findInPanes(panes2, query, options = {}) {
-    const trimmed = (query || "").trim();
-    if (!trimmed) {
-      this.stopFind(panes2, "clearSelection");
-      return;
-    }
-    this.activeQuery = trimmed;
-    const hasTarget = Boolean(options.targetPaneId && panes2.has(options.targetPaneId));
-    for (const [paneId, wc] of panes2.entries()) {
-      if (!wc.isDestroyed()) {
-        if (hasTarget && paneId !== options.targetPaneId) {
-          wc.stopFindInPage("clearSelection");
-          this.paneResults.delete(paneId);
-          continue;
-        }
-        const reqId = wc.findInPage(trimmed, {
-          forward: options.forward ?? true,
-          findNext: options.findNext ?? false,
-          matchCase: options.matchCase ?? false
-        });
-        const current = this.paneResults.get(paneId);
-        this.paneResults.set(paneId, {
-          activeMatch: current?.activeMatch || 0,
-          total: current?.total || 0,
-          requestId: reqId
-        });
-      }
-    }
-  }
-  handlePaneResult(paneId, result) {
-    const total = typeof result.matches === "number" ? result.matches : typeof result.numberOfMatches === "number" ? result.numberOfMatches : 0;
-    const active = result.activeMatchOrdinal || 0;
-    const reqId = result.requestId || 0;
-    const existing = this.paneResults.get(paneId);
-    if (existing && reqId > 0 && existing.requestId > 0 && reqId < existing.requestId) {
-      return this.aggregateResults();
-    }
-    this.paneResults.set(paneId, {
-      activeMatch: active,
-      total,
-      requestId: reqId || existing?.requestId || 0
-    });
-    return this.aggregateResults();
-  }
-  aggregateResults() {
-    let totalMatches = 0;
-    let currentMatchOrdinal = 0;
-    let activePaneWithMatch;
-    const paneBreakdown = {};
-    for (const [id, res] of this.paneResults.entries()) {
-      paneBreakdown[id] = { activeMatch: res.activeMatch, total: res.total };
-      totalMatches += res.total;
-      if (res.activeMatch > 0) {
-        currentMatchOrdinal = res.activeMatch;
-        activePaneWithMatch = id;
-      }
-    }
-    if (totalMatches > 0 && currentMatchOrdinal === 0) {
-      currentMatchOrdinal = 1;
-    }
-    return {
-      totalMatches,
-      currentMatchOrdinal,
-      paneBreakdown,
-      activePaneId: activePaneWithMatch
-    };
-  }
-  stopFind(panes2, action = "clearSelection") {
-    this.activeQuery = "";
-    this.paneResults.clear();
-    for (const [, wc] of panes2.entries()) {
-      if (!wc.isDestroyed()) {
-        wc.stopFindInPage(action);
-      }
-    }
-  }
-}
-const multiPaneSearch = new MultiPaneSearchCoordinator();
-class PaneWarmSleepService {
-  suspendedPanes = /* @__PURE__ */ new Set();
-  suspendPaneView(win, paneId, view) {
-    if (this.suspendedPanes.has(paneId)) return false;
-    try {
-      win.contentView.removeChildView(view);
-      this.suspendedPanes.add(paneId);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  resumePaneView(win, paneId, view, insertIndex = 0) {
-    if (!this.suspendedPanes.has(paneId)) return false;
-    try {
-      win.contentView.addChildView(view, insertIndex);
-      this.suspendedPanes.delete(paneId);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-  isPaneSuspended(paneId) {
-    return this.suspendedPanes.has(paneId);
-  }
-  async getPaneMemoryMetrics(panes2) {
-    const stats = [];
-    for (const [paneId, view] of panes2.entries()) {
-      if (view.webContents.isDestroyed()) continue;
-      stats.push({
-        paneId,
-        url: view.webContents.getURL(),
-        title: view.webContents.getTitle(),
-        isWarmSuspended: this.suspendedPanes.has(paneId)
-      });
-    }
-    return stats;
-  }
-}
-const warmSleepService = new PaneWarmSleepService();
-const DEVICE_CONFIGS = {
-  iphone_16_pro: {
-    width: 393,
-    height: 852,
-    scale: 1,
-    mobile: true,
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
-  },
-  ipad_air: {
-    width: 820,
-    height: 1180,
-    scale: 1,
-    mobile: true,
-    ua: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
-  },
-  pixel_9: {
-    width: 412,
-    height: 924,
-    scale: 1,
-    mobile: true,
-    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
-  }
-};
-async function setPaneDeviceEmulation(wc, device, orientation = "portrait", scale = 1) {
-  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
-  const dbg = wc.debugger;
+const monitoredPartitions = /* @__PURE__ */ new Set();
+function monitorPartitionCookies(partition) {
+  if (monitoredPartitions.has(partition)) return;
+  monitoredPartitions.add(partition);
   try {
-    if (!dbg.isAttached()) {
-      dbg.attach("1.3");
-    }
-    if (device === "reset") {
-      await dbg.sendCommand("Emulation.clearDeviceMetricsOverride").catch(() => {
-      });
-      await dbg.sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => {
-      });
-      await dbg.sendCommand("Network.setUserAgentOverride", { userAgent: "" }).catch(() => {
-      });
-      try {
-        wc.invalidate?.();
-      } catch {
+    const ses = electron.session.fromPartition(partition);
+    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
+      if (!removed && cause === "explicit") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("partition.cookie-changed", {
+            partition,
+            domain: cookie.domain,
+            name: cookie.name
+          });
+        }
       }
-      return { success: true };
+    });
+  } catch (e) {
+    logger$5.debug(`Failed to attach cookie monitor for ${partition}`, e);
+  }
+}
+function initSessionPersistenceHooks() {
+  try {
+    electron.powerMonitor.on("suspend", async () => {
+      logger$5.info("System suspending - flushing session data to disk");
+      await flushAllSessions();
+      await storageQuota.pruneAllPartitions();
+    });
+    storageQuota.initBackgroundPruner();
+    electron.powerMonitor.on("resume", () => {
+      logger$5.info("System resumed from suspend - verifying app overlay and views");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        syncAppOverlayBounds(global.mainWindow);
+      }
+      const overlay = global.appOverlayView;
+      if (overlay && !overlay.webContents.isDestroyed()) {
+        if (overlay.webContents.isCrashed()) {
+          logger$5.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
+          overlay.webContents.reload();
+        } else {
+          overlay.webContents.send("app:env", { nativeViews: true });
+        }
+      }
+    });
+    setInterval(() => {
+      flushAllSessions().catch(() => {
+      });
+    }, 6e4);
+    monitorPartitionCookies("persist:main");
+    const profiles = getProfiles();
+    for (const p of profiles) {
+      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
+      monitorPartitionCookies(part);
     }
-    const cfg = DEVICE_CONFIGS[device];
-    if (!cfg) return { success: false, error: "Unknown device type" };
-    const isLandscape = orientation === "landscape";
-    const width = isLandscape ? cfg.height : cfg.width;
-    const height = isLandscape ? cfg.width : cfg.height;
-    await dbg.sendCommand("Emulation.setDeviceMetricsOverride", {
-      width,
-      height,
-      deviceScaleFactor: cfg.scale,
-      mobile: cfg.mobile,
-      scale: scale > 0 ? scale : 1,
-      screenOrientation: isLandscape ? { type: "landscapePrimary", angle: 90 } : { type: "portraitPrimary", angle: 0 }
-    });
-    await dbg.sendCommand("Emulation.setTouchEmulationEnabled", {
-      enabled: cfg.mobile,
-      maxTouchPoints: 5
-    }).catch(() => {
-    });
-    await dbg.sendCommand("Network.setUserAgentOverride", {
-      userAgent: cfg.ua
-    });
+  } catch (e) {
+    logger$5.warn("PowerMonitor / Cookie monitor hook unavailable", e);
+  }
+}
+function getMachineKeyFilePath() {
+  try {
+    const userDataPath = electron.app.getPath("userData");
+    return path.join(userDataPath, "apposition_machine.key");
+  } catch {
+    return path.join(process.cwd(), "apposition_machine.key");
+  }
+}
+function getOrCreateMachineKey() {
+  const keyPath = getMachineKeyFilePath();
+  if (fs.existsSync(keyPath)) {
     try {
-      wc.invalidate?.();
+      const hex = fs.readFileSync(keyPath, "utf8").trim();
+      if (hex.length === 64) return Buffer.from(hex, "hex");
     } catch {
     }
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
+  }
+  const newKey = crypto.randomBytes(32);
+  try {
+    const dir = path.join(keyPath, "..");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(keyPath, newKey.toString("hex"), "utf8");
+  } catch {
+  }
+  return newKey;
+}
+function fallbackEncrypt(text) {
+  try {
+    const key = getOrCreateMachineKey();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+    let encrypted = cipher.update(text, "utf8", "hex");
+    encrypted += cipher.final("hex");
+    const authTag = cipher.getAuthTag().toString("hex");
+    return `$ENC:v1:fb:${iv.toString("hex")}:${encrypted}:${authTag}`;
+  } catch {
+    return text;
   }
 }
-const THROTTLE_PROFILES = {
-  offline: { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
-  slow_3g: {
-    offline: false,
-    latency: 400,
-    downloadThroughput: 400 * 1024 / 8,
-    uploadThroughput: 400 * 1024 / 8
-  },
-  fast_3g: {
-    offline: false,
-    latency: 150,
-    downloadThroughput: 1.6 * 1024 * 1024 / 8,
-    uploadThroughput: 750 * 1024 / 8
-  },
-  fast_4g: {
-    offline: false,
-    latency: 20,
-    downloadThroughput: 20 * 1024 * 1024 / 8,
-    uploadThroughput: 10 * 1024 * 1024 / 8
-  }
-};
-async function setPaneNetworkThrottling(wc, profile) {
-  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
-  const dbg = wc.debugger;
+function fallbackDecrypt(raw) {
   try {
-    if (!dbg.isAttached()) {
-      dbg.attach("1.3");
-    }
-    await dbg.sendCommand("Network.enable");
-    if (profile === "reset") {
-      await dbg.sendCommand("Network.emulateNetworkConditions", {
-        offline: false,
-        latency: 0,
-        downloadThroughput: -1,
-        uploadThroughput: -1
-      });
-      return { success: true };
-    }
-    const cfg = THROTTLE_PROFILES[profile];
-    if (!cfg) return { success: false, error: "Unknown profile" };
-    await dbg.sendCommand("Network.emulateNetworkConditions", cfg);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
+    const key = getOrCreateMachineKey();
+    const parts = raw.replace("$ENC:v1:fb:", "").split(":");
+    if (parts.length !== 3) return "";
+    const iv = Buffer.from(parts[0], "hex");
+    const encrypted = parts[1];
+    const authTag = Buffer.from(parts[2], "hex");
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(authTag);
+    let decrypted = decipher.update(encrypted, "hex", "utf8");
+    decrypted += decipher.final("utf8");
+    return decrypted;
+  } catch {
+    return "";
   }
 }
-async function extractPaneReaderContent(wc) {
-  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+function encrypt(text) {
+  if (!text) return "";
   try {
-    const script = `
-      (() => {
+    if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
+      const encryptedBuffer = electron.safeStorage.encryptString(text);
+      return `$ENC:v1:${encryptedBuffer.toString("base64")}`;
+    }
+  } catch {
+  }
+  return fallbackEncrypt(text);
+}
+function decrypt(encryptedText) {
+  if (!encryptedText) return "";
+  try {
+    if (encryptedText.startsWith("$ENC:v1:") && !encryptedText.startsWith("$ENC:v1:fb:")) {
+      if (electron.safeStorage && electron.safeStorage.isEncryptionAvailable && electron.safeStorage.isEncryptionAvailable()) {
+        const base64 = encryptedText.slice(8);
+        const buf = Buffer.from(base64, "base64");
+        return electron.safeStorage.decryptString(buf);
+      }
+    }
+    if (encryptedText.startsWith("$ENC:v1:fb:")) {
+      return fallbackDecrypt(encryptedText);
+    }
+    if (encryptedText.split(":").length === 3) {
+      return fallbackDecrypt(encryptedText);
+    }
+  } catch {
+  }
+  return "";
+}
+function signHardwarePayload(payload, machineGuid) {
+  const key = getOrCreateMachineKey();
+  return crypto.createHmac("sha256", Buffer.concat([key, Buffer.from(machineGuid)])).update(payload).digest("hex");
+}
+function verifyHardwareSignature(payload, machineGuid, signature) {
+  try {
+    const expected = signHardwarePayload(payload, machineGuid);
+    return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  } catch {
+    return false;
+  }
+}
+let cachedMachineGuid = null;
+function getFallbackSeedPath() {
+  try {
+    const userData = electron.app.getPath("userData");
+    return path.join(userData, ".apposition_guid_seed");
+  } catch {
+    return path.join(os.tmpdir(), ".apposition_guid_seed");
+  }
+}
+function getOrGenerateFallbackSeed() {
+  const seedPath = getFallbackSeedPath();
+  if (fs.existsSync(seedPath)) {
+    try {
+      const seed = fs.readFileSync(seedPath, "utf8").trim();
+      if (seed.length >= 32) return seed;
+    } catch {
+    }
+  }
+  const newSeed = crypto.randomBytes(32).toString("hex");
+  try {
+    const dir = path.join(seedPath, "..");
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(seedPath, newSeed, "utf8");
+  } catch {
+  }
+  return newSeed;
+}
+function readPlatformHardwareId() {
+  const platform = os.platform();
+  if (platform === "linux") {
+    for (const p of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
+      if (fs.existsSync(p)) {
         try {
-          const doc = document.cloneNode(true);
-          const removeSelectors = [
-            "script", "style", "noscript", "iframe", "button", "input", "form",
-            "select", "textarea", "header", "footer", "nav", "aside", "dialog",
-            "menu", "canvas", "video", "audio", "embed", "object", "svg",
-            "[role='button']", "[role='dialog']", "[role='banner']", "[role='navigation']",
-            "[role='complementary']", "[aria-hidden='true']",
-            ".advertisement", ".ad", ".adsbygoogle", "[class*='sponsored']",
-            ".cookie-banner", "#cookie-banner", "[id*='cookie']",
-            ".popup", ".modal", ".overlay",
-            ".newsletter-signup", "[class*='newsletter']", "[class*='subscribe']",
-            ".interactive-demo", "[class*='interactive']", "[class*='demo']",
-            ".pricing-table", "[class*='pricing']", "[id*='pricing']",
-            ".cta", "[class*='cta-']", "[class*='call-to-action']",
-            "[class*='social-share']", "[class*='share-bar']", "[class*='share-button']"
-          ];
-          removeSelectors.forEach(sel => {
-            doc.querySelectorAll(sel).forEach(el => el.remove());
-          });
-
-          // Strip download buttons and CTA marketing links
-          const ctaRegex = /download|subscribe|sign up|join waitlist|claim|lifetime|buy now|get started|\\$\\d+/i;
-          doc.querySelectorAll("a").forEach(a => {
-            const txt = (a.innerText || "").trim();
-            if (!txt || ctaRegex.test(txt) || a.classList.contains("button") || a.getAttribute("role") === "button") {
-              a.remove();
-            }
-          });
-
-          const title = (document.querySelector("h1")?.innerText || document.title || "").trim();
-          const byline = (document.querySelector("meta[name='author']")?.getAttribute("content") ||
-                         document.querySelector(".byline, [rel='author'], [itemprop='author']")?.innerText ||
-                         new URL(window.location.href).hostname || "").trim();
-          
-          const candidate = doc.querySelector("article, [role='article'], .post-content, .entry-content, .article-body, #article-body, .prose");
-          const root = candidate || doc.querySelector("main, [role='main']") || doc.body;
-
-          // Universal Semantic Block Distillation: Extract pure headings, prose, lists, quotes & code
-          const blocks = [];
-          const seen = new Set();
-          const allowed = "h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, pre, table";
-          
-          root.querySelectorAll(allowed).forEach(el => {
-            const text = (el.innerText || "").trim();
-            if (!text || seen.has(text)) return;
-            if (text.toLowerCase() === title.toLowerCase()) return;
-            if (ctaRegex.test(text) && text.length < 50) return;
-            seen.add(text);
-
-            const tag = el.tagName.toLowerCase();
-            if (tag.startsWith("h")) {
-              const hLevel = tag === "h1" ? "h2" : tag;
-              blocks.push(\`<\${hLevel}>\${text}</\${hLevel}>\`);
-            } else if (tag === "blockquote" || tag === "pre") {
-              blocks.push(\`<\${tag}>\${text}</\${tag}>\`);
-            } else if (tag === "ul" || tag === "ol") {
-              const items = Array.from(el.querySelectorAll("li"))
-                .map(li => {
-                  const t = (li.innerText || "").trim();
-                  return t && !ctaRegex.test(t) ? \`<li>\${t}</li>\` : "";
-                })
-                .filter(Boolean)
-                .join("");
-              if (items) blocks.push(\`<\${tag}>\${items}</\${tag}>\`);
-            } else if (tag === "p" && text.length >= 15) {
-              blocks.push(\`<p>\${text}</p>\`);
-            } else if (tag === "table") {
-              const tableText = el.innerText || "";
-              if (tableText.trim().length > 20) {
-                const cleanTable = el.cloneNode(true);
-                cleanTable.querySelectorAll("*").forEach(c => {
-                  c.removeAttribute("class");
-                  c.removeAttribute("style");
-                  c.removeAttribute("id");
-                });
-                blocks.push(cleanTable.outerHTML);
-              }
-            }
-          });
-
-          let htmlOutput = blocks.join("\\n");
-          if (!htmlOutput.trim()) {
-            // Fallback for minimal pages: extract all visible text blocks from body
-            const fallbackParas = Array.from(doc.body.querySelectorAll("div, section, p"))
-              .map(el => (el.innerText || "").trim())
-              .filter(t => t.length > 25 && !seen.has(t) && !ctaRegex.test(t))
-              .slice(0, 15);
-            htmlOutput = fallbackParas.map(p => \`<p>\${p}</p>\`).join("\\n");
-          }
-
-          const wrap = document.createElement("div");
-          wrap.innerHTML = htmlOutput || \`<p>Distilled content from \${title || window.location.hostname}</p>\`;
-
-          // Strip duplicate first heading if it matches title
-          const firstH = wrap.querySelector("h1, h2");
-          if (firstH && title && (firstH.innerText || "").trim().toLowerCase() === title.toLowerCase()) {
-            firstH.remove();
-          }
-
-          const rawText = (wrap.innerText || "").trim();
-          const words = rawText.split(/\\s+/).filter(Boolean).length;
-          const readingTimeMinutes = Math.max(1, Math.ceil(words / 200));
-
-          return {
-            title: title || document.title || "Untitled Document",
-            byline,
-            excerpt: rawText.slice(0, 180).trim() + "...",
-            contentHtml: wrap.innerHTML,
-            readingTimeMinutes,
-            url: window.location.href,
-            isArticle: true,
-          };
-        } catch (e) {
-          return null;
-        }
-      })();
-    `;
-    const article = await wc.executeJavaScript(script, true);
-    if (!article) return { success: false, error: "Could not extract article content" };
-    return { success: true, article };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
-  }
-}
-async function pickColorFromPane(wc, x, y) {
-  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
-  try {
-    const img = await wc.capturePage({
-      x: Math.max(0, Math.floor(x)),
-      y: Math.max(0, Math.floor(y)),
-      width: 1,
-      height: 1
-    });
-    const bitmap = img.toBitmap();
-    if (bitmap.length < 4) {
-      return { success: false, error: "Empty pixel buffer" };
-    }
-    const b = bitmap[0];
-    const g = bitmap[1];
-    const r = bitmap[2];
-    const toHex = (n) => n.toString(16).padStart(2, "0").toUpperCase();
-    const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-    electron.clipboard.writeText(hex);
-    return {
-      success: true,
-      hex,
-      rgb: { r, g, b }
-    };
-  } catch (err) {
-    return { success: false, error: err?.message || String(err) };
-  }
-}
-function initPaneSuperpowerIpc(panes2, getWindow) {
-  electron.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, async (_e, paneId) => {
-    const view = panes2.get(paneId);
-    if (!view) return { success: false, error: "Pane not found" };
-    return captureWebContentsCdp(view.webContents, { fullPage: true, copyToClipboard: true });
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_VIEWPORT, async (_e, paneId) => {
-    const view = panes2.get(paneId);
-    if (!view) return { success: false, error: "Pane not found" };
-    return captureWebContentsCdp(view.webContents, { fullPage: false, copyToClipboard: true });
-  });
-  electron.ipcMain.on(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, (_e, query, opts) => {
-    const wcMap = /* @__PURE__ */ new Map();
-    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
-    multiPaneSearch.findInPanes(wcMap, query, opts);
-  });
-  electron.ipcMain.on(IPC_CHANNELS.SEARCH.STOP_FIND, (_e, action) => {
-    const wcMap = /* @__PURE__ */ new Map();
-    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
-    multiPaneSearch.stopFind(wcMap, action);
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.GET_STATS, async () => warmSleepService.getPaneMemoryMetrics(panes2));
-  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.SUSPEND_PANE, async (_e, paneId) => {
-    const win = getWindow();
-    const view = panes2.get(paneId);
-    return win && view ? warmSleepService.suspendPaneView(win, paneId, view) : false;
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.RESUME_PANE, async (_e, paneId) => {
-    const win = getWindow();
-    const view = panes2.get(paneId);
-    return win && view ? warmSleepService.resumePaneView(win, paneId, view) : false;
-  });
-  electron.ipcMain.handle(
-    IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION,
-    async (_e, paneId, dev, orientation, scale) => {
-      const view = panes2.get(paneId);
-      return view ? setPaneDeviceEmulation(view.webContents, dev, orientation, scale) : { success: false, error: "Pane not found" };
-    }
-  );
-  electron.ipcMain.handle(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, async (_e, paneId, prof) => {
-    const view = panes2.get(paneId);
-    return view ? setPaneNetworkThrottling(view.webContents, prof) : { success: false, error: "Pane not found" };
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, async (_e, paneId) => {
-    const view = panes2.get(paneId);
-    return view ? extractPaneReaderContent(view.webContents) : { success: false, error: "Pane not found" };
-  });
-  electron.ipcMain.handle(IPC_CHANNELS.VIEW.PICK_COLOR, async (_e, paneId, x, y) => {
-    const view = panes2.get(paneId);
-    return view ? pickColorFromPane(view.webContents, x, y) : { success: false, error: "Pane not found" };
-  });
-  electron.ipcMain.handle(
-    IPC_CHANNELS.VIEW.COPY_IMAGE,
-    async (_e, paneId, x, y, srcURL) => {
-      const view = panes2.get(paneId);
-      if (view && typeof x === "number" && typeof y === "number" && x >= 0 && y >= 0) {
-        try {
-          view.webContents.copyImageAt(Math.floor(x), Math.floor(y));
-          return { success: true };
+          const content = fs.readFileSync(p, "utf8").trim();
+          if (content) return content;
         } catch {
         }
       }
-      if (srcURL && srcURL.startsWith("data:image/")) {
-        try {
-          const base64 = srcURL.split(",")[1];
-          if (base64) {
-            const buf = Buffer.from(base64, "base64");
-            const ok = await writeImageToClipboard(buf, srcURL);
-            if (ok) return { success: true };
-          }
-        } catch (err) {
-          console.warn("Failed to write data URL to clipboard:", err);
-        }
-      }
-      if (srcURL && (srcURL.startsWith("http://") || srcURL.startsWith("https://"))) {
-        try {
-          const netClient = view?.webContents.session?.net || getSafeNet();
-          if (netClient) {
-            const res = await netClient.fetch(srcURL);
-            if (res.ok) {
-              const buf = Buffer.from(await res.arrayBuffer());
-              const ok = await writeImageToClipboard(buf);
-              if (ok) return { success: true };
-            }
-          }
-        } catch (err) {
-          return { success: false, error: err?.message || "Failed to download image" };
-        }
-      }
-      return { success: false, error: "Unable to copy image" };
     }
-  );
-  electron.ipcMain.on("pane.notification-posted", (e, data) => {
-    const senderWc = e.sender;
-    const title2 = senderWc?.getTitle() || "App";
-    global.appOverlayView?.webContents.send("pane.notification-posted", {
-      appId: data.appId || "comm_app",
-      appName: data.appName || title2.split(" - ")[0] || "Message",
-      title: data.title || "New Notification",
-      snippet: data.body || data.snippet || ""
+  }
+  const cpus = os.cpus();
+  const cpuModel = cpus && cpus.length > 0 ? cpus[0].model : "unknown-cpu";
+  const composite = [
+    platform,
+    os.arch(),
+    os.hostname(),
+    os.homedir(),
+    cpuModel,
+    getOrGenerateFallbackSeed()
+  ].join(":");
+  return composite;
+}
+function getMachineGuid() {
+  if (cachedMachineGuid) {
+    return cachedMachineGuid;
+  }
+  try {
+    const rawId = readPlatformHardwareId();
+    const hash = crypto.createHash("sha256").update(`apposition:${rawId}:freemius_v1`).digest("hex").slice(0, 32);
+    cachedMachineGuid = `node-${hash}`;
+  } catch {
+    cachedMachineGuid = `node-${crypto.randomBytes(16).toString("hex")}`;
+  }
+  return cachedMachineGuid;
+}
+function getDeviceLabel() {
+  try {
+    return `${os.platform()}-${os.arch()}-${os.hostname()}`;
+  } catch {
+    return "Desktop-App-User";
+  }
+}
+const FREEMIUS_APP_ID = process.env.MAIN_VITE_FREEMIUS_APP_ID || process.env.FREEMIUS_APP_ID || "38794";
+const FREEMIUS_API_URL = process.env.MAIN_VITE_FREEMIUS_API_URL || "https://api.freemius.com";
+const FREEMIUS_AUTH_TOKEN = process.env.MAIN_VITE_FREEMIUS_BEARER_TOKEN || process.env.FREEMIUS_BEARER_TOKEN || "";
+function getFreemiusUid(machineGuid) {
+  return crypto.createHash("md5").update(machineGuid).digest("hex");
+}
+function getFreemiusHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json"
+  };
+  if (FREEMIUS_AUTH_TOKEN) {
+    headers["Authorization"] = `Bearer ${FREEMIUS_AUTH_TOKEN}`;
+  }
+  return headers;
+}
+function isFreemiusEmailRequired(data) {
+  if (!data) return false;
+  const errCode = (data.error?.code || data.code || "").toString().toLowerCase();
+  const rawErrMsg = (data.error?.message || data.message || "").toString().toLowerCase();
+  return errCode === "user_email_required" || errCode === "missing_user_email" || errCode === "user_required" || errCode === "missing_user" || errCode === "email_missing" || errCode === "requires_email" || errCode === "first_name_required" || errCode === "last_name_required" || rawErrMsg.includes("user_email") || rawErrMsg.includes("email is required") || rawErrMsg.includes("email required") || rawErrMsg.includes("requires an email") || rawErrMsg.includes("first_name is a required parameter") || rawErrMsg.includes("last_name is a required parameter") || rawErrMsg.includes("first_name");
+}
+function formatFreemiusErrorMessage(data, status) {
+  const code = data?.error?.code || data?.code;
+  let msg = data?.error?.message || data?.message;
+  if (code === "license_utilized") {
+    return "License seat limit reached. Please deactivate another device.";
+  }
+  if (code === "license_expired") {
+    return "This license has expired.";
+  }
+  if (code === "invalid_license_key" || code === "license_not_found") {
+    return "Invalid license key. Please check your key and try again.";
+  }
+  if (code === "rate_limit_exceeded" || status === 429) {
+    return "Too many activation attempts. Please wait a moment and try again.";
+  }
+  if (!msg) {
+    return status === 402 || status === 403 ? "License seat limit reached or license expired." : `Activation failed (HTTP ${status})`;
+  }
+  return msg;
+}
+const REQUEST_TIMEOUT_MS = 15e3;
+async function activateFreemiusInstallation(licenseKey, machineGuid, deviceLabel, version2 = "1.2.4", appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL, userEmail) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const cleanKey = licenseKey.trim();
+    const uid = getFreemiusUid(machineGuid);
+    const endpoint = `${apiUrl}/v1/products/${appId}/licenses/activate.json`;
+    const payload = {
+      uid,
+      license_key: cleanKey,
+      url: machineGuid,
+      title: deviceLabel,
+      version: version2
+    };
+    if (userEmail && userEmail.trim()) {
+      const cleanEmail = userEmail.trim();
+      payload.user_email = cleanEmail;
+      const emailUser = cleanEmail.split("@")[0] || "User";
+      const parts = emailUser.split(/[._-]/);
+      payload.first_name = parts[0] || "User";
+      payload.last_name = (parts.length > 1 ? parts.slice(1).join(" ") : "") || "Workstation";
+    }
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: getFreemiusHeaders(),
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
-  });
-  electron.ipcMain.handle("view.getSearchSuggestions", async (_e, query) => {
-    if (!query || query.trim().length < 2) return [];
-    try {
-      const res = await fetch(
-        `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query.trim())}`
-      );
-      if (!res.ok) return [];
-      const data = await res.json();
-      return Array.isArray(data[1]) ? data[1].slice(0, 5) : [];
-    } catch {
-      return [];
+    const data = await response.json().catch(() => ({}));
+    if (isFreemiusEmailRequired(data)) {
+      return {
+        success: false,
+        data,
+        requiresEmail: true,
+        error: "Please enter your email to complete activation."
+      };
     }
+    if (!response.ok) {
+      const errMsg = formatFreemiusErrorMessage(data, response.status);
+      return { success: false, data, error: errMsg };
+    }
+    const installId = data.id || data.install_id;
+    if (data.is_active === false) {
+      return {
+        success: false,
+        data,
+        error: "License installation is currently inactive."
+      };
+    }
+    return {
+      success: true,
+      data: {
+        ...data,
+        id: installId,
+        plan_id: data.plan_id || data.license_plan_id
+      }
+    };
+  } catch (err) {
+    const isTimeout = err?.name === "AbortError";
+    return {
+      success: false,
+      error: isTimeout ? "Activation request timed out. Please check your network." : err?.message || "Network offline. Could not connect to Freemius."
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function validateFreemiusInstallation(installationId, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: getFreemiusHeaders(),
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const errMsg = formatFreemiusErrorMessage(data, response.status);
+      return { success: false, data, error: errMsg };
+    }
+    const isActive = data.is_active !== false;
+    return {
+      success: isActive,
+      data: {
+        ...data,
+        id: data.id || data.install_id || installationId,
+        plan_id: data.plan_id || data.license_plan_id
+      },
+      error: isActive ? void 0 : "Installation is inactive or deactivated."
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network offline. Could not reach Freemius API."
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function deactivateFreemiusInstallation(installationId, licenseKey, machineGuid, appId = FREEMIUS_APP_ID, apiUrl = FREEMIUS_API_URL) {
+  try {
+    if (licenseKey && machineGuid) {
+      const endpoint2 = `${apiUrl}/v1/products/${appId}/licenses/deactivate.json`;
+      const response2 = await fetch(endpoint2, {
+        method: "POST",
+        headers: getFreemiusHeaders(),
+        body: JSON.stringify({
+          uid: getFreemiusUid(machineGuid),
+          license_key: licenseKey.trim(),
+          install_id: installationId
+        })
+      });
+      if (!response2.ok && response2.status !== 404) {
+        const data = await response2.json().catch(() => ({}));
+        return {
+          success: false,
+          error: formatFreemiusErrorMessage(data, response2.status)
+        };
+      }
+      return { success: true };
+    }
+    const endpoint = `${apiUrl}/v1/products/${appId}/installs/${installationId}.json`;
+    const response = await fetch(endpoint, {
+      method: "DELETE",
+      headers: getFreemiusHeaders()
+    });
+    if (!response.ok && response.status !== 404) {
+      const data = await response.json().catch(() => ({}));
+      return {
+        success: false,
+        error: formatFreemiusErrorMessage(data, response.status)
+      };
+    }
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network offline. Could not reach Freemius API."
+    };
+  }
+}
+function getSavedLicenseKey() {
+  try {
+    const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_key'").get();
+    if (row && row.value) return decrypt(row.value);
+  } catch (e) {
+    console.error("Failed to get saved license key", e);
+  }
+  return null;
+}
+function saveLicenseKey(key) {
+  try {
+    const encryptedKey = encrypt(key);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_key', ?)").run(
+      encryptedKey
+    );
+  } catch (e) {
+    console.error("Failed to save license key", e);
+  }
+}
+function deleteLicenseKey() {
+  try {
+    db.prepare("DELETE FROM licensing WHERE key = 'license_key'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'license_state'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'hardware_lease'").run();
+    db.prepare("DELETE FROM licensing WHERE key = 'last_validated'").run();
+  } catch (e) {
+    console.error("Failed to delete license key", e);
+  }
+}
+function getSavedLicenseState() {
+  try {
+    const row = db.prepare("SELECT value FROM licensing WHERE key = 'license_state'").get();
+    if (row && row.value) {
+      const decrypted = decrypt(row.value);
+      return decrypted ? JSON.parse(decrypted) : null;
+    }
+  } catch (e) {
+    console.error("Failed to get saved license state", e);
+  }
+  return null;
+}
+function saveLicenseState(state) {
+  try {
+    const serialized = JSON.stringify(state);
+    const encryptedState = encrypt(serialized);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('license_state', ?)").run(
+      encryptedState
+    );
+  } catch (e) {
+    console.error("Failed to save license state", e);
+  }
+}
+function getHardwareLease() {
+  try {
+    const row = db.prepare("SELECT value FROM licensing WHERE key = 'hardware_lease'").get();
+    if (row && row.value) {
+      const decrypted = decrypt(row.value);
+      return decrypted ? JSON.parse(decrypted) : null;
+    }
+  } catch (e) {
+    console.error("Failed to get hardware lease ticket", e);
+  }
+  return null;
+}
+function saveHardwareLease(ticket) {
+  try {
+    const serialized = JSON.stringify(ticket);
+    const encrypted = encrypt(serialized);
+    db.prepare("INSERT OR REPLACE INTO licensing (key, value) VALUES ('hardware_lease', ?)").run(
+      encrypted
+    );
+  } catch (e) {
+    console.error("Failed to save hardware lease ticket", e);
+  }
+}
+function saveAttribution(params) {
+  try {
+    const serialized = JSON.stringify(params);
+    const encrypted = encrypt(serialized);
+    db.prepare(
+      "INSERT OR REPLACE INTO licensing (key, value) VALUES ('affiliate_attribution', ?)"
+    ).run(encrypted);
+  } catch (e) {
+    console.error("Failed to save affiliate attribution", e);
+  }
+}
+const DEFAULT_CHECKOUT_URL = process.env.MAIN_VITE_FREEMIUS_CHECKOUT_URL || process.env.RENDERER_VITE_FREEMIUS_CHECKOUT_URL || "https://checkout.freemius.com/mode/dialog/plugin/38794/plan/65379/";
+let memoryAttribution = null;
+function parseAttributionFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl.includes("://") ? rawUrl : `https://dummy/${rawUrl}`);
+    const ref = parsed.searchParams.get("ref") || parsed.searchParams.get("via");
+    const affiliateId = parsed.searchParams.get("affiliate_id") || parsed.searchParams.get("aff_id");
+    if (ref || affiliateId) {
+      return {
+        ref: ref || void 0,
+        affiliateId: affiliateId || void 0,
+        capturedAt: Date.now()
+      };
+    }
+  } catch {
+  }
+  return null;
+}
+function setMemoryAttribution(params) {
+  memoryAttribution = {
+    ...memoryAttribution,
+    ...params,
+    capturedAt: Date.now()
+  };
+}
+function getMemoryAttribution() {
+  return memoryAttribution;
+}
+function buildFreemiusCheckoutUrl(baseCheckoutUrl = DEFAULT_CHECKOUT_URL, attribution = memoryAttribution) {
+  try {
+    const url = new URL(baseCheckoutUrl);
+    if (attribution?.ref) {
+      url.searchParams.set("ref", attribution.ref);
+    }
+    if (attribution?.affiliateId) {
+      url.searchParams.set("affiliate_id", attribution.affiliateId);
+    }
+    url.searchParams.set("title", getDeviceLabel());
+    url.searchParams.set("url", getMachineGuid());
+    return url.toString();
+  } catch {
+    return baseCheckoutUrl;
+  }
+}
+const OFFLINE_GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1e3;
+const ONLINE_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1e3;
+const isDevMode$1 = () => utils.is.dev;
+const shouldBypassGatekeep = () => utils.is.dev && process.env.FORCE_GATEKEEP !== "1";
+const getCheckoutUrl = () => buildFreemiusCheckoutUrl(void 0, getMemoryAttribution());
+async function activateLicenseKey(key, email) {
+  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
+  const cleanKey = key.trim();
+  const machineGuid = getMachineGuid();
+  const deviceLabel = getDeviceLabel();
+  const appVersion = electron.app.getVersion?.() || "1.2.4";
+  const res = await activateFreemiusInstallation(
+    cleanKey,
+    machineGuid,
+    deviceLabel,
+    appVersion,
+    void 0,
+    void 0,
+    email
+  );
+  if (!res.success || !res.data?.id) {
+    return {
+      success: false,
+      requiresEmail: res.requiresEmail ?? false,
+      error: res.error || "Activation failed."
+    };
+  }
+  const now = Date.now();
+  const installationId = res.data.id;
+  const planId = res.data.plan_id || null;
+  const payload = `${cleanKey}:${installationId}:${planId}:${machineGuid}:${now}`;
+  const lease = {
+    licenseKey: cleanKey,
+    installationId,
+    planId,
+    machineGuid,
+    deviceLabel,
+    lastValidatedAt: now,
+    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+    monotonicCounter: Math.floor(process.uptime()),
+    signature: signHardwarePayload(payload, machineGuid),
+    isActive: true
+  };
+  saveLicenseKey(cleanKey);
+  saveHardwareLease(lease);
+  saveLicenseState({
+    activated: true,
+    lastChecked: now,
+    key: cleanKey,
+    installationId,
+    planId,
+    customerEmail: email?.trim() || null,
+    label: deviceLabel,
+    machineGuid,
+    expiresAt: res.data.expiration || null,
+    graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+    isGracePeriod: false
+  });
+  return { success: true, isPremium: true };
+}
+async function validateLicenseKey(key) {
+  if (!key || key.trim() === "") return { success: false, error: "License key is required." };
+  const cleanKey = key.trim();
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  const installationId = lease?.installationId || cached?.installationId;
+  if (installationId) {
+    const apiRes = await validateFreemiusInstallation(installationId);
+    if (apiRes.success && apiRes.data) {
+      const now = Date.now();
+      const guid = getMachineGuid();
+      const payload = `${cleanKey}:${installationId}:${lease?.planId || null}:${guid}:${now}`;
+      if (lease) {
+        saveHardwareLease({
+          ...lease,
+          lastValidatedAt: now,
+          graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+          signature: signHardwarePayload(payload, guid)
+        });
+      }
+      saveLicenseKey(cleanKey);
+      saveLicenseState({
+        ...cached,
+        activated: true,
+        lastChecked: now,
+        key: cleanKey,
+        installationId,
+        expiresAt: apiRes.data.expiration || cached?.expiresAt || null,
+        graceExpiresAt: now + OFFLINE_GRACE_PERIOD_MS,
+        isGracePeriod: false
+      });
+      return { success: true, isPremium: true };
+    }
+    if (apiRes.error && !apiRes.error.toLowerCase().includes("offline")) {
+      deleteLicenseKey();
+      return { success: false, error: apiRes.error, isPremium: false };
+    }
+  }
+  return evaluateOfflineGrace(cleanKey);
+}
+function evaluateOfflineGrace(key) {
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  if (lease && lease.isActive && lease.licenseKey === key) {
+    const guid = getMachineGuid();
+    const payload = `${key}:${lease.installationId}:${lease.planId || null}:${lease.machineGuid}:${lease.lastValidatedAt}`;
+    if (lease.machineGuid === guid && verifyHardwareSignature(payload, guid, lease.signature)) {
+      if (Date.now() - lease.lastValidatedAt <= OFFLINE_GRACE_PERIOD_MS) {
+        if (cached) saveLicenseState({ ...cached, isGracePeriod: true });
+        return { success: true, isPremium: true };
+      }
+      return { success: false, error: "Offline grace period expired. Please connect to the internet." };
+    }
+  }
+  if (cached && cached.activated && cached.key === key) {
+    if (Date.now() - (cached.lastChecked || 0) <= OFFLINE_GRACE_PERIOD_MS) {
+      return { success: true, isPremium: true };
+    }
+    return { success: false, error: "Offline grace period expired. Please connect to the internet." };
+  }
+  return { success: false, error: "Network offline and no valid license lease found." };
+}
+async function deactivateLicenseKey() {
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  const installationId = lease?.installationId || cached?.installationId;
+  if (installationId) {
+    const key = lease?.licenseKey || cached?.key || getSavedLicenseKey();
+    const guid = lease?.machineGuid || getMachineGuid();
+    await deactivateFreemiusInstallation(installationId, key || void 0, guid).catch(() => {
+    });
+  }
+  deleteLicenseKey();
+  return { success: true, isPremium: false };
+}
+async function checkPremiumStatus() {
+  try {
+    if (shouldBypassGatekeep()) return true;
+    const key = getSavedLicenseKey();
+    if (!key) return false;
+    const cached = getSavedLicenseState();
+    if (!cached || !cached.activated) return false;
+    if (process.env.FORCE_GATEKEEP === "1") {
+      const validation2 = await validateLicenseKey(key);
+      return validation2.success;
+    }
+    if (Date.now() - (cached.lastChecked || 0) < ONLINE_CHECK_INTERVAL_MS) return true;
+    const validation = await validateLicenseKey(key);
+    return validation.success;
+  } catch (e) {
+    console.error("[Licensing] checkPremiumStatus fallback:", e);
+    return false;
+  }
+}
+const FREEMIUS_PLAN_IDS = {
+  APPSUMO_T1: 70966,
+  APPSUMO_T2: 70967,
+  APPSUMO_T3: 70968,
+  APPSUMO_T1_PRICING: 96960,
+  APPSUMO_T2_PRICING: 96962,
+  APPSUMO_T3_PRICING: 96964,
+  WEB_PRO: 65379
+};
+function resolveCapabilities(planId, isPremiumActive = false) {
+  if (shouldBypassGatekeep()) {
+    return TIER_3_CAPABILITIES;
+  }
+  const numericId = Number(planId);
+  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T3 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T3_PRICING) {
+    return TIER_3_CAPABILITIES;
+  }
+  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T2 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T2_PRICING) {
+    return TIER_2_CAPABILITIES;
+  }
+  if (numericId === FREEMIUS_PLAN_IDS.APPSUMO_T1 || numericId === FREEMIUS_PLAN_IDS.APPSUMO_T1_PRICING) {
+    return TIER_1_CAPABILITIES;
+  }
+  if (numericId === FREEMIUS_PLAN_IDS.WEB_PRO) {
+    return TIER_3_CAPABILITIES;
+  }
+  if (isPremiumActive) {
+    return TIER_3_CAPABILITIES;
+  }
+  return FREE_CAPABILITIES;
+}
+function getCurrentCapabilities() {
+  if (shouldBypassGatekeep()) {
+    return TIER_3_CAPABILITIES;
+  }
+  const key = getSavedLicenseKey();
+  if (!key) {
+    return FREE_CAPABILITIES;
+  }
+  const lease = getHardwareLease();
+  const cached = getSavedLicenseState();
+  const isActivated = Boolean(cached?.activated || lease && lease.isActive);
+  const planId = lease?.planId ?? cached?.planId ?? null;
+  return resolveCapabilities(planId, isActivated);
+}
+const handleDeepLink = (url) => {
+  if (!url || !url.startsWith("apposition://")) return;
+  const attribution = parseAttributionFromUrl(url);
+  if (attribution) {
+    setMemoryAttribution(attribution);
+    saveAttribution(attribution);
+  }
+  const deepPath = url.replace("apposition://", "");
+  if (deepPath.startsWith("workspace/")) {
+    const workspaceId = deepPath.replace("workspace/", "");
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+      global.mainWindow.webContents.send("app.deep-link.workspace", workspaceId);
+    }
+  } else if (deepPath.startsWith("license") || deepPath.startsWith("activate")) {
+    try {
+      const urlObj = new URL(url);
+      const key = urlObj.searchParams.get("key") || urlObj.searchParams.get("license_key");
+      const email = urlObj.searchParams.get("email") || urlObj.searchParams.get("user_email") || void 0;
+      if (key) {
+        activateLicenseKey(key, email).then((result) => {
+          if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+            global.mainWindow.webContents.send("app.deep-link.license", {
+              key,
+              email,
+              success: result.success,
+              requiresEmail: result.requiresEmail,
+              error: result.error
+            });
+          }
+        });
+      }
+    } catch (e) {
+      console.error("Failed to parse license deep link", e);
+    }
+  } else if (deepPath.startsWith("oauth-callback") || deepPath.startsWith("auth/callback")) {
+    try {
+      const urlObj = new URL(url);
+      const token = urlObj.searchParams.get("token");
+      const code = urlObj.searchParams.get("code");
+      const state = urlObj.searchParams.get("state");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.deep-link.oauth", {
+          token,
+          code,
+          state,
+          rawUrl: url
+        });
+      }
+    } catch (e) {
+      console.error("Failed to parse oauth callback url", e);
+    }
+  }
+};
+function initDeepLinking() {
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      electron.app.setAsDefaultProtocolClient("apposition", process.execPath, [
+        path__namespace.resolve(process.argv[1])
+      ]);
+    }
+  } else {
+    electron.app.setAsDefaultProtocolClient("apposition");
+  }
+  const gotTheLock2 = electron.app.requestSingleInstanceLock();
+  if (!gotTheLock2) {
+    electron.app.quit();
+  } else {
+    electron.app.on("second-instance", (_event, commandLine) => {
+      if (global.mainWindow) {
+        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+        global.mainWindow.focus();
+      }
+      const url = commandLine.find((arg) => arg.startsWith("apposition://"));
+      handleDeepLink(url);
+    });
+    electron.app.on("open-url", (event, url) => {
+      event.preventDefault();
+      if (global.mainWindow) {
+        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+        global.mainWindow.focus();
+      }
+      handleDeepLink(url);
+    });
+  }
+}
+const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
+let isDev = true;
+function initMainSentry(isDevMode2) {
+  isDev = isDevMode2;
+  if (isDevMode2) {
+    return;
+  }
+  try {
+    Sentry__namespace.init({
+      dsn: SENTRY_DSN,
+      release: `apposition@${electron.app.getVersion()}`,
+      environment: "production",
+      enabled: !isDevMode2,
+      sampleRate: 1,
+      beforeSend(event) {
+        if (isDevMode2) return null;
+        return sanitizeSentryEvent(event);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to initialize Sentry in main process", err);
+  }
+}
+function captureMainException(err, context) {
+  if (isDev) return;
+  try {
+    Sentry__namespace.captureException(err, {
+      extra: context
+    });
+  } catch {
+  }
+}
+let overlayPreloadPath = "";
+const transientSpecs = /* @__PURE__ */ new Map();
+function initOverlayProjector(getWindow, preloadPath = "") {
+  overlayPreloadPath = preloadPath;
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.SHOW, (_e, specs) => {
+    const win = getWindow();
+    if (!win) return;
+    const desired = new Set(specs.map((s) => s.id));
+    const state = composers.get(win.id);
+    if (!state) return;
+    let specsForWin = transientSpecs.get(win.id);
+    if (!specsForWin) {
+      specsForWin = /* @__PURE__ */ new Map();
+      transientSpecs.set(win.id, specsForWin);
+    }
+    for (const spec of specs) {
+      const view = ensureView(win, state, spec);
+      positionView(view, spec);
+      view.setVisible(true);
+      specsForWin.set(spec.id, spec);
+    }
+    for (const id of [...state.stack.transientOrder]) {
+      if (!desired.has(id)) {
+        hideView(win, state, id);
+        specsForWin.delete(id);
+      }
+    }
+  });
+  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.INTENT, (_e, intent) => {
+    global.appOverlayView?.webContents.send("app:overlay-intent", intent);
   });
 }
-const configuredSessions = /* @__PURE__ */ new WeakSet();
-function configureWebAuthnForSession(sess) {
-  if (!sess || configuredSessions.has(sess)) return;
-  configuredSessions.add(sess);
-  sess.setDevicePermissionHandler(() => false);
-  const selectHidHandler = (event, _details, callback) => {
-    event.preventDefault();
-    callback(void 0);
-  };
-  const selectAccountHandler = (event, _details, callback) => {
-    event.preventDefault();
-    callback(null);
-  };
-  sess.on("select-hid-device", selectHidHandler);
-  sess.on("select-webauthn-account", selectAccountHandler);
+function ensureView(win, state, spec) {
+  const existing = state.views.get(spec.id);
+  if (existing && !existing.webContents.isDestroyed()) return existing;
+  const view = new electron.WebContentsView({
+    webPreferences: {
+      preload: overlayPreloadPath,
+      contextIsolation: true,
+      sandbox: false,
+      partition: "persist:overlay"
+    }
+  });
+  view.webContents.loadURL("app://overlay/index.html");
+  setTransientOverlay(win, spec.id, view);
+  return view;
+}
+function positionView(view, spec) {
+  const rect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
+  if (isValidPhysicalRect(rect)) view.setBounds(rect);
+}
+function hideView(win, state, id) {
+  hideTransient(win, id);
+  const v = state.views.get(id);
+  if (v) {
+    v.setVisible(false);
+    v.setBounds({ x: -1e4, y: -1e4, width: 1, height: 1 });
+  }
+}
+function repositionTransientOverlays(win) {
+  const specsForWin = transientSpecs.get(win.id);
+  if (!specsForWin) return;
+  const state = composers.get(win.id);
+  if (!state) return;
+  for (const [id, spec] of specsForWin) {
+    const v = state.views.get(id);
+    if (v) {
+      positionView(v, spec);
+      v.setVisible(true);
+    }
+  }
+}
+function unregisterAppShortcuts() {
+  electron.globalShortcut.unregisterAll();
 }
 async function extractFromMatchingPane(ses, domainFragment, extractorScript, timeoutMs = 800) {
   try {
@@ -7256,6 +7009,896 @@ class SessionIdentityService {
   }
 }
 const sessionIdentityService = new SessionIdentityService();
+const DEFAULT_CHROME_VERSION = "144.0.7550.80";
+const DEFAULT_DESKTOP_UA = typeof process !== "undefined" && process.platform === "darwin" ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36` : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
+const FIREFOX_AUTH_UA = typeof process !== "undefined" && process.platform === "darwin" ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
+function cleanUserAgent(ua) {
+  if (!ua) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const raw = Array.isArray(ua) ? ua[0] : ua;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return DEFAULT_DESKTOP_UA;
+  }
+  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
+}
+function isGoogleAuthUrl(url) {
+  if (!url || typeof url !== "string") return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host === "accounts.youtube.com" || host.endsWith(".accounts.youtube.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
+  } catch {
+    const lower = url.toLowerCase();
+    return lower.includes("accounts.google.com") || lower.includes("accounts.youtube.com") || lower.includes("google.com/gsi/");
+  }
+}
+function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
+  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
+  const major = cleanVersion.split(".")[0] || "144";
+  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
+  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
+  return {
+    "sec-ch-ua": secChUa,
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": `"${platform}"`,
+    "sec-ch-ua-full-version-list": secChUaFull
+  };
+}
+function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
+  if (!headers || typeof headers !== "object") return {};
+  const result = { ...headers };
+  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
+    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+    result[uaKey2] = FIREFOX_AUTH_UA;
+    for (const key of Object.keys(result)) {
+      if (key.toLowerCase().startsWith("sec-ch-ua")) {
+        delete result[key];
+      }
+    }
+    return result;
+  }
+  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
+  result[uaKey] = cleanUserAgent(result[uaKey]);
+  const clientHintKeys = /* @__PURE__ */ new Set([
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "sec-ch-ua-full-version-list"
+  ]);
+  for (const key of Object.keys(result)) {
+    const lower = key.toLowerCase();
+    if (clientHintKeys.has(lower) && lower !== key) {
+      delete result[key];
+    }
+  }
+  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
+  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
+  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
+  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
+  const langKey = Object.keys(result).find((k) => k.toLowerCase() === "accept-language") || "Accept-Language";
+  result[langKey] = "en-US,en;q=0.9";
+  return result;
+}
+let activeAuthWindow = null;
+function isProviderAuthComplete(providerId, url) {
+  const lower = (url || "").toLowerCase();
+  if (lower.startsWith("apposition://") || lower.includes("#oauth-success")) return true;
+  switch (providerId) {
+    case "google":
+      return !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2") && !lower.includes("accounts.google.com/v3/signin");
+    case "github":
+      return lower.includes("github.com") && !lower.includes("/login") && !lower.includes("/session");
+    case "microsoft":
+      return !lower.includes("login.microsoftonline.com") && !lower.includes("login.live.com") && (lower.includes("microsoft.com") || lower.includes("office.com"));
+    case "x":
+      return (lower.includes("twitter.com") || lower.includes("x.com")) && !lower.includes("/login") && !lower.includes("/i/flow/login");
+    case "discord":
+      return lower.includes("discord.com") && !lower.includes("/login");
+    case "gitlab":
+      return lower.includes("gitlab.com") && !lower.includes("/users/sign_in");
+    case "slack":
+      return lower.includes("slack.com") && !lower.includes("/signin");
+    case "apple":
+      return lower.includes("apple.com") && !lower.includes("appleid.apple.com/auth");
+    default:
+      return false;
+  }
+}
+function openConnectAccountModal(options) {
+  try {
+    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
+      activeAuthWindow.focus();
+      return { success: true };
+    }
+    const { providerId, loginUrl, profileId = "main", returnUrl } = options;
+    const partition = sessionIdentityService.getPartitionForProfile(profileId);
+    const isGoogle = providerId === "google";
+    const authWin = new electron.BrowserWindow({
+      width: 540,
+      height: 700,
+      center: true,
+      title: `${providerId.toUpperCase()} Sign-In`,
+      titleBarStyle: "hidden",
+      titleBarOverlay: {
+        color: "#fafaf9",
+        symbolColor: "#121212",
+        height: 36
+      },
+      backgroundColor: "#FFFFFF",
+      show: false,
+      icon: path.join(
+        __dirname,
+        process.platform === "linux" ? "../../../assets/icon.png" : "../../../assets/icon.ico"
+      ),
+      webPreferences: {
+        partition,
+        preload: isGoogle ? path.join(__dirname, "../../preload/authGuard.js") : void 0,
+        sandbox: true,
+        contextIsolation: !isGoogle
+      }
+    });
+    activeAuthWindow = authWin;
+    const authWebContentsId = authWin.webContents.id;
+    registerOAuthPopup(authWebContentsId);
+    if (isGoogle) {
+      try {
+        authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
+      } catch {
+      }
+    }
+    authWin.once("ready-to-show", () => {
+      if (!authWin.isDestroyed()) authWin.show();
+    });
+    const notifyAndClose = async () => {
+      try {
+        if (!authWin.isDestroyed()) {
+          const domEmail = await authWin.webContents.executeJavaScript(
+            `(() => {
+                const el = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], [data-email], #profileIdentifier, div[data-profile-identifier]');
+                if (el) {
+                  const text = el.getAttribute('data-email') || el.getAttribute('aria-label') || el.innerText || el.getAttribute('title') || '';
+                  const m = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
+                  if (m && !m[1].endsWith('@google.com')) return m[1];
+                }
+                const input = document.querySelector('input[type="email"]');
+                if (input && input.value && input.value.includes('@')) return input.value.trim();
+                return null;
+              })()`,
+            true
+          ).catch(() => null);
+          if (domEmail) {
+            sessionIdentityService.registerDiscoveredIdentity(profileId, {
+              providerId,
+              email: domEmail,
+              displayName: domEmail,
+              lastDetectedAt: Date.now()
+            });
+          }
+        }
+      } catch {
+      }
+      const identities = await sessionIdentityService.scanProfile(profileId, true);
+      const identity = identities[providerId];
+      if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
+        global.appOverlayView.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        global.mainWindow.webContents.send("app.auth-completed", {
+          profileId,
+          providerId,
+          returnUrl,
+          identity,
+          success: true
+        });
+      }
+      setTimeout(() => {
+        if (!authWin.isDestroyed()) authWin.close();
+      }, 600);
+    };
+    const handleNavigation = (_e, navUrl) => {
+      if (isProviderAuthComplete(providerId, navUrl)) {
+        notifyAndClose();
+      }
+    };
+    authWin.webContents.on("did-navigate", handleNavigation);
+    authWin.webContents.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
+      if (isMainFrame) {
+        handleNavigation(_e, navUrl);
+      }
+    });
+    authWin.once("closed", () => {
+      unregisterOAuthPopup(authWebContentsId);
+      if (activeAuthWindow === authWin) {
+        activeAuthWindow = null;
+      }
+      sessionIdentityService.scanProfile(profileId).catch(() => {
+      });
+    });
+    authWin.loadURL(loginUrl, isGoogle ? { userAgent: FIREFOX_AUTH_UA } : void 0);
+    return { success: true };
+  } catch (err) {
+    console.error(`Failed to open auth modal for ${options.providerId}:`, err);
+    return { success: false, error: err.message };
+  }
+}
+function getSafeClipboard() {
+  const c = electron__namespace.clipboard || electron__namespace.default?.clipboard || electron.clipboard;
+  if (c && (typeof c.write === "function" || typeof c.writeImage === "function" || typeof c.writeText === "function")) {
+    return c;
+  }
+  try {
+    const req = typeof require !== "undefined" ? require("electron") : null;
+    return req?.clipboard || req?.default?.clipboard || c;
+  } catch {
+    return c;
+  }
+}
+function getSafeClipboardItem() {
+  const ci = electron__namespace.ClipboardItem || electron__namespace.default?.ClipboardItem || electron.ClipboardItem;
+  if (ci && typeof ci === "function") return ci;
+  try {
+    const req = typeof require !== "undefined" ? require("electron") : null;
+    return req?.ClipboardItem || req?.default?.ClipboardItem || ci;
+  } catch {
+    return ci;
+  }
+}
+function getSafeNativeImage() {
+  const ni = electron__namespace.nativeImage || electron__namespace.default?.nativeImage || electron.nativeImage;
+  if (ni && typeof ni.createFromBuffer === "function") return ni;
+  try {
+    const req = typeof require !== "undefined" ? require("electron") : null;
+    return req?.nativeImage || req?.default?.nativeImage || ni;
+  } catch {
+    return ni;
+  }
+}
+function getSafeNet() {
+  const n = electron__namespace.net || electron__namespace.default?.net || electron.net;
+  if (n && typeof n.fetch === "function") return n;
+  try {
+    const req = typeof require !== "undefined" ? require("electron") : null;
+    return req?.net || req?.default?.net || n;
+  } catch {
+    return n;
+  }
+}
+async function writeImageToClipboard(pngBuffer, dataUrl) {
+  if (!pngBuffer || pngBuffer.length === 0) return false;
+  const clip = getSafeClipboard();
+  if (!clip) return false;
+  const resolvedDataUrl = dataUrl || `data:image/png;base64,${Buffer.from(pngBuffer).toString("base64")}`;
+  const ClipboardItemClass = getSafeClipboardItem();
+  if (typeof clip.write === "function" && typeof ClipboardItemClass === "function") {
+    try {
+      const pngBlob = new Blob([pngBuffer], { type: "image/png" });
+      const htmlBlob = new Blob([`<img src="${resolvedDataUrl}" alt="Copied Image" />`], {
+        type: "text/html"
+      });
+      const item = new ClipboardItemClass({
+        "image/png": pngBlob,
+        "text/html": htmlBlob
+      });
+      await clip.write([item]);
+      return true;
+    } catch (err) {
+      console.warn("[clipboardService] W3C clip.write failed, trying legacy fallback:", err);
+    }
+  }
+  try {
+    const nativeImg = getSafeNativeImage()?.createFromBuffer(Buffer.from(pngBuffer));
+    if (nativeImg && !nativeImg.isEmpty()) {
+      if (typeof clip.writeImage === "function") {
+        clip.writeImage(nativeImg);
+        return true;
+      }
+      if (typeof clip.write === "function") {
+        clip.write({
+          image: nativeImg,
+          html: `<img src="${resolvedDataUrl}" />`
+        });
+        return true;
+      }
+    }
+  } catch (fallbackErr) {
+    console.warn("[clipboardService] Legacy writeImage fallback failed:", fallbackErr);
+  }
+  return false;
+}
+async function captureWebContentsCdp(wc, options = { fullPage: true, copyToClipboard: true }) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  try {
+    let image;
+    let buffer;
+    if (!options.fullPage) {
+      image = await wc.capturePage();
+      buffer = image.toPNG();
+    } else {
+      const dbg = wc.debugger;
+      let attached = false;
+      try {
+        if (!dbg.isAttached()) {
+          dbg.attach("1.3");
+          attached = true;
+        }
+        await dbg.sendCommand("Page.enable");
+        const screenshotData = await dbg.sendCommand("Page.captureScreenshot", {
+          format: options.format || "png",
+          quality: options.quality || 95,
+          captureBeyondViewport: true
+        });
+        buffer = Buffer.from(screenshotData.data, "base64");
+        image = getSafeNativeImage().createFromBuffer(buffer);
+      } finally {
+        if (attached && dbg.isAttached()) {
+          try {
+            dbg.detach();
+          } catch {
+          }
+        }
+      }
+    }
+    if (!image || image.isEmpty()) {
+      return { success: false, error: "Captured image is empty" };
+    }
+    if (options.copyToClipboard) {
+      await writeImageToClipboard(buffer, image.toDataURL());
+    }
+    let filePath = options.savePath;
+    if (!filePath && !options.copyToClipboard) {
+      const fileName = `screenshot-${Date.now()}.${options.format || "png"}`;
+      filePath = path.join(electron.app.getPath("pictures"), fileName);
+      await promises.writeFile(filePath, buffer);
+    } else if (filePath) {
+      await promises.writeFile(filePath, buffer);
+    }
+    return {
+      success: true,
+      dataUrl: image.toDataURL(),
+      filePath
+    };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+class MultiPaneSearchCoordinator {
+  activeQuery = "";
+  paneResults = /* @__PURE__ */ new Map();
+  findInPanes(panes2, query, options = {}) {
+    const trimmed = (query || "").trim();
+    if (!trimmed) {
+      this.stopFind(panes2, "clearSelection");
+      return;
+    }
+    this.activeQuery = trimmed;
+    const hasTarget = Boolean(options.targetPaneId && panes2.has(options.targetPaneId));
+    for (const [paneId, wc] of panes2.entries()) {
+      if (!wc.isDestroyed()) {
+        if (hasTarget && paneId !== options.targetPaneId) {
+          wc.stopFindInPage("clearSelection");
+          this.paneResults.delete(paneId);
+          continue;
+        }
+        const reqId = wc.findInPage(trimmed, {
+          forward: options.forward ?? true,
+          findNext: options.findNext ?? false,
+          matchCase: options.matchCase ?? false
+        });
+        const current = this.paneResults.get(paneId);
+        this.paneResults.set(paneId, {
+          activeMatch: current?.activeMatch || 0,
+          total: current?.total || 0,
+          requestId: reqId
+        });
+      }
+    }
+  }
+  handlePaneResult(paneId, result) {
+    const total = typeof result.matches === "number" ? result.matches : typeof result.numberOfMatches === "number" ? result.numberOfMatches : 0;
+    const active = result.activeMatchOrdinal || 0;
+    const reqId = result.requestId || 0;
+    const existing = this.paneResults.get(paneId);
+    if (existing && reqId > 0 && existing.requestId > 0 && reqId < existing.requestId) {
+      return this.aggregateResults();
+    }
+    this.paneResults.set(paneId, {
+      activeMatch: active,
+      total,
+      requestId: reqId || existing?.requestId || 0
+    });
+    return this.aggregateResults();
+  }
+  aggregateResults() {
+    let totalMatches = 0;
+    let currentMatchOrdinal = 0;
+    let activePaneWithMatch;
+    const paneBreakdown = {};
+    for (const [id, res] of this.paneResults.entries()) {
+      paneBreakdown[id] = { activeMatch: res.activeMatch, total: res.total };
+      totalMatches += res.total;
+      if (res.activeMatch > 0) {
+        currentMatchOrdinal = res.activeMatch;
+        activePaneWithMatch = id;
+      }
+    }
+    if (totalMatches > 0 && currentMatchOrdinal === 0) {
+      currentMatchOrdinal = 1;
+    }
+    return {
+      totalMatches,
+      currentMatchOrdinal,
+      paneBreakdown,
+      activePaneId: activePaneWithMatch
+    };
+  }
+  stopFind(panes2, action = "clearSelection") {
+    this.activeQuery = "";
+    this.paneResults.clear();
+    for (const [, wc] of panes2.entries()) {
+      if (!wc.isDestroyed()) {
+        wc.stopFindInPage(action);
+      }
+    }
+  }
+}
+const multiPaneSearch = new MultiPaneSearchCoordinator();
+class PaneWarmSleepService {
+  suspendedPanes = /* @__PURE__ */ new Set();
+  suspendPaneView(win, paneId, view) {
+    if (this.suspendedPanes.has(paneId)) return false;
+    try {
+      win.contentView.removeChildView(view);
+      this.suspendedPanes.add(paneId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  resumePaneView(win, paneId, view, insertIndex = 0) {
+    if (!this.suspendedPanes.has(paneId)) return false;
+    try {
+      win.contentView.addChildView(view, insertIndex);
+      this.suspendedPanes.delete(paneId);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  isPaneSuspended(paneId) {
+    return this.suspendedPanes.has(paneId);
+  }
+  async getPaneMemoryMetrics(panes2) {
+    const stats = [];
+    for (const [paneId, view] of panes2.entries()) {
+      if (view.webContents.isDestroyed()) continue;
+      stats.push({
+        paneId,
+        url: view.webContents.getURL(),
+        title: view.webContents.getTitle(),
+        isWarmSuspended: this.suspendedPanes.has(paneId)
+      });
+    }
+    return stats;
+  }
+}
+const warmSleepService = new PaneWarmSleepService();
+const DEVICE_CONFIGS = {
+  iphone_16_pro: {
+    width: 393,
+    height: 852,
+    scale: 1,
+    mobile: true,
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+  },
+  ipad_air: {
+    width: 820,
+    height: 1180,
+    scale: 1,
+    mobile: true,
+    ua: "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
+  },
+  pixel_9: {
+    width: 412,
+    height: 924,
+    scale: 1,
+    mobile: true,
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+  }
+};
+async function setPaneDeviceEmulation(wc, device, orientation = "portrait", scale = 1) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  const dbg = wc.debugger;
+  try {
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+    }
+    if (device === "reset") {
+      await dbg.sendCommand("Emulation.clearDeviceMetricsOverride").catch(() => {
+      });
+      await dbg.sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false }).catch(() => {
+      });
+      await dbg.sendCommand("Network.setUserAgentOverride", { userAgent: "" }).catch(() => {
+      });
+      try {
+        wc.invalidate?.();
+      } catch {
+      }
+      return { success: true };
+    }
+    const cfg = DEVICE_CONFIGS[device];
+    if (!cfg) return { success: false, error: "Unknown device type" };
+    const isLandscape = orientation === "landscape";
+    const width = isLandscape ? cfg.height : cfg.width;
+    const height = isLandscape ? cfg.width : cfg.height;
+    await dbg.sendCommand("Emulation.setDeviceMetricsOverride", {
+      width,
+      height,
+      deviceScaleFactor: cfg.scale,
+      mobile: cfg.mobile,
+      scale: scale > 0 ? scale : 1,
+      screenOrientation: isLandscape ? { type: "landscapePrimary", angle: 90 } : { type: "portraitPrimary", angle: 0 }
+    });
+    await dbg.sendCommand("Emulation.setTouchEmulationEnabled", {
+      enabled: cfg.mobile,
+      maxTouchPoints: 5
+    }).catch(() => {
+    });
+    await dbg.sendCommand("Network.setUserAgentOverride", {
+      userAgent: cfg.ua
+    });
+    try {
+      wc.invalidate?.();
+    } catch {
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+const THROTTLE_PROFILES = {
+  offline: { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 },
+  slow_3g: {
+    offline: false,
+    latency: 400,
+    downloadThroughput: 400 * 1024 / 8,
+    uploadThroughput: 400 * 1024 / 8
+  },
+  fast_3g: {
+    offline: false,
+    latency: 150,
+    downloadThroughput: 1.6 * 1024 * 1024 / 8,
+    uploadThroughput: 750 * 1024 / 8
+  },
+  fast_4g: {
+    offline: false,
+    latency: 20,
+    downloadThroughput: 20 * 1024 * 1024 / 8,
+    uploadThroughput: 10 * 1024 * 1024 / 8
+  }
+};
+async function setPaneNetworkThrottling(wc, profile) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  const dbg = wc.debugger;
+  try {
+    if (!dbg.isAttached()) {
+      dbg.attach("1.3");
+    }
+    await dbg.sendCommand("Network.enable");
+    if (profile === "reset") {
+      await dbg.sendCommand("Network.emulateNetworkConditions", {
+        offline: false,
+        latency: 0,
+        downloadThroughput: -1,
+        uploadThroughput: -1
+      });
+      return { success: true };
+    }
+    const cfg = THROTTLE_PROFILES[profile];
+    if (!cfg) return { success: false, error: "Unknown profile" };
+    await dbg.sendCommand("Network.emulateNetworkConditions", cfg);
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+async function extractPaneReaderContent(wc) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  try {
+    const script = `
+      (() => {
+        try {
+          const doc = document.cloneNode(true);
+          const removeSelectors = [
+            "script", "style", "noscript", "iframe", "button", "input", "form",
+            "select", "textarea", "header", "footer", "nav", "aside", "dialog",
+            "menu", "canvas", "video", "audio", "embed", "object", "svg",
+            "[role='button']", "[role='dialog']", "[role='banner']", "[role='navigation']",
+            "[role='complementary']", "[aria-hidden='true']",
+            ".advertisement", ".ad", ".adsbygoogle", "[class*='sponsored']",
+            ".cookie-banner", "#cookie-banner", "[id*='cookie']",
+            ".popup", ".modal", ".overlay",
+            ".newsletter-signup", "[class*='newsletter']", "[class*='subscribe']",
+            ".interactive-demo", "[class*='interactive']", "[class*='demo']",
+            ".pricing-table", "[class*='pricing']", "[id*='pricing']",
+            ".cta", "[class*='cta-']", "[class*='call-to-action']",
+            "[class*='social-share']", "[class*='share-bar']", "[class*='share-button']"
+          ];
+          removeSelectors.forEach(sel => {
+            doc.querySelectorAll(sel).forEach(el => el.remove());
+          });
+
+          // Strip download buttons and CTA marketing links
+          const ctaRegex = /download|subscribe|sign up|join waitlist|claim|lifetime|buy now|get started|\\$\\d+/i;
+          doc.querySelectorAll("a").forEach(a => {
+            const txt = (a.innerText || "").trim();
+            if (!txt || ctaRegex.test(txt) || a.classList.contains("button") || a.getAttribute("role") === "button") {
+              a.remove();
+            }
+          });
+
+          const title = (document.querySelector("h1")?.innerText || document.title || "").trim();
+          const byline = (document.querySelector("meta[name='author']")?.getAttribute("content") ||
+                         document.querySelector(".byline, [rel='author'], [itemprop='author']")?.innerText ||
+                         new URL(window.location.href).hostname || "").trim();
+          
+          const candidate = doc.querySelector("article, [role='article'], .post-content, .entry-content, .article-body, #article-body, .prose");
+          const root = candidate || doc.querySelector("main, [role='main']") || doc.body;
+
+          // Universal Semantic Block Distillation: Extract pure headings, prose, lists, quotes & code
+          const blocks = [];
+          const seen = new Set();
+          const allowed = "h1, h2, h3, h4, h5, h6, p, ul, ol, blockquote, pre, table";
+          
+          root.querySelectorAll(allowed).forEach(el => {
+            const text = (el.innerText || "").trim();
+            if (!text || seen.has(text)) return;
+            if (text.toLowerCase() === title.toLowerCase()) return;
+            if (ctaRegex.test(text) && text.length < 50) return;
+            seen.add(text);
+
+            const tag = el.tagName.toLowerCase();
+            if (tag.startsWith("h")) {
+              const hLevel = tag === "h1" ? "h2" : tag;
+              blocks.push(\`<\${hLevel}>\${text}</\${hLevel}>\`);
+            } else if (tag === "blockquote" || tag === "pre") {
+              blocks.push(\`<\${tag}>\${text}</\${tag}>\`);
+            } else if (tag === "ul" || tag === "ol") {
+              const items = Array.from(el.querySelectorAll("li"))
+                .map(li => {
+                  const t = (li.innerText || "").trim();
+                  return t && !ctaRegex.test(t) ? \`<li>\${t}</li>\` : "";
+                })
+                .filter(Boolean)
+                .join("");
+              if (items) blocks.push(\`<\${tag}>\${items}</\${tag}>\`);
+            } else if (tag === "p" && text.length >= 15) {
+              blocks.push(\`<p>\${text}</p>\`);
+            } else if (tag === "table") {
+              const tableText = el.innerText || "";
+              if (tableText.trim().length > 20) {
+                const cleanTable = el.cloneNode(true);
+                cleanTable.querySelectorAll("*").forEach(c => {
+                  c.removeAttribute("class");
+                  c.removeAttribute("style");
+                  c.removeAttribute("id");
+                });
+                blocks.push(cleanTable.outerHTML);
+              }
+            }
+          });
+
+          let htmlOutput = blocks.join("\\n");
+          if (!htmlOutput.trim()) {
+            // Fallback for minimal pages: extract all visible text blocks from body
+            const fallbackParas = Array.from(doc.body.querySelectorAll("div, section, p"))
+              .map(el => (el.innerText || "").trim())
+              .filter(t => t.length > 25 && !seen.has(t) && !ctaRegex.test(t))
+              .slice(0, 15);
+            htmlOutput = fallbackParas.map(p => \`<p>\${p}</p>\`).join("\\n");
+          }
+
+          const wrap = document.createElement("div");
+          wrap.innerHTML = htmlOutput || \`<p>Distilled content from \${title || window.location.hostname}</p>\`;
+
+          // Strip duplicate first heading if it matches title
+          const firstH = wrap.querySelector("h1, h2");
+          if (firstH && title && (firstH.innerText || "").trim().toLowerCase() === title.toLowerCase()) {
+            firstH.remove();
+          }
+
+          const rawText = (wrap.innerText || "").trim();
+          const words = rawText.split(/\\s+/).filter(Boolean).length;
+          const readingTimeMinutes = Math.max(1, Math.ceil(words / 200));
+
+          return {
+            title: title || document.title || "Untitled Document",
+            byline,
+            excerpt: rawText.slice(0, 180).trim() + "...",
+            contentHtml: wrap.innerHTML,
+            readingTimeMinutes,
+            url: window.location.href,
+            isArticle: true,
+          };
+        } catch (e) {
+          return null;
+        }
+      })();
+    `;
+    const article = await wc.executeJavaScript(script, true);
+    if (!article) return { success: false, error: "Could not extract article content" };
+    return { success: true, article };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+async function pickColorFromPane(wc, x, y) {
+  if (wc.isDestroyed()) return { success: false, error: "WebContents destroyed" };
+  try {
+    const img = await wc.capturePage({
+      x: Math.max(0, Math.floor(x)),
+      y: Math.max(0, Math.floor(y)),
+      width: 1,
+      height: 1
+    });
+    const bitmap = img.toBitmap();
+    if (bitmap.length < 4) {
+      return { success: false, error: "Empty pixel buffer" };
+    }
+    const b = bitmap[0];
+    const g = bitmap[1];
+    const r = bitmap[2];
+    const toHex = (n) => n.toString(16).padStart(2, "0").toUpperCase();
+    const hex = `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    electron.clipboard.writeText(hex);
+    return {
+      success: true,
+      hex,
+      rgb: { r, g, b }
+    };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
+}
+function initPaneSuperpowerIpc(panes2, getWindow) {
+  electron.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_FULL_PAGE, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    if (!view) return { success: false, error: "Pane not found" };
+    return captureWebContentsCdp(view.webContents, { fullPage: true, copyToClipboard: true });
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VIEW.CAPTURE_VIEWPORT, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    if (!view) return { success: false, error: "Pane not found" };
+    return captureWebContentsCdp(view.webContents, { fullPage: false, copyToClipboard: true });
+  });
+  electron.ipcMain.on(IPC_CHANNELS.SEARCH.FIND_IN_ALL_PANES, (_e, query, opts) => {
+    const wcMap = /* @__PURE__ */ new Map();
+    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
+    multiPaneSearch.findInPanes(wcMap, query, opts);
+  });
+  electron.ipcMain.on(IPC_CHANNELS.SEARCH.STOP_FIND, (_e, action) => {
+    const wcMap = /* @__PURE__ */ new Map();
+    for (const [id, view] of panes2.entries()) wcMap.set(id, view.webContents);
+    multiPaneSearch.stopFind(wcMap, action);
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.GET_STATS, async () => warmSleepService.getPaneMemoryMetrics(panes2));
+  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.SUSPEND_PANE, async (_e, paneId) => {
+    const win = getWindow();
+    const view = panes2.get(paneId);
+    return win && view ? warmSleepService.suspendPaneView(win, paneId, view) : false;
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.MEMORY.RESUME_PANE, async (_e, paneId) => {
+    const win = getWindow();
+    const view = panes2.get(paneId);
+    return win && view ? warmSleepService.resumePaneView(win, paneId, view) : false;
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.VIEW.SET_DEVICE_EMULATION,
+    async (_e, paneId, dev, orientation, scale) => {
+      const view = panes2.get(paneId);
+      return view ? setPaneDeviceEmulation(view.webContents, dev, orientation, scale) : { success: false, error: "Pane not found" };
+    }
+  );
+  electron.ipcMain.handle(IPC_CHANNELS.VIEW.SET_NETWORK_THROTTLE, async (_e, paneId, prof) => {
+    const view = panes2.get(paneId);
+    return view ? setPaneNetworkThrottling(view.webContents, prof) : { success: false, error: "Pane not found" };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VIEW.EXTRACT_READER_MODE, async (_e, paneId) => {
+    const view = panes2.get(paneId);
+    return view ? extractPaneReaderContent(view.webContents) : { success: false, error: "Pane not found" };
+  });
+  electron.ipcMain.handle(IPC_CHANNELS.VIEW.PICK_COLOR, async (_e, paneId, x, y) => {
+    const view = panes2.get(paneId);
+    return view ? pickColorFromPane(view.webContents, x, y) : { success: false, error: "Pane not found" };
+  });
+  electron.ipcMain.handle(
+    IPC_CHANNELS.VIEW.COPY_IMAGE,
+    async (_e, paneId, x, y, srcURL) => {
+      const view = panes2.get(paneId);
+      if (view && typeof x === "number" && typeof y === "number" && x >= 0 && y >= 0) {
+        try {
+          view.webContents.copyImageAt(Math.floor(x), Math.floor(y));
+          return { success: true };
+        } catch {
+        }
+      }
+      if (srcURL && srcURL.startsWith("data:image/")) {
+        try {
+          const base64 = srcURL.split(",")[1];
+          if (base64) {
+            const buf = Buffer.from(base64, "base64");
+            const ok = await writeImageToClipboard(buf, srcURL);
+            if (ok) return { success: true };
+          }
+        } catch (err) {
+          console.warn("Failed to write data URL to clipboard:", err);
+        }
+      }
+      if (srcURL && (srcURL.startsWith("http://") || srcURL.startsWith("https://"))) {
+        try {
+          const netClient = view?.webContents.session?.net || getSafeNet();
+          if (netClient) {
+            const res = await netClient.fetch(srcURL);
+            if (res.ok) {
+              const buf = Buffer.from(await res.arrayBuffer());
+              const ok = await writeImageToClipboard(buf);
+              if (ok) return { success: true };
+            }
+          }
+        } catch (err) {
+          return { success: false, error: err?.message || "Failed to download image" };
+        }
+      }
+      return { success: false, error: "Unable to copy image" };
+    }
+  );
+  electron.ipcMain.on("pane.notification-posted", (e, data) => {
+    const senderWc = e.sender;
+    const title2 = senderWc?.getTitle() || "App";
+    global.appOverlayView?.webContents.send("pane.notification-posted", {
+      appId: data.appId || "comm_app",
+      appName: data.appName || title2.split(" - ")[0] || "Message",
+      title: data.title || "New Notification",
+      snippet: data.body || data.snippet || ""
+    });
+  });
+  electron.ipcMain.handle("view.getSearchSuggestions", async (_e, query) => {
+    if (!query || query.trim().length < 2) return [];
+    try {
+      const res = await fetch(
+        `https://suggestqueries.google.com/complete/search?client=chrome&q=${encodeURIComponent(query.trim())}`
+      );
+      if (!res.ok) return [];
+      const data = await res.json();
+      return Array.isArray(data[1]) ? data[1].slice(0, 5) : [];
+    } catch {
+      return [];
+    }
+  });
+}
+const configuredSessions = /* @__PURE__ */ new WeakSet();
+function configureWebAuthnForSession(sess) {
+  if (!sess || configuredSessions.has(sess)) return;
+  configuredSessions.add(sess);
+  sess.setDevicePermissionHandler(() => false);
+  const selectHidHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(void 0);
+  };
+  const selectAccountHandler = (event, _details, callback) => {
+    event.preventDefault();
+    callback(null);
+  };
+  sess.on("select-hid-device", selectHidHandler);
+  sess.on("select-webauthn-account", selectAccountHandler);
+}
 const AUTH_SURFACE_URL = "https://accounts.google.com";
 async function purgeGoogleAuthCookies(profileId) {
   try {
@@ -7355,78 +7998,6 @@ function handleBeforeInputEvent(webContents, event, input) {
     ov.focus();
   }
   ov.send("forwarded-key", payload);
-}
-const DEFAULT_CHROME_VERSION = "144.0.7550.80";
-const DEFAULT_DESKTOP_UA = typeof process !== "undefined" && process.platform === "darwin" ? `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36` : `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${DEFAULT_CHROME_VERSION} Safari/537.36`;
-const FIREFOX_AUTH_UA = typeof process !== "undefined" && process.platform === "darwin" ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:134.0) Gecko/20100101 Firefox/134.0" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0";
-function cleanUserAgent(ua) {
-  if (!ua) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const raw = Array.isArray(ua) ? ua[0] : ua;
-  if (typeof raw !== "string" || !raw.trim()) {
-    return DEFAULT_DESKTOP_UA;
-  }
-  const cleaned = raw.replace(/Electron\/\S*/gi, "").replace(/Apposition\w*\/\S*/gi, "").replace(/\s{2,}/g, " ").trim();
-  return cleaned.length > 10 ? cleaned : DEFAULT_DESKTOP_UA;
-}
-function isGoogleAuthUrl(url) {
-  if (!url || typeof url !== "string") return false;
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    return host === "accounts.google.com" || host.endsWith(".accounts.google.com") || host === "accounts.youtube.com" || host.endsWith(".accounts.youtube.com") || host.includes("google.com") && parsed.pathname.startsWith("/gsi/");
-  } catch {
-    const lower = url.toLowerCase();
-    return lower.includes("accounts.google.com") || lower.includes("accounts.youtube.com") || lower.includes("google.com/gsi/");
-  }
-}
-function generateClientHints(chromeVersion = DEFAULT_CHROME_VERSION, platform = "Windows") {
-  const cleanVersion = chromeVersion || DEFAULT_CHROME_VERSION;
-  const major = cleanVersion.split(".")[0] || "144";
-  const secChUa = `"Not A(Brand";v="8", "Chromium";v="${major}", "Google Chrome";v="${major}"`;
-  const secChUaFull = `"Not A(Brand";v="8.0.0.0", "Chromium";v="${cleanVersion}", "Google Chrome";v="${cleanVersion}"`;
-  return {
-    "sec-ch-ua": secChUa,
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": `"${platform}"`,
-    "sec-ch-ua-full-version-list": secChUaFull
-  };
-}
-function sanitizeRequestHeaders(headers, clientHints, targetUrl) {
-  if (!headers || typeof headers !== "object") return {};
-  const result = { ...headers };
-  if (targetUrl && isGoogleAuthUrl(targetUrl)) {
-    const uaKey2 = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-    result[uaKey2] = FIREFOX_AUTH_UA;
-    for (const key of Object.keys(result)) {
-      if (key.toLowerCase().startsWith("sec-ch-ua")) {
-        delete result[key];
-      }
-    }
-    return result;
-  }
-  const uaKey = Object.keys(result).find((k) => k.toLowerCase() === "user-agent") || "User-Agent";
-  result[uaKey] = cleanUserAgent(result[uaKey]);
-  const clientHintKeys = /* @__PURE__ */ new Set([
-    "sec-ch-ua",
-    "sec-ch-ua-mobile",
-    "sec-ch-ua-platform",
-    "sec-ch-ua-full-version-list"
-  ]);
-  for (const key of Object.keys(result)) {
-    const lower = key.toLowerCase();
-    if (clientHintKeys.has(lower) && lower !== key) {
-      delete result[key];
-    }
-  }
-  result["sec-ch-ua"] = clientHints["sec-ch-ua"];
-  result["sec-ch-ua-mobile"] = clientHints["sec-ch-ua-mobile"];
-  result["sec-ch-ua-platform"] = clientHints["sec-ch-ua-platform"];
-  result["sec-ch-ua-full-version-list"] = clientHints["sec-ch-ua-full-version-list"];
-  const langKey = Object.keys(result).find((k) => k.toLowerCase() === "accept-language") || "Accept-Language";
-  result[langKey] = "en-US,en;q=0.9";
-  return result;
 }
 const OAUTH_DOMAINS = [
   "accounts.google.com",
@@ -8117,154 +8688,6 @@ function cleanupRelay(state) {
       relay.server.close();
     } catch {
     }
-  }
-}
-let activeAuthWindow = null;
-function isProviderAuthComplete(providerId, url) {
-  const lower = (url || "").toLowerCase();
-  if (lower.startsWith("apposition://") || lower.includes("#oauth-success")) return true;
-  switch (providerId) {
-    case "google":
-      return !lower.includes("accounts.google.") && !lower.includes("google.com/gsi") && !lower.includes("google.com/signin") && !lower.includes("google.com/servicelogin") && !lower.includes("google.com/o/oauth2") && !lower.includes("accounts.google.com/v3/signin");
-    case "github":
-      return lower.includes("github.com") && !lower.includes("/login") && !lower.includes("/session");
-    case "microsoft":
-      return !lower.includes("login.microsoftonline.com") && !lower.includes("login.live.com") && (lower.includes("microsoft.com") || lower.includes("office.com"));
-    case "x":
-      return (lower.includes("twitter.com") || lower.includes("x.com")) && !lower.includes("/login") && !lower.includes("/i/flow/login");
-    case "discord":
-      return lower.includes("discord.com") && !lower.includes("/login");
-    case "gitlab":
-      return lower.includes("gitlab.com") && !lower.includes("/users/sign_in");
-    case "slack":
-      return lower.includes("slack.com") && !lower.includes("/signin");
-    case "apple":
-      return lower.includes("apple.com") && !lower.includes("appleid.apple.com/auth");
-    default:
-      return false;
-  }
-}
-function openConnectAccountModal(options) {
-  try {
-    if (activeAuthWindow && !activeAuthWindow.isDestroyed()) {
-      activeAuthWindow.focus();
-      return { success: true };
-    }
-    const { providerId, loginUrl, profileId = "main", returnUrl } = options;
-    const partition = sessionIdentityService.getPartitionForProfile(profileId);
-    const isGoogle = providerId === "google";
-    const authWin = new electron.BrowserWindow({
-      width: 540,
-      height: 700,
-      center: true,
-      title: `${providerId.toUpperCase()} Sign-In`,
-      titleBarStyle: "hidden",
-      titleBarOverlay: {
-        color: "#fafaf9",
-        symbolColor: "#121212",
-        height: 36
-      },
-      backgroundColor: "#FFFFFF",
-      show: false,
-      icon: path.join(
-        __dirname,
-        process.platform === "linux" ? "../../../assets/icon.png" : "../../../assets/icon.ico"
-      ),
-      webPreferences: {
-        partition,
-        preload: isGoogle ? path.join(__dirname, "../../preload/authGuard.js") : void 0,
-        sandbox: true,
-        contextIsolation: !isGoogle
-      }
-    });
-    activeAuthWindow = authWin;
-    const authWebContentsId = authWin.webContents.id;
-    registerOAuthPopup(authWebContentsId);
-    if (isGoogle) {
-      try {
-        authWin.webContents.setUserAgent(FIREFOX_AUTH_UA);
-      } catch {
-      }
-    }
-    authWin.once("ready-to-show", () => {
-      if (!authWin.isDestroyed()) authWin.show();
-    });
-    const notifyAndClose = async () => {
-      try {
-        if (!authWin.isDestroyed()) {
-          const domEmail = await authWin.webContents.executeJavaScript(
-            `(() => {
-                const el = document.querySelector('a[aria-label*="@"], div[aria-label*="@"], [data-email], #profileIdentifier, div[data-profile-identifier]');
-                if (el) {
-                  const text = el.getAttribute('data-email') || el.getAttribute('aria-label') || el.innerText || el.getAttribute('title') || '';
-                  const m = text.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/);
-                  if (m && !m[1].endsWith('@google.com')) return m[1];
-                }
-                const input = document.querySelector('input[type="email"]');
-                if (input && input.value && input.value.includes('@')) return input.value.trim();
-                return null;
-              })()`,
-            true
-          ).catch(() => null);
-          if (domEmail) {
-            sessionIdentityService.registerDiscoveredIdentity(profileId, {
-              providerId,
-              email: domEmail,
-              displayName: domEmail,
-              lastDetectedAt: Date.now()
-            });
-          }
-        }
-      } catch {
-      }
-      const identities = await sessionIdentityService.scanProfile(profileId, true);
-      const identity = identities[providerId];
-      if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-        global.appOverlayView.webContents.send("app.auth-completed", {
-          profileId,
-          providerId,
-          returnUrl,
-          identity,
-          success: true
-        });
-      }
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.auth-completed", {
-          profileId,
-          providerId,
-          returnUrl,
-          identity,
-          success: true
-        });
-      }
-      setTimeout(() => {
-        if (!authWin.isDestroyed()) authWin.close();
-      }, 600);
-    };
-    const handleNavigation = (_e, navUrl) => {
-      if (isProviderAuthComplete(providerId, navUrl)) {
-        notifyAndClose();
-      }
-    };
-    authWin.webContents.on("did-navigate", handleNavigation);
-    authWin.webContents.on("did-navigate-in-page", (_e, navUrl, isMainFrame) => {
-      if (isMainFrame) {
-        handleNavigation(_e, navUrl);
-      }
-    });
-    authWin.once("closed", () => {
-      unregisterOAuthPopup(authWebContentsId);
-      if (activeAuthWindow === authWin) {
-        activeAuthWindow = null;
-      }
-      sessionIdentityService.scanProfile(profileId).catch(() => {
-      });
-    });
-    authWin.loadURL(loginUrl, isGoogle ? { userAgent: FIREFOX_AUTH_UA } : void 0);
-    return { success: true };
-  } catch (err) {
-    console.error(`Failed to open auth modal for ${options.providerId}:`, err);
-    return { success: false, error: err.message };
   }
 }
 const SYSTEM_PROTOCOLS = [
@@ -9294,12 +9717,12 @@ function initLicensingIpc() {
     }
   );
 }
-const version = "1.3.7";
-const tag = "v1.3.7";
-const title = "Dedicated Proxy Routing, Global Identity Sync & Smart Screen Splitting";
+const version = "1.3.8";
+const tag = "v1.3.8";
+const title = "Atomic Background Updates, Persistent macOS Workspaces & Instant Dock Restoration";
 const publishedAt = "2026-10-22";
-const categories = [{ "category": "Features", "items": [{ "title": "Dedicated Proxy Routing & Verification", "description": "Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing." }, { "title": "Global Identity & Localized Browsing", "description": "Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side." }, { "title": "Advanced Connection Privacy", "description": "Added comprehensive privacy shielding to keep local network addresses, connected hardware identities, and real machine locations completely hidden from websites when browsing through custom profiles." }, { "title": "Instant Side-by-Side Screen Splitting", "description": "Pressing `⌘T` (or `Ctrl+T` on Windows) on a single screen now automatically splits the workspace side-by-side into a dual-view layout, while pressing it when multiple screens are already open creates a clean new tab." }, { "title": "Direct New Tab Creation", "description": "Added a dedicated `⌘N` (or `Ctrl+N` on Windows) shortcut to immediately open a blank tab from any screen without altering your existing side-by-side layout." }] }, { "category": "Improvements", "items": [{ "title": "Profile Management & Workstation Layout", "description": "Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed." }, { "title": "Native macOS Keyboard Experience", "description": "Aligned all keyboard shortcuts with standard macOS and Safari conventions, enabling native Command (`⌘`) key mappings for tabs, history navigation, panel closing, and developer inspection." }, { "title": "Clear Command Palette Overlay & Shortcuts", "description": "Removed background darkening scrim so split-views stay visible during quick search, and added arrow key navigation hints alongside Escape and Enter." }, { "title": "Unified Window Controls", "description": "Streamlined window controls into a unified, distraction-free top-right layout across macOS, Windows, and Linux for consistent minimizing, maximizing, and closing." }] }, { "category": "Bug Fixes", "items": [{ "title": "Edge-to-Edge Window Maximization", "description": "Resolved an issue on macOS where maximizing the window left the Dock and System Menu Bar visible; the application now launches and expands into a distraction-free, edge-to-edge workspace." }] }];
-const highlights = [{ "title": "Dedicated Proxy Routing & Verification", "description": "Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing." }, { "title": "Global Identity & Localized Browsing", "description": "Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side." }, { "title": "Profile Management & Workstation Layout", "description": "Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed." }];
+const categories = [{ "category": "Improvements", "items": [{ "title": "Seamless In-Place Auto-Updates", "description": "Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications." }, { "title": "Persistent Background Workspace & Instant Dock Restoration", "description": "Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing." }, { "title": "Hardened Linux Package Updates", "description": "Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands." }] }];
+const highlights = [{ "title": "Seamless In-Place Auto-Updates", "description": "Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications." }, { "title": "Persistent Background Workspace & Instant Dock Restoration", "description": "Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing." }, { "title": "Hardened Linux Package Updates", "description": "Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands." }];
 const currentRelease = {
   version,
   tag,
@@ -9308,7 +9731,7 @@ const currentRelease = {
   categories,
   highlights
 };
-const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.7","tag":"v1.3.7","title":"Dedicated Proxy Routing, Global Identity Sync & Smart Screen Splitting","publishedAt":"2026-10-22","categories":[{"category":"Features","items":[{"title":"Dedicated Proxy Routing & Verification","description":"Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."},{"title":"Global Identity & Localized Browsing","description":"Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."},{"title":"Advanced Connection Privacy","description":"Added comprehensive privacy shielding to keep local network addresses, connected hardware identities, and real machine locations completely hidden from websites when browsing through custom profiles."},{"title":"Instant Side-by-Side Screen Splitting","description":"Pressing `⌘T` (or `Ctrl+T` on Windows) on a single screen now automatically splits the workspace side-by-side into a dual-view layout, while pressing it when multiple screens are already open creates a clean new tab."},{"title":"Direct New Tab Creation","description":"Added a dedicated `⌘N` (or `Ctrl+N` on Windows) shortcut to immediately open a blank tab from any screen without altering your existing side-by-side layout."}]},{"category":"Improvements","items":[{"title":"Profile Management & Workstation Layout","description":"Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."},{"title":"Native macOS Keyboard Experience","description":"Aligned all keyboard shortcuts with standard macOS and Safari conventions, enabling native Command (`⌘`) key mappings for tabs, history navigation, panel closing, and developer inspection."},{"title":"Clear Command Palette Overlay & Shortcuts","description":"Removed background darkening scrim so split-views stay visible during quick search, and added arrow key navigation hints alongside Escape and Enter."},{"title":"Unified Window Controls","description":"Streamlined window controls into a unified, distraction-free top-right layout across macOS, Windows, and Linux for consistent minimizing, maximizing, and closing."}]},{"category":"Bug Fixes","items":[{"title":"Edge-to-Edge Window Maximization","description":"Resolved an issue on macOS where maximizing the window left the Dock and System Menu Bar visible; the application now launches and expands into a distraction-free, edge-to-edge workspace."}]}],"highlights":[{"title":"Dedicated Proxy Routing & Verification","description":"Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."},{"title":"Global Identity & Localized Browsing","description":"Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."},{"title":"Profile Management & Workstation Layout","description":"Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."}]},{"version":"1.3.6","tag":"v1.3.6","title":"Multi-Tier License Activation, Multi-Device Seat Management & Precision Text Selection","publishedAt":"2026-10-07","categories":[{"category":"Features","items":[{"title":"License Activation","description":"AppSumo lifetime keys across all tiers now activate seamlessly with immediate device seat resolution and progressive verification that only prompts for details when necessary."},{"title":"Account & Tiered Upgrades","description":"In-app upgrade prompts now dynamically highlight the exact tier needed when expanding workspace capacity, adding account logins, or configuring dedicated proxies, while Account Settings accurately displays your active tier, free plan status, and device allowances."},{"title":"Multi-Device Seat Management","description":"Added an assigned devices overview to Account Settings, allowing multi-computer license holders to view active workstations and release seats with one click."},{"title":"Founder Launch Offer","description":"Made the limited Founder Lifetime Deal directly accessible and redeemable within the in-app upgrade screen with clear promotional rate disclosures."}]},{"category":"Improvements","items":[{"title":"Visual Polish & Typography","description":"Upgraded the entire application interface to refined executive typography with tabular figures, eliminating layout jitter in tab titles, dock counters, and timestamps across high-DPI displays."},{"title":"Dock & Settings Access","description":"Relocated Settings to the primary bottom-left dock anchor with instant shortcut access, eliminating popover overlaps on active screens."},{"title":"Plan & Capability Specifications","description":"Enhanced the in-app plan comparison matrix with a detailed breakdown of workspace limits, separate client logins, and proxy configuration across all tiers."}]},{"category":"Bug Fixes","items":[{"title":"Web Pane Text Selection","description":"Double-clicking and triple-clicking text in web panes now reliably selects words and paragraphs, restoring standard highlight and copy workflows."},{"title":"Navigation History","description":"Back and forward navigation now skips over duplicate URL redirects and page loops, remembering your full navigation history even after restarting the app or closing tabs, while removing distracting swipe animations to keep page navigation clearly distinct from tab switching."},{"title":"Dropdown & Interaction Stability","description":"Fixed an issue where web dropdown menus could prematurely collapse, and prevented accidental address bar expansion when clicking nearby toolbar controls."}]}],"highlights":[{"title":"License Activation","description":"AppSumo lifetime keys across all tiers now activate seamlessly with immediate device seat resolution and progressive verification that only prompts for details when necessary."},{"title":"Account & Tiered Upgrades","description":"In-app upgrade prompts now dynamically highlight the exact tier needed when expanding workspace capacity, adding account logins, or configuring dedicated proxies, while Account Settings accurately displays your active tier, free plan status, and device allowances."},{"title":"Visual Polish & Typography","description":"Upgraded the entire application interface to refined executive typography with tabular figures, eliminating layout jitter in tab titles, dock counters, and timestamps across high-DPI displays."}]},{"version":"1.3.5","tag":"v1.3.5","title":"Tab & Workspace Persistence, Active Profile Focus Rings & Clean Workspace Teardown","publishedAt":"2026-10-04","categories":[{"category":"Features","items":[{"title":"Tab & Workspace Persistence","description":"Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."},{"title":"Workflow State Preservation","description":"In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."},{"title":"Background Media Continuity","description":"Background audio streams and active calls now remain connected without interruption or premature freezing when navigating away."},{"title":"Active Profile Focus Rings","description":"Focus rings now dynamically reflect profile accent colors when switching accounts or air-gapped sessions."}]},{"category":"Improvements","items":[{"title":"Docked Canvas Inset Persistence","description":"Window layout preference for docked inset mode is now remembered and automatically restored on startup."},{"title":"Process Responsiveness","description":"Streamlined background process scheduling for instant response times when multitasking across multiple workspaces."},{"title":"High-Contrast Pricing Overview","description":"Refined pricing overview and license tier displays with high-contrast monochrome aesthetics and improved typography legibility."},{"title":"Workspace Protection & Onboarding","description":"Added inline deletion confirmation to prevent accidental removals, enforced protection on your sole remaining workspace, and set new app installations to start with a single clean default workspace."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Teardown","description":"Resolved an issue where deleting a secondary workspace could leave behind a ghost icon and unresponsive tabs. Workspace teardown is now instantaneous and safely transitions to the fallback workspace."}]}],"highlights":[{"title":"Tab & Workspace Persistence","description":"Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."},{"title":"Workflow State Preservation","description":"In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."},{"title":"Docked Canvas Inset Persistence","description":"Window layout preference for docked inset mode is now remembered and automatically restored on startup."}]},{"version":"1.3.4","tag":"v1.3.4","title":"Resilient Auto-Updates & Direct Profile Navigation","publishedAt":"2026-10-04","categories":[{"category":"Features","items":[{"title":"Direct Profile Switcher","description":"The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."},{"title":"Hover Workspace Stack","description":"Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."},{"title":"Precision Update Notifications","description":"Automatic version update notifications now proactively appear upon launch with a refined, distraction-free notification capsule that reflects our precision design language."}]},{"category":"Improvements","items":[{"title":"Resilient Multi-Tier Updates","description":"Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."},{"title":"Unified Release Notes Bar","description":"Streamlined the Release Notes view into a single unified action bar, removing redundant update banners and ensuring zero duplicate action prompts."}]}],"highlights":[{"title":"Direct Profile Switcher","description":"The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."},{"title":"Hover Workspace Stack","description":"Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."},{"title":"Resilient Multi-Tier Updates","description":"Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."}]},{"version":"1.3.3","tag":"v1.3.3","title":"Persistent Active Tabs & Seamless Auto-Wake","publishedAt":"2026-09-29","categories":[{"category":"Features & Enhancements","items":[{"title":"Persistent Active Tab Continuity","description":"Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."},{"title":"Background Resource Conservation","description":"When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."},{"title":"Zero-Click Auto-Wake","description":"Sleeping tabs now wake up and resume their exact scroll position automatically when clicked or when restoring the app window, eliminating the need to click a wake button."},{"title":"Memory Metrics in Command Palette","description":"Real-time memory metrics now display within the Command Palette, highlighting the exact amount of system RAM conserved by sleeping background tabs."}]},{"category":"Improvements & Fixes","items":[{"title":"Modifier & Middle-Click Split Routing","description":"Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."},{"title":"Start Page Sleep Immunity","description":"Start pages and blank tabs are permanently immune to background sleep cycles, preventing unexpected blank reloading or redirect issues."},{"title":"Smooth Omnibar Transition","description":"Omnibar expansion now transitions smoothly without sudden layout shifts or involuntary resizing when searching."},{"title":"Webview Pointer & Cursor Precision","description":"Resolved edge cases causing cursor inversion or sticking during layout transitions and rapid mouse movements across split panels."}]}],"highlights":[{"title":"Persistent Active Tab Continuity","description":"Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."},{"title":"Background Resource Conservation","description":"When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."},{"title":"Modifier & Middle-Click Split Routing","description":"Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."}]},{"version":"1.3.2","tag":"v1.3.2","title":"Compact Context Menus, Precision Tools & Split-Screen Showcase","publishedAt":"2026-09-15","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.3.2/context-menu.webp","categories":[{"category":"Features","items":[{"title":"Compact Context Menus","description":"Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."},{"title":"Adaptive Tool Memory","description":"Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."},{"title":"Precision Color Loupe","description":"Added a high-precision pixel loupe tool to sample colors directly from any workspace panel and copy color codes directly to the clipboard."},{"title":"Modernized Reader Mode","description":"Distraction-free reading view now features a floating capsule header with reading time estimates, source links, dynamic text sizing, and three calibrated surfaces (White, Sepia, and Charcoal)."},{"title":"Device Hardware Emulation","description":"Preview and test web pages across simulated mobile and tablet screen dimensions (iPhone, Pixel, and iPad) with automatic display fitting, orientation switching, hardware bezels, and one-key desktop escape."},{"title":"Progressive Split-Screen Showcase","description":"Interactive app directory now supports live split-screen previewing (up to 4 apps side-by-side or in a 2x2 grid) and dynamic tab creation for comparing enterprise and productivity tools."},{"title":"Seamless Auto-Updates","description":"In-app updates now download automatically in the background with discreet notifications, live transfer speed, progress tracking, and one-click restart when ready."}]},{"category":"Improvements","items":[{"title":"Native Context Arbiter","description":"Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application\'s native menu on the first click, while a consecutive click opens Apposition\'s workspace menu."},{"title":"Developer Tools Submenu","description":"Specialized site and developer inspection tools are organized inside a dedicated submenu, keeping the primary workspace menu clean and accessible for non-technical workflows."},{"title":"Clean Media & Link Actions","description":"Right-clicking images and links organizes copy and navigation actions into clean, dedicated submenus to prevent menu clutter."},{"title":"Shift Bypass Shortcut","description":"Holding Shift while right-clicking anywhere instantly presents Apposition\'s workspace menu, bypassing in-page menus."},{"title":"Empty Panel Context Menu","description":"Right-clicking empty workspace panels provides instant workspace and layout controls, while preserving native text selection inside input fields."},{"title":"Instant Split Hub Access","description":"Creating a split pane immediately loads the workspace hub with instant command bar focus, keyboard shortcuts, and app catalog access."},{"title":"High-Contrast Tab Depth","description":"Tab icons now render inside a crisp, high-contrast container with refined borders and physical depth, ensuring dark brand marks and favicons remain legible across all workspace themes."},{"title":"Dedicated Full App Catalog","description":"The full 50+ application catalog is accessible via a dedicated view at the bottom of the directory with smooth category navigation."},{"title":"Synchronized Update Controls","description":"Synchronized update controls across Settings and the Release Notes viewer, ensuring consistent version status and one-click installation from either view."}]},{"category":"Bug Fixes","items":[{"title":"Clipboard Image Copying","description":"Copying images directly from web pages to the clipboard now functions reliably across all websites."}]}],"highlights":[{"title":"Compact Context Menus","description":"Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."},{"title":"Adaptive Tool Memory","description":"Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."},{"title":"Native Context Arbiter","description":"Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application\'s native menu on the first click, while a consecutive click opens Apposition\'s workspace menu."}]},{"version":"1.3.1","tag":"v1.3.1","title":"Persistent Media Continuity, Live Audio Equalizer & Tactile Edge Navigation","publishedAt":"2026-09-12","categories":[{"category":"Features","items":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Communicator App Reload","description":"Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."}]},{"category":"Improvements","items":[{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."},{"title":"Tactile Edge Navigation Shelves","description":"Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."},{"title":"Real-Time Profile Details","description":"The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."}]},{"category":"Bug Fixes","items":[{"title":"Automatic Account Identification","description":"Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."},{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."},{"title":"Continuous Background Web Sessions","description":"Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."},{"title":"Communicator Popovers & Settings","description":"Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."},{"title":"Stable Drag Focus & Screen-Edge Navigation","description":"Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."},{"title":"Intelligent Semantic Tab Naming","description":"Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."},{"title":"Intelligent Omnibar & Search Navigation","description":"Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."}]}],"highlights":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."}]},{"version":"1.3.0","tag":"v1.3.0","title":"Introducing the App Directory, Dedicated Release Feed & Fluid Multi-Pane Navigation","publishedAt":"2026-09-11","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.3.0/app-directory.webp","categories":[{"category":"Features","items":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Tactile App Shortcuts & Split Dock","description":"Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels."},{"title":"Flexible Annual Plan","description":"Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License."}]},{"category":"Improvements","items":[{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."},{"title":"In-App Release Notes Viewer","description":"Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."},{"title":"Visual Release Previews","description":"Key milestone release notes now display high-resolution visual previews directly within the in-app release viewer and website feed."},{"title":"Enhanced Motion & Performance","description":"Optimized motion, panel transitions, and scrolling performance across all workspace navigation views."},{"title":"Clean App Catalog","description":"Removed redundant duplicate listings and disambiguated service entries across shared domains."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen."},{"title":"Search Input & Sleep Recovery","description":"Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear."},{"title":"Command Bar Behavior","description":"Prevented accidental transitions to notes when pressing Escape in the workspace search bar."}]}],"highlights":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."}]},{"version":"1.2.7","tag":"v1.2.7","title":"Smart Window Persistence, Dynamic Omnibar Expansion, and Instant Cold Starts","publishedAt":"2026-09-09","categories":[{"category":"Features","items":[{"title":"Smart Window Persistence & Multi-Monitor Recovery","description":"The desktop app now seamlessly remembers your window size, position, and maximized state across restarts, and automatically rescues windows onto your main screen if an external monitor is disconnected."},{"title":"Dynamic Omnibar Expansion","description":"The address search bar now smoothly expands into available window space when editing and seamlessly morphs back into place upon dismissal, while tab labels compress smoothly under pressure without visual overlap."},{"title":"Semantic Title Distillation","description":"Tabs now automatically distill deep page titles into concise sub-task labels like Proposals, Pull requests, or Inbox instead of repeating brand names, and single tabs collapse into clean icon capsules to keep your workspace header uncluttered."}]},{"category":"Improvements","items":[{"title":"Instant Cold Starts","description":"App startup and workspace launch times are now significantly faster, eliminating initial launch freezes and accelerating background tab hydration."},{"title":"Zero-Flicker Launch","description":"The application now opens instantaneously with a fully rendered workspace, eliminating initial blank window delays and keeping active tabs immediately responsive."}]},{"category":"Bug Fixes","items":[{"title":"Duplicate Split Prevention","description":"Splitting panes via keyboard shortcuts now reliably creates a single new pane, eliminating accidental duplicate splits."},{"title":"Split View Focus Synchronization","description":"Active pane navigation and panel closing now synchronize flawlessly across split views, ensuring shortcuts like Ctrl+W consistently close the selected pane."}]}],"highlights":[{"title":"Smart Window Persistence","description":"Apposition automatically remembers your window positions and multi-monitor layouts across restarts."},{"title":"Dynamic Omnibar Expansion","description":"The address and search bar smoothly adapts to fit long queries and collapses into a compact capsule."},{"title":"Instant Cold Starts","description":"Workspaces and active panes now launch instantaneously with zero initial blank window lag."}]},{"version":"1.2.6","tag":"v1.2.6","title":"Seamless Workspace Dropdowns & Visual Branding Polish","publishedAt":"2026-09-09","categories":[{"category":"Improvements","items":[{"title":"Consolidated Brand Mark","description":"Updated all application installer assets and web icons to consistently display the refreshed brand mark across tabs and installer dialogs."}]},{"category":"Bug Fixes","items":[{"title":"Dropdown Menu Stability","description":"Resolved an issue where dropdown menus, selection filters, and model pickers in web workspaces would immediately collapse when clicked."},{"title":"Address Bar Hijack Guard","description":"Resolved an issue where websites containing embedded frames or interactive widgets could unexpectedly hijack the active tab address bar."}]}],"highlights":[{"title":"Dropdown Menu Stability","description":"Dropdown pickers and menus in web applications now stay open reliably during interaction."},{"title":"Address Bar Hijack Guard","description":"Embedded iframes are prevented from modifying tab address state unexpectedly."}]},{"version":"1.2.5","tag":"v1.2.5","title":"Self-Serve Device Licensing, Polished Brand Identity & 35% Partner Program","publishedAt":"2026-09-08","categories":[{"category":"Features","items":[{"title":"Self-Serve Device Licensing","description":"Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 35% Partner Program."}]},{"category":"Improvements","items":[{"title":"Refreshed Visual Identity","description":"Updated the official application icon, website branding, and browser tab favicons with our new split-monolith visual identity."}]}],"highlights":[{"title":"Self-Serve Device Licensing","description":"Manage active device seats and license transfers directly from your Account settings screen."},{"title":"35% Partner Program","description":"Earn recurring rewards for referring teams and collaborators to Apposition."}]},{"version":"1.2.4","tag":"v1.2.4","title":"Silent Background Updates & Precision Workspace Controls","publishedAt":"2026-09-05","categories":[{"category":"Features","items":[{"title":"Dedicated Drawer Resize Controls","description":"Dedicated drawer resize controls in the header and settings menu to customize your workspace layout with precision."},{"title":"Silent Background Updates","description":"Seamless background application updates that download quietly and apply instantly upon restart without interrupting your work."}]},{"category":"Improvements","items":[{"title":"Smarter Omnibar Search Classification","description":"Reliably differentiates search queries from web addresses, ensuring terms like code snippets or decimal numbers open web searches correctly."},{"title":"Anchored Popover Dialogs","description":"Add App and Stack configuration menus now open cleanly as anchored popovers without dimming the workspace."}]},{"category":"Bug Fixes","items":[{"title":"Search Query Desync Fix","description":"Fixed an issue where search queries typed into the address bar were intermittently dropped or desynchronized when navigating."},{"title":"Google Search Redirection Guard","description":"Resolved unexpected authentication prompts and redirection loops when browsing Google search results."}]}],"highlights":[{"title":"Silent Background Updates","description":"Updates download in the background without popups or work interruptions."},{"title":"Workspace Drawer Controls","description":"Fine-tune sidebar and drawer dimensions with tactile resize handles."}]},{"version":"1.2.3","tag":"v1.2.3","title":"Workspace Isolation & Tab Management Polish","publishedAt":"2026-09-02","categories":[{"category":"Features","items":[{"title":"Strict Workspace Sandboxing","description":"Dedicated profile cookies and storage partitions across isolated tabs."}]},{"category":"Improvements","items":[{"title":"Fluid Tab Switching","description":"Zero-latency keyboard shortcuts to cycle through workspaces and tabs."}]}],"highlights":[{"title":"Strict Workspace Sandboxing","description":"Completely isolated session cookies and partitions per tab."}]},{"version":"1.2.2","tag":"v1.2.2","title":"Connected Account Detection & Precision Workspace Isolation","publishedAt":"2026-08-31","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.2/profile-isolation.webp","categories":[{"category":"Features","items":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."}]},{"category":"Improvements & Fixes","items":[{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."},{"title":"Enhanced connected account identification and","description":"Enhanced connected account identification and avatar presentation in pane headers, omniboxes, and workspace menus."}]}],"highlights":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."},{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."}]},{"version":"1.2.1","tag":"v1.2.1","title":"Floating Communicator Hub, Fluid Spatial Drag, and Workspace Interaction Polish","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."}]},{"category":"Improvements","items":[{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."},{"title":"Improved modal dialogs and overlay","description":"Improved modal dialogs and overlay menus to close smoothly on outside clicks or the Escape key."}]},{"category":"Bug Fixes","items":[{"title":"The floating Communicator now stays","description":"The floating Communicator now stays reliably on top of all workspace panes, eliminates visual bleed-through from background pages, and smoothly dismisses whenever you click outside."},{"title":"Fixed an issue where interacting","description":"Fixed an issue where interacting with web applications and links inside split panels could cause unexpected page reloads or unrendered views."}]}],"highlights":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."},{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."}]},{"version":"1.2.0","tag":"v1.2.0","title":"Next-Gen Spatial Engine & Universal Communicator","publishedAt":"2026-08-27","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.0/communicator-hub.webp","categories":[{"category":"Features","items":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for Slack, Gmail, Telegram, and Discord."},{"title":"Dynamic Split Panes","description":"Tactile drag-and-drop spatial multi-pane tiling with zero webview reloads."}]}],"highlights":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for all your daily apps."},{"title":"Dynamic Split Panes","description":"Tactile spatial tiling with zero pane reloads."}]},{"version":"1.1.8","tag":"v1.1.8","title":"Stability Fixes, Install Improvements & Google Sign-in Reliability","publishedAt":"2026-08-23","categories":[{"category":"Bug Fixes","items":[{"title":"Fixed a rare crash that","description":"Fixed a rare crash that could close the entire app unexpectedly while browsing."},{"title":"Resolved an issue where certain","description":"Resolved an issue where certain network requests and cross-origin authentications could cause the application to crash unexpectedly."}]},{"category":"Sign-in & Accounts","items":[{"title":"Signing in with Google now","description":"Signing in with Google now works reliably inside panels as well as the dedicated login window - including retries after a failed attempt."},{"title":"Google sign-in no longer interrupts","description":"Google sign-in no longer interrupts you with Windows passkey popups; it goes straight to password entry."}]},{"category":"Improvements","items":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]}],"highlights":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]},{"version":"1.1.7","tag":"v1.1.7","title":"Resilient Startup & Seamless Session Recovery","publishedAt":"2026-08-22","categories":[{"category":"Improvements & Bug Fixes","items":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]}],"highlights":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]},{"version":"1.1.6","tag":"v1.1.6","title":"Seamless Media Continuity, Instant Tab Restoration & Streamlined Installers","publishedAt":"2026-08-20","categories":[{"category":"Features","items":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Streamlined Setup & Package Managers","description":"Introduced a distraction-free installation assistant with one-click terminal setup for macOS, Windows, and Linux, plus instant cryptographic verification."}]},{"category":"Improvements & Fixes","items":[{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."},{"title":"Immediate Split Pane Reflow","description":"Closing split panes now instantly reflows remaining views with zero delay and completely halts background audio upon close."},{"title":"Reliable Keyboard Navigation","description":"Workspace shortcuts now reliably trigger even when active web apps attempt to capture keyboard focus."}]}],"highlights":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."}]},{"version":"1.1.5","tag":"v1.1.5","title":"Spatial Navigation, Omnibox Browser Bar & Audio Multitasking","publishedAt":"2026-08-18","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.1.5/apposition-v1.1.5-spatial-navigation.png","categories":[{"category":"Features","items":[{"title":"Top-Center Omnibox Browser Bar","description":"Browser navigation bar with omnibox search suggestions, back/forward history, and quick layout actions."},{"title":"3-Way Spatial Layout Mode","description":"Toggle for docked, floating overlap, and full collapse views with persistent user preferences."},{"title":"Panel Dynamic Island & Focus Mode","description":"Distraction-free single-pane work triggered with Alt+F shortcut."}]},{"category":"Improvements","items":[{"title":"Responsive Soundwave Indicator","description":"Tabs display live soundwaves when audio is playing, with instant one-click muting."},{"title":"Synchronized Spatial Grid","description":"Refined window border margins, split gaps, and drop snap ghosts onto a synchronized grid."}]},{"category":"Bug Fixes","items":[{"title":"Window Control Hit-Testing","description":"Optimized window control responsiveness and hit-testing across all edge layout modes."}]}],"highlights":[{"title":"Top-Center Omnibox Browser Bar","description":"Instant search suggestions and quick layout actions right from the header."},{"title":"3-Way Spatial Layout Mode","description":"Docked, floating overlap, and full collapse workspace arrangements."},{"title":"Audio Indicator & 1-Click Mute","description":"Live soundwaves on active tabs with instant one-click muting."}]},{"version":"1.1.4","tag":"v1.1.4","title":"Multi-Profile Single Sign-On & Persistent Session Sync","publishedAt":"2026-08-18","categories":[{"category":"Features","items":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."}]},{"category":"Improvements","items":[{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."},{"title":"Profile switching preserves the exact","description":"Profile switching preserves the exact active webpage without accidental sign-outs."},{"title":"Profile switcher rows now feature","description":"Profile switcher rows now feature full-width selection highlights and floating hover micro-actions."}]},{"category":"Fixes","items":[{"title":"Switching profiles on a split","description":"Switching profiles on a split pane now instantly switches session partitions and cookies without latency."},{"title":"Active account logins and cookies","description":"Active account logins and cookies are now reliably preserved across app restarts and system sleep."},{"title":"Workspace quick-switching via Command Palette","description":"Workspace quick-switching via Command Palette now previews icons with keyboard navigation."}]}],"highlights":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."},{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."}]},{"version":"1.1.3","tag":"v1.1.3","title":"Seamless System Browser Sign-In, Workspace Context Menus & Enhanced Navigation","publishedAt":"2026-08-16","categories":[{"category":"Features","items":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"History Jump Menu & Navigation Shortcuts","description":"Long-press or right-click the back/forward navigation buttons to open a visual jump menu with site icons, or navigate back and forward instantly using Ctrl+[ and Ctrl+]."},{"title":"Power-User Search Keywords","description":"Address inputs now resolve Google Search directly with instant search engine shortcut keywords for YouTube, GitHub, and Google Drive."}]},{"category":"Improvements","items":[{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."},{"title":"Streamlined Single-Click Setup","description":"Windows installation is now completely silent and lock-free, with instant setup and automatic workspace layout restoration on launch."},{"title":"Fluid Floating Island Transitions","description":"Refined hovering and edge cursor tracking for floating window controls, preventing accidental window collapses and preserving direct click access to underlying web elements."}]},{"category":"Bug Fixes","items":[{"title":"Resilient Split Pane Sessions","description":"Closing a split pane no longer triggers unnecessary page reloads or active session interruptions in adjacent open panes."},{"title":"Reliable Embedded Shortcut Handling","description":"Fixed an issue where keyboard navigation shortcuts could become unresponsive while focused inside web panels, restoring instant focus upon clicking into any pane."},{"title":"Display Scaling Alignment","description":"Resolved an issue where interactive workspace preview tiles appeared scaled down or misaligned on smaller displays."},{"title":"Login Compatibility","description":"Eliminated unexpected firewall prompts and resolved authentication dialog blocks across third-party web services."}]}],"highlights":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."}]},{"version":"1.1.2","tag":"v1.1.2","title":"Zero-Reload Split Persistence & 120 FPS Resizing","publishedAt":"2026-08-13","categories":[{"category":"Improvements","items":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"category":"Bug Fixes","items":[{"title":"Fixed an issue where first-time","description":"Fixed an issue where first-time installations could render an empty screen by guaranteeing robust default workspace and tab initialization."}]}],"highlights":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"version":"1.1.1","tag":"v1.1.1","title":"Layout History, Spatial Keyboard Swapping & Crash Recovery","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added visual audio activity indicators","description":"Added visual audio activity indicators on active tabs to easily identify audio sources across complex multi-pane workspaces."},{"title":"Added intelligent address bar navigation","description":"Added intelligent address bar navigation for local development ports, alongside a one-click terminal install option."}]},{"category":"Improvements","items":[{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."},{"title":"Completely redesigned the pane toolbar","description":"Completely redesigned the pane toolbar with a jitter-free tactile aesthetic and refined double-bezel styling."},{"title":"Upgraded tab hover tooltips to","description":"Upgraded tab hover tooltips to instantly display rich session context with a polished tactile feel."},{"title":"Enhanced workspace docking and pane","description":"Enhanced workspace docking and pane splitting reliability with smoother drag transitions and robust offline session persistence."}]},{"category":"Bug Fixes","items":[{"title":"Fixed a startup crash on","description":"Fixed a startup crash on Windows and macOS caused by an engine compilation mismatch, and ensured the official Apposition icon displays correctly across all desktop platforms."},{"title":"Resolved an issue where dragging","description":"Resolved an issue where dragging panels in workspaces with multiple panes could cause duplicate panels, layout freezes, or dropped keyboard shortcuts."},{"title":"Resolved an issue where closing","description":"Resolved an issue where closing the final tab or pane in a workspace could cause the interface to freeze or display an empty background."},{"title":"Resolved navigation bugs that caused","description":"Resolved navigation bugs that caused the search input to occasionally lose typed text or drop focus when switching workspaces."},{"title":"Resolved an issue where rapidly","description":"Resolved an issue where rapidly switching workspaces could cause tabs to display the wrong environment."}]}],"highlights":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."}]},{"version":"1.1.0","tag":"v1.1.0","title":"Seamless Updates, Standalone Inspector & Draggable Tabs","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Opening the Inspector (F12) now","description":"Opening the Inspector (F12) now launches a clean, standalone floating window instead of squeezing into a sidebar."},{"title":"You can now view our","description":"You can now view our latest release notes in a dedicated popover and submit feedback directly from the new sidebar Support Cluster without leaving your workspace."},{"title":"Opening external links from the","description":"Opening external links from the changelog now seamlessly creates a new workspace tab instead of launching an external browser."}]},{"category":"Improvements","items":[{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."},{"title":"Dragging a pane into an","description":"Dragging a pane into an empty tab now cleanly replaces it with a clear visual drop preview, and moving panes between tabs no longer leaves behind orphaned blank tabs."},{"title":"Dragging the last panel out","description":"Dragging the last panel out of a tab or workspace now automatically cleans up the empty space instead of leaving an abandoned tab."}]},{"category":"Bug Fixes","items":[{"title":"Re-engineered the window manager to","description":"Re-engineered the window manager to completely eliminate cursor jitter and flickering when hovering over panes, while ensuring floating buttons and menus remain perfectly responsive."},{"title":"Resolved multi-window shortcut conflicts, ensuring","description":"Resolved multi-window shortcut conflicts, ensuring actions like splitting panels, closing tabs, and swiping between workspaces are perfectly instantaneous and correctly targeted."},{"title":"Fixed an issue where the","description":"Fixed an issue where the search bar would not automatically receive keyboard focus when opening a new tab or switching back to an empty tab."},{"title":"Resolved an issue that caused","description":"Resolved an issue that caused active workspace panels to unexpectedly refresh or blink when opening the settings menu."}]}],"highlights":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."}]},{"version":"1.0.0","tag":"v1.0.0","title":"Initial Launch of Apposition","publishedAt":"2026-08-02","categories":[{"category":"Features","items":[{"title":"Multi-Pane Workspace Canvas","description":"The digital workspace designed for deep parallel work without tab chaos."}]}],"highlights":[{"title":"Multi-Pane Workspace Canvas","description":"Organize web applications and accounts in one unified window."}]}]');
+const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.8","tag":"v1.3.8","title":"Atomic Background Updates, Persistent macOS Workspaces & Instant Dock Restoration","publishedAt":"2026-10-22","categories":[{"category":"Improvements","items":[{"title":"Seamless In-Place Auto-Updates","description":"Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications."},{"title":"Persistent Background Workspace & Instant Dock Restoration","description":"Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing."},{"title":"Hardened Linux Package Updates","description":"Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands."}]}],"highlights":[{"title":"Seamless In-Place Auto-Updates","description":"Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications."},{"title":"Persistent Background Workspace & Instant Dock Restoration","description":"Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing."},{"title":"Hardened Linux Package Updates","description":"Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands."}]},{"version":"1.3.7","tag":"v1.3.7","title":"Dedicated Proxy Routing, Global Identity Sync & Smart Screen Splitting","publishedAt":"2026-10-22","categories":[{"category":"Features","items":[{"title":"Dedicated Proxy Routing & Verification","description":"Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."},{"title":"Global Identity & Localized Browsing","description":"Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."},{"title":"Advanced Connection Privacy","description":"Added comprehensive privacy shielding to keep local network addresses, connected hardware identities, and real machine locations completely hidden from websites when browsing through custom profiles."},{"title":"Instant Side-by-Side Screen Splitting","description":"Pressing `⌘T` (or `Ctrl+T` on Windows) on a single screen now automatically splits the workspace side-by-side into a dual-view layout, while pressing it when multiple screens are already open creates a clean new tab."},{"title":"Direct New Tab Creation","description":"Added a dedicated `⌘N` (or `Ctrl+N` on Windows) shortcut to immediately open a blank tab from any screen without altering your existing side-by-side layout."}]},{"category":"Improvements","items":[{"title":"Profile Management & Workstation Layout","description":"Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."},{"title":"Native macOS Keyboard Experience","description":"Aligned all keyboard shortcuts with standard macOS and Safari conventions, enabling native Command (`⌘`) key mappings for tabs, history navigation, panel closing, and developer inspection."},{"title":"Clear Command Palette Overlay & Shortcuts","description":"Removed background darkening scrim so split-views stay visible during quick search, and added arrow key navigation hints alongside Escape and Enter."},{"title":"Unified Window Controls","description":"Streamlined window controls into a unified, distraction-free top-right layout across macOS, Windows, and Linux for consistent minimizing, maximizing, and closing."}]},{"category":"Bug Fixes","items":[{"title":"Edge-to-Edge Window Maximization","description":"Resolved an issue on macOS where maximizing the window left the Dock and System Menu Bar visible; the application now launches and expands into a distraction-free, edge-to-edge workspace."}]}],"highlights":[{"title":"Dedicated Proxy Routing & Verification","description":"Added native proxy support across custom profiles with one-click connection diagnostics, automated exit location detection, and SSL certificate health checks to ensure external networks are active and secure before browsing."},{"title":"Global Identity & Localized Browsing","description":"Custom profile views now automatically sync their local time, regional timezone, and geographic location to match their assigned network route, enabling seamless localized ad verification and multi-region storefront comparison side-by-side."},{"title":"Profile Management & Workstation Layout","description":"Upgraded the profile editor into a responsive two-column layout with organized account connections, refined visual accents, and improved menu anchoring that smoothly resets drafts when closed."}]},{"version":"1.3.6","tag":"v1.3.6","title":"Multi-Tier License Activation, Multi-Device Seat Management & Precision Text Selection","publishedAt":"2026-10-07","categories":[{"category":"Features","items":[{"title":"License Activation","description":"AppSumo lifetime keys across all tiers now activate seamlessly with immediate device seat resolution and progressive verification that only prompts for details when necessary."},{"title":"Account & Tiered Upgrades","description":"In-app upgrade prompts now dynamically highlight the exact tier needed when expanding workspace capacity, adding account logins, or configuring dedicated proxies, while Account Settings accurately displays your active tier, free plan status, and device allowances."},{"title":"Multi-Device Seat Management","description":"Added an assigned devices overview to Account Settings, allowing multi-computer license holders to view active workstations and release seats with one click."},{"title":"Founder Launch Offer","description":"Made the limited Founder Lifetime Deal directly accessible and redeemable within the in-app upgrade screen with clear promotional rate disclosures."}]},{"category":"Improvements","items":[{"title":"Visual Polish & Typography","description":"Upgraded the entire application interface to refined executive typography with tabular figures, eliminating layout jitter in tab titles, dock counters, and timestamps across high-DPI displays."},{"title":"Dock & Settings Access","description":"Relocated Settings to the primary bottom-left dock anchor with instant shortcut access, eliminating popover overlaps on active screens."},{"title":"Plan & Capability Specifications","description":"Enhanced the in-app plan comparison matrix with a detailed breakdown of workspace limits, separate client logins, and proxy configuration across all tiers."}]},{"category":"Bug Fixes","items":[{"title":"Web Pane Text Selection","description":"Double-clicking and triple-clicking text in web panes now reliably selects words and paragraphs, restoring standard highlight and copy workflows."},{"title":"Navigation History","description":"Back and forward navigation now skips over duplicate URL redirects and page loops, remembering your full navigation history even after restarting the app or closing tabs, while removing distracting swipe animations to keep page navigation clearly distinct from tab switching."},{"title":"Dropdown & Interaction Stability","description":"Fixed an issue where web dropdown menus could prematurely collapse, and prevented accidental address bar expansion when clicking nearby toolbar controls."}]}],"highlights":[{"title":"License Activation","description":"AppSumo lifetime keys across all tiers now activate seamlessly with immediate device seat resolution and progressive verification that only prompts for details when necessary."},{"title":"Account & Tiered Upgrades","description":"In-app upgrade prompts now dynamically highlight the exact tier needed when expanding workspace capacity, adding account logins, or configuring dedicated proxies, while Account Settings accurately displays your active tier, free plan status, and device allowances."},{"title":"Visual Polish & Typography","description":"Upgraded the entire application interface to refined executive typography with tabular figures, eliminating layout jitter in tab titles, dock counters, and timestamps across high-DPI displays."}]},{"version":"1.3.5","tag":"v1.3.5","title":"Tab & Workspace Persistence, Active Profile Focus Rings & Clean Workspace Teardown","publishedAt":"2026-10-04","categories":[{"category":"Features","items":[{"title":"Tab & Workspace Persistence","description":"Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."},{"title":"Workflow State Preservation","description":"In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."},{"title":"Background Media Continuity","description":"Background audio streams and active calls now remain connected without interruption or premature freezing when navigating away."},{"title":"Active Profile Focus Rings","description":"Focus rings now dynamically reflect profile accent colors when switching accounts or air-gapped sessions."}]},{"category":"Improvements","items":[{"title":"Docked Canvas Inset Persistence","description":"Window layout preference for docked inset mode is now remembered and automatically restored on startup."},{"title":"Process Responsiveness","description":"Streamlined background process scheduling for instant response times when multitasking across multiple workspaces."},{"title":"High-Contrast Pricing Overview","description":"Refined pricing overview and license tier displays with high-contrast monochrome aesthetics and improved typography legibility."},{"title":"Workspace Protection & Onboarding","description":"Added inline deletion confirmation to prevent accidental removals, enforced protection on your sole remaining workspace, and set new app installations to start with a single clean default workspace."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Teardown","description":"Resolved an issue where deleting a secondary workspace could leave behind a ghost icon and unresponsive tabs. Workspace teardown is now instantaneous and safely transitions to the fallback workspace."}]}],"highlights":[{"title":"Tab & Workspace Persistence","description":"Active tabs and split panes now remain loaded and instantly available when minimizing the window, switching workspaces, or navigating between tabs."},{"title":"Workflow State Preservation","description":"In-progress text entries, form fields, and scroll positions are now automatically preserved and restored seamlessly across workspace transitions."},{"title":"Docked Canvas Inset Persistence","description":"Window layout preference for docked inset mode is now remembered and automatically restored on startup."}]},{"version":"1.3.4","tag":"v1.3.4","title":"Resilient Auto-Updates & Direct Profile Navigation","publishedAt":"2026-10-04","categories":[{"category":"Features","items":[{"title":"Direct Profile Switcher","description":"The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."},{"title":"Hover Workspace Stack","description":"Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."},{"title":"Precision Update Notifications","description":"Automatic version update notifications now proactively appear upon launch with a refined, distraction-free notification capsule that reflects our precision design language."}]},{"category":"Improvements","items":[{"title":"Resilient Multi-Tier Updates","description":"Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."},{"title":"Unified Release Notes Bar","description":"Streamlined the Release Notes view into a single unified action bar, removing redundant update banners and ensuring zero duplicate action prompts."}]}],"highlights":[{"title":"Direct Profile Switcher","description":"The bottom-left profile switcher now directly opens the profile selection popover to instantly switch or manage account profiles."},{"title":"Hover Workspace Stack","description":"Settings, release notes, and feedback buttons now smoothly reveal above the profile switcher on hover, keeping workspace controls accessible without screen clutter."},{"title":"Resilient Multi-Tier Updates","description":"Introduced resilient multi-tier update fallback and seamless state preservation, preventing updates from getting interrupted or losing active tabs and layout sessions."}]},{"version":"1.3.3","tag":"v1.3.3","title":"Persistent Active Tabs & Seamless Auto-Wake","publishedAt":"2026-09-29","categories":[{"category":"Features & Enhancements","items":[{"title":"Persistent Active Tab Continuity","description":"Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."},{"title":"Background Resource Conservation","description":"When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."},{"title":"Zero-Click Auto-Wake","description":"Sleeping tabs now wake up and resume their exact scroll position automatically when clicked or when restoring the app window, eliminating the need to click a wake button."},{"title":"Memory Metrics in Command Palette","description":"Real-time memory metrics now display within the Command Palette, highlighting the exact amount of system RAM conserved by sleeping background tabs."}]},{"category":"Improvements & Fixes","items":[{"title":"Modifier & Middle-Click Split Routing","description":"Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."},{"title":"Start Page Sleep Immunity","description":"Start pages and blank tabs are permanently immune to background sleep cycles, preventing unexpected blank reloading or redirect issues."},{"title":"Smooth Omnibar Transition","description":"Omnibar expansion now transitions smoothly without sudden layout shifts or involuntary resizing when searching."},{"title":"Webview Pointer & Cursor Precision","description":"Resolved edge cases causing cursor inversion or sticking during layout transitions and rapid mouse movements across split panels."}]}],"highlights":[{"title":"Persistent Active Tab Continuity","description":"Split panes and views within your active tab now remain fully interactive and visible indefinitely without going to sleep while you are working in the app."},{"title":"Background Resource Conservation","description":"When minimizing the app, active tabs now automatically sleep in the background to free up system memory while preserving active audio playback and live calls."},{"title":"Modifier & Middle-Click Split Routing","description":"Opening links while holding Ctrl/Cmd or via middle-click opens adjacent split panes up to a balanced quadrant grid, smoothly spilling over into new tabs once the limit is reached."}]},{"version":"1.3.2","tag":"v1.3.2","title":"Compact Context Menus, Precision Tools & Split-Screen Showcase","publishedAt":"2026-09-15","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.3.2/context-menu.webp","categories":[{"category":"Features","items":[{"title":"Compact Context Menus","description":"Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."},{"title":"Adaptive Tool Memory","description":"Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."},{"title":"Precision Color Loupe","description":"Added a high-precision pixel loupe tool to sample colors directly from any workspace panel and copy color codes directly to the clipboard."},{"title":"Modernized Reader Mode","description":"Distraction-free reading view now features a floating capsule header with reading time estimates, source links, dynamic text sizing, and three calibrated surfaces (White, Sepia, and Charcoal)."},{"title":"Device Hardware Emulation","description":"Preview and test web pages across simulated mobile and tablet screen dimensions (iPhone, Pixel, and iPad) with automatic display fitting, orientation switching, hardware bezels, and one-key desktop escape."},{"title":"Progressive Split-Screen Showcase","description":"Interactive app directory now supports live split-screen previewing (up to 4 apps side-by-side or in a 2x2 grid) and dynamic tab creation for comparing enterprise and productivity tools."},{"title":"Seamless Auto-Updates","description":"In-app updates now download automatically in the background with discreet notifications, live transfer speed, progress tracking, and one-click restart when ready."}]},{"category":"Improvements","items":[{"title":"Native Context Arbiter","description":"Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application\'s native menu on the first click, while a consecutive click opens Apposition\'s workspace menu."},{"title":"Developer Tools Submenu","description":"Specialized site and developer inspection tools are organized inside a dedicated submenu, keeping the primary workspace menu clean and accessible for non-technical workflows."},{"title":"Clean Media & Link Actions","description":"Right-clicking images and links organizes copy and navigation actions into clean, dedicated submenus to prevent menu clutter."},{"title":"Shift Bypass Shortcut","description":"Holding Shift while right-clicking anywhere instantly presents Apposition\'s workspace menu, bypassing in-page menus."},{"title":"Empty Panel Context Menu","description":"Right-clicking empty workspace panels provides instant workspace and layout controls, while preserving native text selection inside input fields."},{"title":"Instant Split Hub Access","description":"Creating a split pane immediately loads the workspace hub with instant command bar focus, keyboard shortcuts, and app catalog access."},{"title":"High-Contrast Tab Depth","description":"Tab icons now render inside a crisp, high-contrast container with refined borders and physical depth, ensuring dark brand marks and favicons remain legible across all workspace themes."},{"title":"Dedicated Full App Catalog","description":"The full 50+ application catalog is accessible via a dedicated view at the bottom of the directory with smooth category navigation."},{"title":"Synchronized Update Controls","description":"Synchronized update controls across Settings and the Release Notes viewer, ensuring consistent version status and one-click installation from either view."}]},{"category":"Bug Fixes","items":[{"title":"Clipboard Image Copying","description":"Copying images directly from web pages to the clipboard now functions reliably across all websites."}]}],"highlights":[{"title":"Compact Context Menus","description":"Redesigned the right-click menu into a compact, three-tier rotary layout with quick-navigation controls and smart tool grouping that reduces vertical height by over 60%."},{"title":"Adaptive Tool Memory","description":"Split and capture actions now remember your preferred defaults: clicking the primary button executes immediately, while selecting an alternate from the disclosure tray automatically sets it as your default for single-click actions."},{"title":"Native Context Arbiter","description":"Right-clicking video players and interactive web apps (such as YouTube, Figma, and Google Docs) surfaces the web application\'s native menu on the first click, while a consecutive click opens Apposition\'s workspace menu."}]},{"version":"1.3.1","tag":"v1.3.1","title":"Persistent Media Continuity, Live Audio Equalizer & Tactile Edge Navigation","publishedAt":"2026-09-12","categories":[{"category":"Features","items":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Communicator App Reload","description":"Added a dedicated reload button in the Communicator header to quickly refresh active web apps with visual feedback."}]},{"category":"Improvements","items":[{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."},{"title":"Tactile Edge Navigation Shelves","description":"Dragging panels to screen edges to navigate between tabs or workspaces now reveals flush, tactile bezel shelves with circular tension rings and target previews, featuring vertical shelves along the window sides for tabs and horizontal shelves along the top and bottom for workspaces."},{"title":"Real-Time Profile Details","description":"The profile switcher now updates instantly when signing into an account in any split pane, and displays connected account counts with detailed hover summaries."}]},{"category":"Bug Fixes","items":[{"title":"Automatic Account Identification","description":"Resolved an issue where signed-in accounts across workspaces were displayed with generic provider placeholders instead of their actual email address or username."},{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces, creating tabs, or splitting panes could cause panels to briefly flicker or display placeholder states, ensuring native web views remain instantly responsive."},{"title":"Continuous Background Web Sessions","description":"Background tabs and workspaces maintain their active state without unexpected reloads, preserving video progress, unsaved form inputs, and active sessions."},{"title":"Communicator Popovers & Settings","description":"Interacting with stack settings, app configuration menus, or account pickers no longer causes the Communicator drawer to inadvertently close."},{"title":"Stable Drag Focus & Screen-Edge Navigation","description":"Resolved an issue where the active panel focus ring could jitter or rapidly ping-pong while dragging panels across workspaces, and eliminated rapid duplicate tab creation when dragging near the screen edges."},{"title":"Intelligent Semantic Tab Naming","description":"Tabs now intelligently resolve authentic board, document, and channel names from live web applications, preventing cryptic database IDs, random alphanumeric routing slugs, or static brand placeholders from appearing on tabs."},{"title":"Intelligent Omnibar & Search Navigation","description":"Searching for apps like Gmail, Figma, or Notion now directly launches the application upon pressing Enter, while queries containing search terms like tutorials or tips dynamically prioritize web search results without false positives."}]}],"highlights":[{"title":"Persistent Media Playback Continuity","description":"Streaming media and video playback now reliably remember and restore your exact playback timestamp across page reloads and tab switches, seamlessly resuming where you left off."},{"title":"Interactive Audio Equalizer & Smart Indicator","description":"Active audio sessions now display a synchronized live visual equalizer across workspace tabs and the master dock control, intelligently pausing the animation when audio is muted, paused, or finished."},{"title":"Fluid Drag-and-Drop Spatial Previews","description":"When dragging a tab or panel to split the screen or dock against the entire window, existing panels now smoothly glide and compress out of the way with responsive spring transitions, showing an exact live preview of the resulting layout before you release."}]},{"version":"1.3.0","tag":"v1.3.0","title":"Introducing the App Directory, Dedicated Release Feed & Fluid Multi-Pane Navigation","publishedAt":"2026-09-11","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.3.0/app-directory.webp","categories":[{"category":"Features","items":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Tactile App Shortcuts & Split Dock","description":"Pinned shortcuts and stacked split sessions now feature tactile cursor-tracking 3D tilt with smooth elevation, keeping each shortcut isolated while completely preventing dock shift or hover flickering in narrow panels."},{"title":"Flexible Annual Plan","description":"Added a streamlined annual subscription ($120/year) alongside the limited Founder Lifetime License."}]},{"category":"Improvements","items":[{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."},{"title":"In-App Release Notes Viewer","description":"Redesigned the update viewer with a spacious layout, one-click update checks, progressive instant loading, and direct web archive navigation."},{"title":"Visual Release Previews","description":"Key milestone release notes now display high-resolution visual previews directly within the in-app release viewer and website feed."},{"title":"Enhanced Motion & Performance","description":"Optimized motion, panel transitions, and scrolling performance across all workspace navigation views."},{"title":"Clean App Catalog","description":"Removed redundant duplicate listings and disambiguated service entries across shared domains."}]},{"category":"Bug Fixes","items":[{"title":"Workspace Airspace & Transitions","description":"Resolved an issue where switching workspaces or splitting panes could cause the address bar to temporarily blank out, the profile badge to flicker, or empty panes to display a blank screen."},{"title":"Search Input & Sleep Recovery","description":"Resolved an issue where opening the App Directory from a new tab could prevent typing into the search bar, and fixed a bug where waking the computer from sleep could cause the interface to temporarily disappear."},{"title":"Command Bar Behavior","description":"Prevented accidental transitions to notes when pressing Escape in the workspace search bar."}]}],"highlights":[{"title":"Introducing the App Directory","description":"Discover, search, and launch hundreds of web apps organized across curated categories. Features an adaptive layout that provides full app details even in compact split panes, fluid 3D magnetic hover physics, instant keyboard navigation, and zero-stutter scrolling."},{"title":"Dedicated Product Changelog","description":"Browse release notes, search past updates, filter by category, and subscribe via RSS feeds directly inside the app."},{"title":"Minimalist Tab Titles","description":"Refined workspace tabs with a minimalist icon-focused view that smoothly reveals tab titles upon hover, while newly created tabs immediately present clear labels."}]},{"version":"1.2.7","tag":"v1.2.7","title":"Smart Window Persistence, Dynamic Omnibar Expansion, and Instant Cold Starts","publishedAt":"2026-09-09","categories":[{"category":"Features","items":[{"title":"Smart Window Persistence & Multi-Monitor Recovery","description":"The desktop app now seamlessly remembers your window size, position, and maximized state across restarts, and automatically rescues windows onto your main screen if an external monitor is disconnected."},{"title":"Dynamic Omnibar Expansion","description":"The address search bar now smoothly expands into available window space when editing and seamlessly morphs back into place upon dismissal, while tab labels compress smoothly under pressure without visual overlap."},{"title":"Semantic Title Distillation","description":"Tabs now automatically distill deep page titles into concise sub-task labels like Proposals, Pull requests, or Inbox instead of repeating brand names, and single tabs collapse into clean icon capsules to keep your workspace header uncluttered."}]},{"category":"Improvements","items":[{"title":"Instant Cold Starts","description":"App startup and workspace launch times are now significantly faster, eliminating initial launch freezes and accelerating background tab hydration."},{"title":"Zero-Flicker Launch","description":"The application now opens instantaneously with a fully rendered workspace, eliminating initial blank window delays and keeping active tabs immediately responsive."}]},{"category":"Bug Fixes","items":[{"title":"Duplicate Split Prevention","description":"Splitting panes via keyboard shortcuts now reliably creates a single new pane, eliminating accidental duplicate splits."},{"title":"Split View Focus Synchronization","description":"Active pane navigation and panel closing now synchronize flawlessly across split views, ensuring shortcuts like Ctrl+W consistently close the selected pane."}]}],"highlights":[{"title":"Smart Window Persistence","description":"Apposition automatically remembers your window positions and multi-monitor layouts across restarts."},{"title":"Dynamic Omnibar Expansion","description":"The address and search bar smoothly adapts to fit long queries and collapses into a compact capsule."},{"title":"Instant Cold Starts","description":"Workspaces and active panes now launch instantaneously with zero initial blank window lag."}]},{"version":"1.2.6","tag":"v1.2.6","title":"Seamless Workspace Dropdowns & Visual Branding Polish","publishedAt":"2026-09-09","categories":[{"category":"Improvements","items":[{"title":"Consolidated Brand Mark","description":"Updated all application installer assets and web icons to consistently display the refreshed brand mark across tabs and installer dialogs."}]},{"category":"Bug Fixes","items":[{"title":"Dropdown Menu Stability","description":"Resolved an issue where dropdown menus, selection filters, and model pickers in web workspaces would immediately collapse when clicked."},{"title":"Address Bar Hijack Guard","description":"Resolved an issue where websites containing embedded frames or interactive widgets could unexpectedly hijack the active tab address bar."}]}],"highlights":[{"title":"Dropdown Menu Stability","description":"Dropdown pickers and menus in web applications now stay open reliably during interaction."},{"title":"Address Bar Hijack Guard","description":"Embedded iframes are prevented from modifying tab address state unexpectedly."}]},{"version":"1.2.5","tag":"v1.2.5","title":"Self-Serve Device Licensing, Polished Brand Identity & 35% Partner Program","publishedAt":"2026-09-08","categories":[{"category":"Features","items":[{"title":"Self-Serve Device Licensing","description":"Added seamless in-app and web license checkout, self-serve device seat management directly from Account settings, and launched the 35% Partner Program."}]},{"category":"Improvements","items":[{"title":"Refreshed Visual Identity","description":"Updated the official application icon, website branding, and browser tab favicons with our new split-monolith visual identity."}]}],"highlights":[{"title":"Self-Serve Device Licensing","description":"Manage active device seats and license transfers directly from your Account settings screen."},{"title":"35% Partner Program","description":"Earn recurring rewards for referring teams and collaborators to Apposition."}]},{"version":"1.2.4","tag":"v1.2.4","title":"Silent Background Updates & Precision Workspace Controls","publishedAt":"2026-09-05","categories":[{"category":"Features","items":[{"title":"Dedicated Drawer Resize Controls","description":"Dedicated drawer resize controls in the header and settings menu to customize your workspace layout with precision."},{"title":"Silent Background Updates","description":"Seamless background application updates that download quietly and apply instantly upon restart without interrupting your work."}]},{"category":"Improvements","items":[{"title":"Smarter Omnibar Search Classification","description":"Reliably differentiates search queries from web addresses, ensuring terms like code snippets or decimal numbers open web searches correctly."},{"title":"Anchored Popover Dialogs","description":"Add App and Stack configuration menus now open cleanly as anchored popovers without dimming the workspace."}]},{"category":"Bug Fixes","items":[{"title":"Search Query Desync Fix","description":"Fixed an issue where search queries typed into the address bar were intermittently dropped or desynchronized when navigating."},{"title":"Google Search Redirection Guard","description":"Resolved unexpected authentication prompts and redirection loops when browsing Google search results."}]}],"highlights":[{"title":"Silent Background Updates","description":"Updates download in the background without popups or work interruptions."},{"title":"Workspace Drawer Controls","description":"Fine-tune sidebar and drawer dimensions with tactile resize handles."}]},{"version":"1.2.3","tag":"v1.2.3","title":"Workspace Isolation & Tab Management Polish","publishedAt":"2026-09-02","categories":[{"category":"Features","items":[{"title":"Strict Workspace Sandboxing","description":"Dedicated profile cookies and storage partitions across isolated tabs."}]},{"category":"Improvements","items":[{"title":"Fluid Tab Switching","description":"Zero-latency keyboard shortcuts to cycle through workspaces and tabs."}]}],"highlights":[{"title":"Strict Workspace Sandboxing","description":"Completely isolated session cookies and partitions per tab."}]},{"version":"1.2.2","tag":"v1.2.2","title":"Connected Account Detection & Precision Workspace Isolation","publishedAt":"2026-08-31","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.2/profile-isolation.webp","categories":[{"category":"Features","items":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."}]},{"category":"Improvements & Fixes","items":[{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."},{"title":"Enhanced connected account identification and","description":"Enhanced connected account identification and avatar presentation in pane headers, omniboxes, and workspace menus."}]}],"highlights":[{"title":"Added automated connected account detection","description":"Added automated connected account detection across workspace profiles with one-click authentication and live session status."},{"title":"Introduced instant email and handle","description":"Introduced instant email and handle copying, account filtering, and refined color themes for profile management."},{"title":"Restored seamless pointer event isolation","description":"Restored seamless pointer event isolation across multi-pane split layouts, preventing focus drift when interacting with profile popovers."}]},{"version":"1.2.1","tag":"v1.2.1","title":"Floating Communicator Hub, Fluid Spatial Drag, and Workspace Interaction Polish","publishedAt":"2026-08-31","categories":[{"category":"Features","items":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."}]},{"category":"Improvements","items":[{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."},{"title":"Improved modal dialogs and overlay","description":"Improved modal dialogs and overlay menus to close smoothly on outside clicks or the Escape key."}]},{"category":"Bug Fixes","items":[{"title":"The floating Communicator now stays","description":"The floating Communicator now stays reliably on top of all workspace panes, eliminates visual bleed-through from background pages, and smoothly dismisses whenever you click outside."},{"title":"Fixed an issue where interacting","description":"Fixed an issue where interacting with web applications and links inside split panels could cause unexpected page reloads or unrendered views."}]}],"highlights":[{"title":"Introduced the Communicator Hub","description":"seamlessly access your messengers and work inboxes with instant hover peek, customizable stacks, session-isolated profiles, and full floating palette support."},{"title":"Refined the Communicator Hub with","description":"Refined the Communicator Hub with fluid drag-to-float window physics, magnetic corner docking, and a streamlined capsule header."},{"title":"Streamlined messaging app layouts with","description":"Streamlined messaging app layouts with smooth zero-latency dragging and crisp edge-to-edge content framing for web apps like Gmail and Slack."}]},{"version":"1.2.0","tag":"v1.2.0","title":"Next-Gen Spatial Engine & Universal Communicator","publishedAt":"2026-08-27","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.2.0/communicator-hub.webp","categories":[{"category":"Features","items":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for Slack, Gmail, Telegram, and Discord."},{"title":"Dynamic Split Panes","description":"Tactile drag-and-drop spatial multi-pane tiling with zero webview reloads."}]}],"highlights":[{"title":"Universal Communicator Hub","description":"Unified floating messaging cluster for all your daily apps."},{"title":"Dynamic Split Panes","description":"Tactile spatial tiling with zero pane reloads."}]},{"version":"1.1.8","tag":"v1.1.8","title":"Stability Fixes, Install Improvements & Google Sign-in Reliability","publishedAt":"2026-08-23","categories":[{"category":"Bug Fixes","items":[{"title":"Fixed a rare crash that","description":"Fixed a rare crash that could close the entire app unexpectedly while browsing."},{"title":"Resolved an issue where certain","description":"Resolved an issue where certain network requests and cross-origin authentications could cause the application to crash unexpectedly."}]},{"category":"Sign-in & Accounts","items":[{"title":"Signing in with Google now","description":"Signing in with Google now works reliably inside panels as well as the dedicated login window - including retries after a failed attempt."},{"title":"Google sign-in no longer interrupts","description":"Google sign-in no longer interrupts you with Windows passkey popups; it goes straight to password entry."}]},{"category":"Improvements","items":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]}],"highlights":[{"title":"Streamlined one-click installation and clipboard","description":"Streamlined one-click installation and clipboard copy commands across download guides."}]},{"version":"1.1.7","tag":"v1.1.7","title":"Resilient Startup & Seamless Session Recovery","publishedAt":"2026-08-22","categories":[{"category":"Improvements & Bug Fixes","items":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]}],"highlights":[{"title":"Resolved an intermittent startup interruption","description":"Resolved an intermittent startup interruption on desktop sessions and introduced automatic background session self-healing to seamlessly recover tabs and active workspaces."},{"title":"Streamlined cross-platform installer setup with","description":"Streamlined cross-platform installer setup with guided post-download instructions for smoother initial onboarding."},{"title":"Optimized modal rendering layers and","description":"Optimized modal rendering layers and window transitions for smoother workspace interactions."}]},{"version":"1.1.6","tag":"v1.1.6","title":"Seamless Media Continuity, Instant Tab Restoration & Streamlined Installers","publishedAt":"2026-08-20","categories":[{"category":"Features","items":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Streamlined Setup & Package Managers","description":"Introduced a distraction-free installation assistant with one-click terminal setup for macOS, Windows, and Linux, plus instant cryptographic verification."}]},{"category":"Improvements & Fixes","items":[{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."},{"title":"Immediate Split Pane Reflow","description":"Closing split panes now instantly reflows remaining views with zero delay and completely halts background audio upon close."},{"title":"Reliable Keyboard Navigation","description":"Workspace shortcuts now reliably trigger even when active web apps attempt to capture keyboard focus."}]}],"highlights":[{"title":"Background Media Continuity","description":"Playing videos and background audio now persist seamlessly without reloads or interruptions when switching between tabs and workspaces."},{"title":"Workspace-Isolated Audio Indicators","description":"Animated equalizer waves now indicate audio playback strictly within their active workspace."},{"title":"Instant Tab & Pane Undo","description":"Reopening closed tabs and split panes (Ctrl+Shift+T) is now instant, accompanied by a live visual undo notification showing site favicons."}]},{"version":"1.1.5","tag":"v1.1.5","title":"Spatial Navigation, Omnibox Browser Bar & Audio Multitasking","publishedAt":"2026-08-18","heroImage":"https://github.com/jvondev/apposition-releases/releases/download/v1.1.5/apposition-v1.1.5-spatial-navigation.png","categories":[{"category":"Features","items":[{"title":"Top-Center Omnibox Browser Bar","description":"Browser navigation bar with omnibox search suggestions, back/forward history, and quick layout actions."},{"title":"3-Way Spatial Layout Mode","description":"Toggle for docked, floating overlap, and full collapse views with persistent user preferences."},{"title":"Panel Dynamic Island & Focus Mode","description":"Distraction-free single-pane work triggered with Alt+F shortcut."}]},{"category":"Improvements","items":[{"title":"Responsive Soundwave Indicator","description":"Tabs display live soundwaves when audio is playing, with instant one-click muting."},{"title":"Synchronized Spatial Grid","description":"Refined window border margins, split gaps, and drop snap ghosts onto a synchronized grid."}]},{"category":"Bug Fixes","items":[{"title":"Window Control Hit-Testing","description":"Optimized window control responsiveness and hit-testing across all edge layout modes."}]}],"highlights":[{"title":"Top-Center Omnibox Browser Bar","description":"Instant search suggestions and quick layout actions right from the header."},{"title":"3-Way Spatial Layout Mode","description":"Docked, floating overlap, and full collapse workspace arrangements."},{"title":"Audio Indicator & 1-Click Mute","description":"Live soundwaves on active tabs with instant one-click muting."}]},{"version":"1.1.4","tag":"v1.1.4","title":"Multi-Profile Single Sign-On & Persistent Session Sync","publishedAt":"2026-08-18","categories":[{"category":"Features","items":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."}]},{"category":"Improvements","items":[{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."},{"title":"Profile switching preserves the exact","description":"Profile switching preserves the exact active webpage without accidental sign-outs."},{"title":"Profile switcher rows now feature","description":"Profile switcher rows now feature full-width selection highlights and floating hover micro-actions."}]},{"category":"Fixes","items":[{"title":"Switching profiles on a split","description":"Switching profiles on a split pane now instantly switches session partitions and cookies without latency."},{"title":"Active account logins and cookies","description":"Active account logins and cookies are now reliably preserved across app restarts and system sleep."},{"title":"Workspace quick-switching via Command Palette","description":"Workspace quick-switching via Command Palette now previews icons with keyboard navigation."}]}],"highlights":[{"title":"Redesigned the profile manager with","description":"Redesigned the profile manager with an instant Single Sign-On provider bar, streamlined profile settings, and dynamic active pane detection."},{"title":"Added an interactive profile switcher","description":"Added an interactive profile switcher popover with the Alt+P shortcut and full arrow-key keyboard navigation."},{"title":"Opening or splitting panes under","description":"Opening or splitting panes under the same profile now automatically synchronizes login sessions in real time."}]},{"version":"1.1.3","tag":"v1.1.3","title":"Seamless System Browser Sign-In, Workspace Context Menus & Enhanced Navigation","publishedAt":"2026-08-16","categories":[{"category":"Features","items":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"History Jump Menu & Navigation Shortcuts","description":"Long-press or right-click the back/forward navigation buttons to open a visual jump menu with site icons, or navigate back and forward instantly using Ctrl+[ and Ctrl+]."},{"title":"Power-User Search Keywords","description":"Address inputs now resolve Google Search directly with instant search engine shortcut keywords for YouTube, GitHub, and Google Drive."}]},{"category":"Improvements","items":[{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."},{"title":"Streamlined Single-Click Setup","description":"Windows installation is now completely silent and lock-free, with instant setup and automatic workspace layout restoration on launch."},{"title":"Fluid Floating Island Transitions","description":"Refined hovering and edge cursor tracking for floating window controls, preventing accidental window collapses and preserving direct click access to underlying web elements."}]},{"category":"Bug Fixes","items":[{"title":"Resilient Split Pane Sessions","description":"Closing a split pane no longer triggers unnecessary page reloads or active session interruptions in adjacent open panes."},{"title":"Reliable Embedded Shortcut Handling","description":"Fixed an issue where keyboard navigation shortcuts could become unresponsive while focused inside web panels, restoring instant focus upon clicking into any pane."},{"title":"Display Scaling Alignment","description":"Resolved an issue where interactive workspace preview tiles appeared scaled down or misaligned on smaller displays."},{"title":"Login Compatibility","description":"Eliminated unexpected firewall prompts and resolved authentication dialog blocks across third-party web services."}]}],"highlights":[{"title":"Seamless System Browser Sign-In","description":"Sign in to Google Workspace, Slack, Notion, and other protected services using your default browser with 1-click verification."},{"title":"Pane Context Menu & Reload Controls","description":"Right-click anywhere in an active pane to access quick navigation, clipboard tools, pane splitting, and workspace layout controls, or quickly refresh active panes using standard keyboard shortcuts (Ctrl+R / F5 / Ctrl+Shift+R)."},{"title":"Performance & Memory Efficiency","description":"Dramatically reduced memory consumption and input latency when running demanding web applications like Canva and Figma, with smoother split resizing and faster workspace loading."}]},{"version":"1.1.2","tag":"v1.1.2","title":"Zero-Reload Split Persistence & 120 FPS Resizing","publishedAt":"2026-08-13","categories":[{"category":"Improvements","items":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"category":"Bug Fixes","items":[{"title":"Fixed an issue where first-time","description":"Fixed an issue where first-time installations could render an empty screen by guaranteeing robust default workspace and tab initialization."}]}],"highlights":[{"title":"Added options in the Windows","description":"Added options in the Windows installer to create Desktop and Start Menu shortcuts, and enable one-click launch immediately after installation."},{"title":"Integrated single-instance protection to prevent","description":"Integrated single-instance protection to prevent accidental duplicate instances and ensure smooth window focusing."},{"title":"Pane state and active documents","description":"Pane state and active documents now remain completely persistent without reloading during split navigation, tab changes, and dragging, alongside real-time 120 FPS split resizing."}]},{"version":"1.1.1","tag":"v1.1.1","title":"Layout History, Spatial Keyboard Swapping & Crash Recovery","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added visual audio activity indicators","description":"Added visual audio activity indicators on active tabs to easily identify audio sources across complex multi-pane workspaces."},{"title":"Added intelligent address bar navigation","description":"Added intelligent address bar navigation for local development ports, alongside a one-click terminal install option."}]},{"category":"Improvements","items":[{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."},{"title":"Completely redesigned the pane toolbar","description":"Completely redesigned the pane toolbar with a jitter-free tactile aesthetic and refined double-bezel styling."},{"title":"Upgraded tab hover tooltips to","description":"Upgraded tab hover tooltips to instantly display rich session context with a polished tactile feel."},{"title":"Enhanced workspace docking and pane","description":"Enhanced workspace docking and pane splitting reliability with smoother drag transitions and robust offline session persistence."}]},{"category":"Bug Fixes","items":[{"title":"Fixed a startup crash on","description":"Fixed a startup crash on Windows and macOS caused by an engine compilation mismatch, and ensured the official Apposition icon displays correctly across all desktop platforms."},{"title":"Resolved an issue where dragging","description":"Resolved an issue where dragging panels in workspaces with multiple panes could cause duplicate panels, layout freezes, or dropped keyboard shortcuts."},{"title":"Resolved an issue where closing","description":"Resolved an issue where closing the final tab or pane in a workspace could cause the interface to freeze or display an empty background."},{"title":"Resolved navigation bugs that caused","description":"Resolved navigation bugs that caused the search input to occasionally lose typed text or drop focus when switching workspaces."},{"title":"Resolved an issue where rapidly","description":"Resolved an issue where rapidly switching workspaces could cause tabs to display the wrong environment."}]}],"highlights":[{"title":"Added support for Layout History","description":"Added support for Layout History with Undo (Ctrl+Alt+Z) and Redo (Ctrl+Alt+Y), allowing you to instantly revert layout adjustments."},{"title":"Added keyboard shortcuts (Alt+Shift+Arrows) to","description":"Added keyboard shortcuts (Alt+Shift+Arrows) to swiftly swap adjacent panels or cycle stacking direction at screen edges."},{"title":"Added tactile splitter handles, clean","description":"Added tactile splitter handles, clean boundary previews when docking panels, and a self-healing layout recovery system."}]},{"version":"1.1.0","tag":"v1.1.0","title":"Seamless Updates, Standalone Inspector & Draggable Tabs","publishedAt":"2026-08-12","categories":[{"category":"Features","items":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Opening the Inspector (F12) now","description":"Opening the Inspector (F12) now launches a clean, standalone floating window instead of squeezing into a sidebar."},{"title":"You can now view our","description":"You can now view our latest release notes in a dedicated popover and submit feedback directly from the new sidebar Support Cluster without leaving your workspace."},{"title":"Opening external links from the","description":"Opening external links from the changelog now seamlessly creates a new workspace tab instead of launching an external browser."}]},{"category":"Improvements","items":[{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."},{"title":"Dragging a pane into an","description":"Dragging a pane into an empty tab now cleanly replaces it with a clear visual drop preview, and moving panes between tabs no longer leaves behind orphaned blank tabs."},{"title":"Dragging the last panel out","description":"Dragging the last panel out of a tab or workspace now automatically cleans up the empty space instead of leaving an abandoned tab."}]},{"category":"Bug Fixes","items":[{"title":"Re-engineered the window manager to","description":"Re-engineered the window manager to completely eliminate cursor jitter and flickering when hovering over panes, while ensuring floating buttons and menus remain perfectly responsive."},{"title":"Resolved multi-window shortcut conflicts, ensuring","description":"Resolved multi-window shortcut conflicts, ensuring actions like splitting panels, closing tabs, and swiping between workspaces are perfectly instantaneous and correctly targeted."},{"title":"Fixed an issue where the","description":"Fixed an issue where the search bar would not automatically receive keyboard focus when opening a new tab or switching back to an empty tab."},{"title":"Resolved an issue that caused","description":"Resolved an issue that caused active workspace panels to unexpectedly refresh or blink when opening the settings menu."}]}],"highlights":[{"title":"Apposition now automatically detects new","description":"Apposition now automatically detects new versions and lets you restart to apply them with a single click."},{"title":"Added a manual \\"Check for","description":"Added a manual \\"Check for Updates\\" button in the Account Settings menu."},{"title":"Dragging a pane to the","description":"Dragging a pane to the edge of the screen to switch tabs or workspaces is now significantly faster, visually sharper, and correctly transfers the pane without it disappearing."}]},{"version":"1.0.0","tag":"v1.0.0","title":"Initial Launch of Apposition","publishedAt":"2026-08-02","categories":[{"category":"Features","items":[{"title":"Multi-Pane Workspace Canvas","description":"The digital workspace designed for deep parallel work without tab chaos."}]}],"highlights":[{"title":"Multi-Pane Workspace Canvas","description":"Organize web applications and accounts in one unified window."}]}]');
 function initChangelogIpc() {
   electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
     const currentVersion = electron.app.getVersion();
@@ -9851,104 +10274,6 @@ function initCommunicatorIpc(getWindow) {
     }
   });
 }
-function destroyAllViews() {
-  for (const [paneId, view] of Array.from(viewRegistry.activeViews.entries())) {
-    try {
-      viewRegistry.unregisterView(paneId);
-      if (!view.webContents.isDestroyed()) {
-        view.webContents.close();
-      }
-    } catch {
-    }
-  }
-}
-createLogger("VIEW");
-function initViewIpc() {
-  electron.ipcMain.on("view.registerWebContents", (_event, paneId, wcId) => {
-    if (paneId && typeof wcId === "number") {
-      viewRegistry.webContentsIdToPaneId.set(wcId, paneId);
-    }
-  });
-  electron.ipcMain.on("pane.clicked", (event) => {
-    for (const [paneId, view] of activeViews) {
-      if (view.webContents === event.sender) {
-        if (global.overlayWindow && !global.overlayWindow.isDestroyed()) {
-          global.overlayWindow.webContents.send("pane.focused", paneId);
-        }
-        break;
-      }
-    }
-  });
-  electron.ipcMain.on("view.openDevTools", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (!view || view.webContents.isDestroyed()) return;
-    if (view.webContents.isDevToolsOpened()) return;
-    activeViews.forEach((v) => {
-      if (!v.webContents.isDestroyed() && v.webContents.isDevToolsOpened()) {
-        v.webContents.closeDevTools();
-      }
-    });
-    view.webContents.openDevTools({ mode: "undocked" });
-  });
-  electron.ipcMain.on("view.closeDevTools", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.closeDevTools();
-    }
-  });
-  electron.ipcMain.on("view.hideDevTools", () => {
-    activeViews.forEach((v) => {
-      if (!v.webContents.isDestroyed()) v.webContents.closeDevTools();
-    });
-  });
-  electron.ipcMain.on("view.zoomIn", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      const level = view.webContents.getZoomLevel();
-      view.webContents.setZoomLevel(level + 0.5);
-    }
-  });
-  electron.ipcMain.on("view.zoomOut", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      const level = view.webContents.getZoomLevel();
-      view.webContents.setZoomLevel(level - 0.5);
-    }
-  });
-  electron.ipcMain.on("view.zoomReset", (_, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setZoomLevel(0);
-    }
-  });
-  electron.ipcMain.on("view.sleep", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setBackgroundThrottling(true);
-      view.webContents.setAudioMuted(true);
-      view.setBounds({ x: -1e4, y: -1e4, width: 0, height: 0 });
-    }
-  });
-  electron.ipcMain.on("view.wake", (_event, paneId, bounds) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.setBackgroundThrottling(false);
-      view.webContents.setAudioMuted(false);
-      if (bounds) view.setBounds(bounds);
-    }
-  });
-  electron.ipcMain.removeAllListeners("auth:trigger-autofill");
-  electron.ipcMain.on("auth:trigger-autofill", (_event, paneId) => {
-    const view = activeViews.get(paneId);
-    if (view && !view.webContents.isDestroyed()) {
-      view.webContents.send("auth:trigger-autofill");
-    }
-  });
-}
-function initViewManager() {
-  initCaptureIpc();
-  initViewIpc();
-}
 const patchedSessions = /* @__PURE__ */ new WeakSet();
 function configureSessionSecurity(session) {
   if (!session || patchedSessions.has(session) || session.__securityHeadersBound) return;
@@ -10095,131 +10420,6 @@ function initSessionSecurity() {
     }
   });
 }
-const DEFAULT_CACHE_QUOTA_BYTES = 250 * 1024 * 1024;
-class StorageQuotaService {
-  isPruning = false;
-  async prunePartition(partition, thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
-    try {
-      const ses = electron.session.fromPartition(partition);
-      const cacheSize = await ses.getCacheSize();
-      if (cacheSize > thresholdBytes) {
-        logger$5.info(
-          `[StorageQuota] Partition ${partition} cache (${Math.round(cacheSize / 1024 / 1024)}MB) exceeds quota (${Math.round(thresholdBytes / 1024 / 1024)}MB). Pruning transient caches...`
-        );
-        await ses.clearStorageData({
-          storages: ["shadercache", "serviceworkers", "cachestorage"]
-        });
-        await ses.clearCache();
-        logger$5.info(`[StorageQuota] Partition ${partition} cache successfully pruned.`);
-        return true;
-      }
-    } catch (err) {
-      logger$5.debug(`[StorageQuota] Failed to prune partition ${partition}:`, err);
-    }
-    return false;
-  }
-  async pruneAllPartitions(thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
-    if (this.isPruning) return;
-    this.isPruning = true;
-    try {
-      const profiles = getProfiles() || [];
-      const partitions = /* @__PURE__ */ new Set([
-        "persist:main",
-        ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
-      ]);
-      for (const part of partitions) {
-        await this.prunePartition(part, thresholdBytes);
-      }
-    } finally {
-      this.isPruning = false;
-    }
-  }
-  initBackgroundPruner() {
-    setInterval(() => {
-      this.pruneAllPartitions().catch(() => {
-      });
-    }, 15 * 60 * 1e3);
-  }
-}
-const storageQuota = new StorageQuotaService();
-async function flushAllSessions() {
-  try {
-    const profiles = getProfiles();
-    const partitions = /* @__PURE__ */ new Set([
-      "persist:main",
-      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
-    ]);
-    for (const part of partitions) {
-      try {
-        const ses = electron.session.fromPartition(part);
-        await ses.flushStorageData();
-      } catch (err) {
-        logger$5.debug(`Flush failed for ${part}`, err);
-      }
-    }
-    await electron.session.defaultSession.flushStorageData();
-  } catch (e) {
-    logger$5.warn("Failed to flush session storage", e);
-  }
-}
-const monitoredPartitions = /* @__PURE__ */ new Set();
-function monitorPartitionCookies(partition) {
-  if (monitoredPartitions.has(partition)) return;
-  monitoredPartitions.add(partition);
-  try {
-    const ses = electron.session.fromPartition(partition);
-    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
-      if (!removed && cause === "explicit") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("partition.cookie-changed", {
-            partition,
-            domain: cookie.domain,
-            name: cookie.name
-          });
-        }
-      }
-    });
-  } catch (e) {
-    logger$5.debug(`Failed to attach cookie monitor for ${partition}`, e);
-  }
-}
-function initSessionPersistenceHooks() {
-  try {
-    electron.powerMonitor.on("suspend", async () => {
-      logger$5.info("System suspending - flushing session data to disk");
-      await flushAllSessions();
-      await storageQuota.pruneAllPartitions();
-    });
-    storageQuota.initBackgroundPruner();
-    electron.powerMonitor.on("resume", () => {
-      logger$5.info("System resumed from suspend - verifying app overlay and views");
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        syncAppOverlayBounds(global.mainWindow);
-      }
-      const overlay = global.appOverlayView;
-      if (overlay && !overlay.webContents.isDestroyed()) {
-        if (overlay.webContents.isCrashed()) {
-          logger$5.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
-          overlay.webContents.reload();
-        } else {
-          overlay.webContents.send("app:env", { nativeViews: true });
-        }
-      }
-    });
-    setInterval(() => {
-      flushAllSessions().catch(() => {
-      });
-    }, 6e4);
-    monitorPartitionCookies("persist:main");
-    const profiles = getProfiles();
-    for (const p of profiles) {
-      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
-      monitorPartitionCookies(part);
-    }
-  } catch (e) {
-    logger$5.warn("PowerMonitor / Cookie monitor hook unavailable", e);
-  }
-}
 function initNetworkOptimizer() {
   const defaultSession = electron.session.defaultSession;
   electron.ipcMain.on("net.prefetch", (_, rawUrl) => {
@@ -10236,91 +10436,6 @@ function initNetworkOptimizer() {
     } catch {
     }
   });
-}
-const handleDeepLink = (url) => {
-  if (!url || !url.startsWith("apposition://")) return;
-  const attribution = parseAttributionFromUrl(url);
-  if (attribution) {
-    setMemoryAttribution(attribution);
-    saveAttribution(attribution);
-  }
-  const deepPath = url.replace("apposition://", "");
-  if (deepPath.startsWith("workspace/")) {
-    const workspaceId = deepPath.replace("workspace/", "");
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send("app.deep-link.workspace", workspaceId);
-    }
-  } else if (deepPath.startsWith("license") || deepPath.startsWith("activate")) {
-    try {
-      const urlObj = new URL(url);
-      const key = urlObj.searchParams.get("key") || urlObj.searchParams.get("license_key");
-      const email = urlObj.searchParams.get("email") || urlObj.searchParams.get("user_email") || void 0;
-      if (key) {
-        activateLicenseKey(key, email).then((result) => {
-          if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-            global.mainWindow.webContents.send("app.deep-link.license", {
-              key,
-              email,
-              success: result.success,
-              requiresEmail: result.requiresEmail,
-              error: result.error
-            });
-          }
-        });
-      }
-    } catch (e) {
-      console.error("Failed to parse license deep link", e);
-    }
-  } else if (deepPath.startsWith("oauth-callback") || deepPath.startsWith("auth/callback")) {
-    try {
-      const urlObj = new URL(url);
-      const token = urlObj.searchParams.get("token");
-      const code = urlObj.searchParams.get("code");
-      const state = urlObj.searchParams.get("state");
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        global.mainWindow.webContents.send("app.deep-link.oauth", {
-          token,
-          code,
-          state,
-          rawUrl: url
-        });
-      }
-    } catch (e) {
-      console.error("Failed to parse oauth callback url", e);
-    }
-  }
-};
-function initDeepLinking() {
-  if (process.defaultApp) {
-    if (process.argv.length >= 2) {
-      electron.app.setAsDefaultProtocolClient("apposition", process.execPath, [
-        path__namespace.resolve(process.argv[1])
-      ]);
-    }
-  } else {
-    electron.app.setAsDefaultProtocolClient("apposition");
-  }
-  const gotTheLock2 = electron.app.requestSingleInstanceLock();
-  if (!gotTheLock2) {
-    electron.app.quit();
-  } else {
-    electron.app.on("second-instance", (_event, commandLine) => {
-      if (global.mainWindow) {
-        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-        global.mainWindow.focus();
-      }
-      const url = commandLine.find((arg) => arg.startsWith("apposition://"));
-      handleDeepLink(url);
-    });
-    electron.app.on("open-url", (event, url) => {
-      event.preventDefault();
-      if (global.mainWindow) {
-        if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-        global.mainWindow.focus();
-      }
-      handleDeepLink(url);
-    });
-  }
 }
 const logger$4 = createLogger("UPDATE");
 const REPO_URL = "https://github.com/jvondev/apposition-releases";
@@ -10522,6 +10637,13 @@ function downloadFileWithProgress(url, destPath, onProgress) {
 }
 const logger$3 = createLogger("UPDATE");
 const execFileAsync = util.promisify(child_process.execFile);
+function resolveDestinationApp(execPath = process.execPath) {
+  const match = execPath.match(/^(.+?\.app)(?:\/.*)?$/);
+  if (match && !match[1].startsWith("/Volumes/")) {
+    return match[1];
+  }
+  return "/Applications/Apposition.app";
+}
 class MacosUpdateDriver {
   name = "macos-dmg";
   targetVersion;
@@ -10576,7 +10698,7 @@ class MacosUpdateDriver {
     const dmgPath = this.downloadedDmgPath;
     const tempDir = electron.app.getPath("temp");
     const mountDir = path.join(tempDir, `apposition-mount-${Date.now()}`);
-    const destApp = "/Applications/Apposition.app";
+    const destApp = resolveDestinationApp();
     try {
       logger$3.info(`Mounting DMG ${dmgPath} to ${mountDir}`);
       await fs.promises.mkdir(mountDir, { recursive: true });
@@ -10587,22 +10709,70 @@ class MacosUpdateDriver {
         throw new Error("Could not find .app in mounted DMG.");
       }
       const srcApp = path.join(mountDir, appFolder);
-      logger$3.info(`Replacing ${destApp} with ${srcApp}`);
-      if (fs.existsSync(destApp)) {
-        await fs.promises.rm(destApp, { recursive: true, force: true });
-      }
-      await fs.promises.cp(srcApp, destApp, { recursive: true });
-      await execFileAsync("xattr", ["-dr", "com.apple.quarantine", destApp]).catch(() => {
+      const workerScriptPath = path.join(tempDir, `apposition-update-worker-${Date.now()}.sh`);
+      const logFile = path.join(electron.app.getPath("userData"), "update-worker.log");
+      const scriptContent = `#!/bin/bash
+set -u
+PID="$1"
+SRC="$2"
+DEST="$3"
+MOUNT="$4"
+DMG="$5"
+LOG="$6"
+
+echo "=== Apposition macOS Update Worker ===" >> "$LOG"
+echo "Target: $DEST" >> "$LOG"
+echo "Source: $SRC" >> "$LOG"
+
+# 1. Wait for parent PID to exit cleanly (max 15s)
+COUNT=0
+while kill -0 "$PID" 2>/dev/null; do
+  sleep 0.2
+  COUNT=$((COUNT + 1))
+  if [ "$COUNT" -ge 75 ]; then
+    kill -9 "$PID" 2>/dev/null || true
+    sleep 0.2
+    break
+  fi
+done
+
+# 2. Atomic bundle copy with Apple ditto tool (preserves Mach-O permissions & symlinks)
+rm -rf "$DEST"
+ditto "$SRC" "$DEST"
+
+# 3. Ensure executable permission on binary
+chmod -R a+rx "$DEST/Contents/MacOS" 2>/dev/null || true
+
+# 4. Clear Gatekeeper quarantine
+xattr -cr "$DEST" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+
+# 5. Detach DMG and clean temp
+hdiutil detach "$MOUNT" -quiet -force 2>/dev/null || true
+rm -f "$DMG" 2>/dev/null || true
+
+# 6. Relaunch fresh application
+open -n -a "$DEST"
+echo "Update applied successfully!" >> "$LOG"
+`;
+      await fs.promises.writeFile(workerScriptPath, scriptContent, { mode: 493 });
+      logger$3.info(`Spawning detached macOS update worker for ${destApp}...`);
+      const child = child_process.spawn("/bin/bash", [
+        workerScriptPath,
+        String(process.pid),
+        srcApp,
+        destApp,
+        mountDir,
+        dmgPath,
+        logFile
+      ], {
+        detached: true,
+        stdio: "ignore"
       });
-      await execFileAsync("hdiutil", ["detach", mountDir, "-quiet"]).catch(() => {
-      });
-      await fs.promises.rm(dmgPath, { force: true }).catch(() => {
-      });
-      logger$3.info("macOS in-place update completed. Relaunching application...");
-      electron.app.relaunch({ execPath: path.join(destApp, "Contents/MacOS/Apposition") });
-      electron.app.quit();
+      child.unref();
+      electron.app.exit(0);
     } catch (err) {
-      logger$3.error("Failed to perform in-place macOS update", err?.message || err);
+      logger$3.error("Failed to stage macOS update worker", err?.message || err);
       await execFileAsync("hdiutil", ["detach", mountDir, "-quiet"]).catch(() => {
       });
       throw err;
@@ -10641,7 +10811,7 @@ class LinuxUpdateDriver {
         downloadUrl,
         manualActionRequired: true,
         manualReason: "linux-deb",
-        terminalCommand: "sudo dpkg -i apposition_*.deb"
+        terminalCommand: "curl -fsSL https://raw.githubusercontent.com/jvondev/apposition-releases/main/scripts/install-linux.sh | bash"
       };
     }
     const appImageAsset = release.assets.find((a) => /\.AppImage$/i.test(a.name));
@@ -10682,9 +10852,14 @@ class LinuxUpdateDriver {
       await fs.promises.rename(tempInSameDir, currentAppImage);
       await fs.promises.rm(this.downloadedAppImagePath, { force: true }).catch(() => {
       });
-      logger$2.info("Linux AppImage in-place update completed. Relaunching application...");
-      electron.app.relaunch({ execPath: currentAppImage });
-      electron.app.quit();
+      logger$2.info("Linux AppImage in-place update completed. Spawning detached process...");
+      const child = child_process.spawn(currentAppImage, process.argv.slice(1), {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, APPIMAGE: currentAppImage }
+      });
+      child.unref();
+      electron.app.exit(0);
     } catch (err) {
       await fs.promises.rm(tempInSameDir, { force: true }).catch(() => {
       });
@@ -11045,38 +11220,6 @@ function initDevCommandBridge(isDevMode2) {
     setInterval(checkCommand, 1e3);
   }
 }
-const SENTRY_DSN = "https://3ba04162b13edeaa2ea17feaaabc1f4b@o4511953085005824.ingest.us.sentry.io/4511953228267520";
-let isDev = true;
-function initMainSentry(isDevMode2) {
-  isDev = isDevMode2;
-  if (isDevMode2) {
-    return;
-  }
-  try {
-    Sentry__namespace.init({
-      dsn: SENTRY_DSN,
-      release: `apposition@${electron.app.getVersion()}`,
-      environment: "production",
-      enabled: !isDevMode2,
-      sampleRate: 1,
-      beforeSend(event) {
-        if (isDevMode2) return null;
-        return sanitizeSentryEvent(event);
-      }
-    });
-  } catch (err) {
-    console.error("Failed to initialize Sentry in main process", err);
-  }
-}
-function captureMainException(err, context) {
-  if (isDev) return;
-  try {
-    Sentry__namespace.captureException(err, {
-      extra: context
-    });
-  } catch {
-  }
-}
 function setupMacApplicationMenu() {
   if (process.platform !== "darwin") {
     electron.Menu.setApplicationMenu(null);
@@ -11123,81 +11266,6 @@ function setupMacApplicationMenu() {
   ];
   const menu = electron.Menu.buildFromTemplate(template);
   electron.Menu.setApplicationMenu(menu);
-}
-let overlayPreloadPath = "";
-const transientSpecs = /* @__PURE__ */ new Map();
-function initOverlayProjector(getWindow, preloadPath = "") {
-  overlayPreloadPath = preloadPath;
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.SHOW, (_e, specs) => {
-    const win = getWindow();
-    if (!win) return;
-    const desired = new Set(specs.map((s) => s.id));
-    const state = composers.get(win.id);
-    if (!state) return;
-    let specsForWin = transientSpecs.get(win.id);
-    if (!specsForWin) {
-      specsForWin = /* @__PURE__ */ new Map();
-      transientSpecs.set(win.id, specsForWin);
-    }
-    for (const spec of specs) {
-      const view = ensureView(win, state, spec);
-      positionView(view, spec);
-      view.setVisible(true);
-      specsForWin.set(spec.id, spec);
-    }
-    for (const id of [...state.stack.transientOrder]) {
-      if (!desired.has(id)) {
-        hideView(win, state, id);
-        specsForWin.delete(id);
-      }
-    }
-  });
-  electron.ipcMain.on(IPC_CHANNELS.OVERLAY.INTENT, (_e, intent) => {
-    global.appOverlayView?.webContents.send("app:overlay-intent", intent);
-  });
-}
-function ensureView(win, state, spec) {
-  const existing = state.views.get(spec.id);
-  if (existing && !existing.webContents.isDestroyed()) return existing;
-  const view = new electron.WebContentsView({
-    webPreferences: {
-      preload: overlayPreloadPath,
-      contextIsolation: true,
-      sandbox: false,
-      partition: "persist:overlay"
-    }
-  });
-  view.webContents.loadURL("app://overlay/index.html");
-  setTransientOverlay(win, spec.id, view);
-  return view;
-}
-function positionView(view, spec) {
-  const rect = { x: spec.x, y: spec.y, width: spec.width, height: spec.height };
-  if (isValidPhysicalRect(rect)) view.setBounds(rect);
-}
-function hideView(win, state, id) {
-  hideTransient(win, id);
-  const v = state.views.get(id);
-  if (v) {
-    v.setVisible(false);
-    v.setBounds({ x: -1e4, y: -1e4, width: 1, height: 1 });
-  }
-}
-function repositionTransientOverlays(win) {
-  const specsForWin = transientSpecs.get(win.id);
-  if (!specsForWin) return;
-  const state = composers.get(win.id);
-  if (!state) return;
-  for (const [id, spec] of specsForWin) {
-    const v = state.views.get(id);
-    if (v) {
-      positionView(v, spec);
-      v.setVisible(true);
-    }
-  }
-}
-function unregisterAppShortcuts() {
-  electron.globalShortcut.unregisterAll();
 }
 function initCatalogService() {
   electron.ipcMain.handle(IPC_CHANNELS.CATALOG.GET_DISCOVERED, async () => {
@@ -11424,6 +11492,57 @@ function initTrpcIpcAdapter() {
     }
   );
 }
+let servicesInitialized = false;
+function initGlobalServices(logFile, isDevMode2) {
+  if (servicesInitialized) return;
+  servicesInitialized = true;
+  initUpdaterIpc();
+  setupMacApplicationMenu();
+  utils.electronApp.setAppUserModelId(
+    isDevMode2 ? "com.jvondev.apposition.dev" : "com.jvondev.apposition.app"
+  );
+  electron.nativeTheme.themeSource = "light";
+  gcDeletedSessions();
+  initNetworkOptimizer();
+  initSessionSecurity();
+  initSessionPersistenceHooks();
+  initWindowManagerIpc();
+  initViewManager();
+  initDbIpc();
+  initLicensingIpc();
+  initChangelogIpc();
+  initAuthIpc();
+  initProxyIpc();
+  proxyCredentialBroker.init(electron.app);
+  sessionIdentityService.init();
+  initCatalogService();
+  initCommunicatorIpc(() => global.mainWindow || void 0);
+  initDiagnosticsIpc(logFile);
+  initDevCommandBridge(isDevMode2);
+  const guestLogger = createLogger("GUEST");
+  electron.ipcMain.handle("pane.ping", () => "pong");
+  electron.ipcMain.on("pane.log", (_event, level, ...args) => {
+    const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
+    if (level === "ERROR") guestLogger.error(msg);
+    else if (level === "WARN") guestLogger.warn(msg);
+    else guestLogger.debug(msg);
+  });
+  electron.ipcMain.handle("metrics.memory", () => {
+    return Promise.resolve(process.getProcessMemoryInfo());
+  });
+  electron.ipcMain.on("window.openExternal", (_, url) => {
+    if (url && typeof url === "string") {
+      electron.shell.openExternal(url);
+    }
+  });
+  initPointerForwarder(() => global.mainWindow || void 0);
+  initContextMenuCoordinator(() => global.mainWindow || void 0);
+  initOverlayProjector(() => global.mainWindow || void 0, resolvePreload("index.js"));
+  initPaneLifecycle(() => global.mainWindow || void 0);
+  initTrpcIpcAdapter();
+  screenCaptureService.init();
+  hibernationEngine.init();
+}
 velopack.VelopackApp.build().run();
 applyBrowserSwitches(electron.app);
 const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || process.env.APP_ENV === "dev";
@@ -11450,53 +11569,9 @@ const gotTheLock = electron.app.requestSingleInstanceLock();
 if (!gotTheLock) {
   electron.app.quit();
 } else {
-  let boot = function() {
-    initUpdaterIpc();
-    setupMacApplicationMenu();
-    utils.electronApp.setAppUserModelId(
-      isDevMode ? "com.jvondev.apposition.dev" : "com.jvondev.apposition.app"
-    );
-    electron.nativeTheme.themeSource = "light";
-    gcDeletedSessions();
-    initNetworkOptimizer();
-    initSessionSecurity();
-    initSessionPersistenceHooks();
-    initWindowManagerIpc();
-    initViewManager();
-    initDbIpc();
-    initLicensingIpc();
-    initChangelogIpc();
-    initAuthIpc();
-    initProxyIpc();
-    proxyCredentialBroker.init(electron.app);
-    sessionIdentityService.init();
-    initCatalogService();
-    initCommunicatorIpc(() => global.mainWindow || void 0);
-    initDiagnosticsIpc(logFile);
-    initDevCommandBridge(isDevMode);
-    const guestLogger = createLogger("GUEST");
-    electron.ipcMain.handle("pane.ping", () => "pong");
-    electron.ipcMain.on("pane.log", (_event, level, ...args) => {
-      const msg = args.map((a) => typeof a === "object" ? JSON.stringify(a) : String(a)).join(" ");
-      if (level === "ERROR") guestLogger.error(msg);
-      else if (level === "WARN") guestLogger.warn(msg);
-      else guestLogger.debug(msg);
-    });
-    electron.ipcMain.handle("metrics.memory", () => {
-      return Promise.resolve(process.getProcessMemoryInfo());
-    });
-    electron.ipcMain.on("window.openExternal", (_, url) => {
-      electron.shell.openExternal(url);
-    });
+  let createMainWindow = function() {
     const win = createWindow();
     const overlay = createAppOverlay(win);
-    initPointerForwarder(() => global.mainWindow || void 0);
-    initContextMenuCoordinator(() => global.mainWindow || void 0);
-    initOverlayProjector(() => global.mainWindow || void 0, resolvePreload("index.js"));
-    initPaneLifecycle(() => global.mainWindow || void 0);
-    initTrpcIpcAdapter();
-    screenCaptureService.init();
-    hibernationEngine.init();
     let isShown = false;
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
@@ -11518,25 +11593,19 @@ if (!gotTheLock) {
       setTimeout(() => sessionIdentityService.scanAllProfiles().catch(() => {
       }), 15e3);
     });
-    setTimeout(showWindow, 4e3);
-    win.on("enter-full-screen", () => {
+    const syncPanes = () => {
       syncAppOverlayBounds(win);
       reRoundAllPanes(win);
       invalidateAllPanes(win);
-    });
-    win.on("leave-full-screen", () => {
-      syncAppOverlayBounds(win);
-      reRoundAllPanes(win);
-      invalidateAllPanes(win);
-    });
+    };
+    win.on("enter-full-screen", syncPanes);
+    win.on("leave-full-screen", syncPanes);
     win.on("resize", () => {
       syncAppOverlayBounds(win);
       reRoundAllPanes(win);
     });
     win.on("restore", () => {
-      syncAppOverlayBounds(win);
-      reRoundAllPanes(win);
-      invalidateAllPanes(win);
+      syncPanes();
       global.appOverlayView?.webContents.send("app:window-restored");
     });
     electron.screen.on("display-metrics-changed", () => {
@@ -11547,10 +11616,12 @@ if (!gotTheLock) {
     win.on("closed", () => {
       unregisterAppShortcuts();
       composers.delete(win.id);
+      global.mainWindow = null;
+      global.overlayWindow = null;
+      global.appOverlayView = null;
     });
-    electron.app.on("activate", function() {
-      if (electron.BrowserWindow.getAllWindows().length === 0) boot();
-    });
+    setTimeout(showWindow, 4e3);
+    return win;
   };
   const logFile = path.join(electron.app.getPath("userData"), "apposition.log");
   logger$5.setFileSink(logFile);
@@ -11572,12 +11643,28 @@ if (!gotTheLock) {
   electron.app.on("second-instance", () => {
     if (global.mainWindow && !global.mainWindow.isDestroyed()) {
       if (global.mainWindow.isMinimized()) global.mainWindow.restore();
+      global.mainWindow.show();
       global.mainWindow.focus();
     }
   });
   initDeepLinking();
-  electron.app.whenReady().then(boot);
+  electron.app.whenReady().then(() => {
+    initGlobalServices(logFile, isDevMode);
+    createMainWindow();
+  });
+  electron.app.on("activate", () => {
+    const win = global.mainWindow;
+    if (win && !win.isDestroyed()) {
+      if (win.isMinimized()) win.restore();
+      win.show();
+      win.focus();
+      hibernationEngine.setAppMinimized(false);
+    } else if (electron.BrowserWindow.getAllWindows().length === 0) {
+      createMainWindow();
+    }
+  });
   electron.app.on("before-quit", async () => {
+    global.isQuittingApp = true;
     windowStateManager.flushSync();
     try {
       await flushAllSessions();

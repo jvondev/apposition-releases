@@ -1,5 +1,44 @@
 [
   {
+    "version": "1.3.8",
+    "tag": "v1.3.8",
+    "title": "Atomic Background Updates, Persistent macOS Workspaces & Instant Dock Restoration",
+    "publishedAt": "2026-10-22",
+    "categories": [
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Seamless In-Place Auto-Updates",
+            "description": "Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications."
+          },
+          {
+            "title": "Persistent Background Workspace & Instant Dock Restoration",
+            "description": "Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing."
+          },
+          {
+            "title": "Hardened Linux Package Updates",
+            "description": "Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Seamless In-Place Auto-Updates",
+        "description": "Overhauled the macOS update engine with a detached atomic updater that cleanly preserves executable permissions and security seals, eliminating failed update restarts and looping notifications."
+      },
+      {
+        "title": "Persistent Background Workspace & Instant Dock Restoration",
+        "description": "Closing the main window on macOS now keeps your active workspace running smoothly in the background, allowing instant zero-delay restoration when clicking the Dock icon without reloading tabs or freezing."
+      },
+      {
+        "title": "Hardened Linux Package Updates",
+        "description": "Streamlined AppImage and package updates with detached process switching and direct 1-click terminal installation commands."
+      }
+    ]
+  },
+  {
     "version": "1.3.7",
     "tag": "v1.3.7",
     "title": "Dedicated Proxy Routing, Global Identity Sync & Smart Screen Splitting",

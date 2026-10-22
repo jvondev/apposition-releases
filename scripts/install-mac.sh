@@ -58,7 +58,7 @@ MOUNT_DIR="${TEMP_DIR}/mount"
 mkdir -p "$MOUNT_DIR"
 hdiutil attach "$DMG_PATH" -nobrowse -quiet -mountpoint "$MOUNT_DIR"
 
-# 5. Copy App to /Applications
+# 5. Copy App to /Applications with Apple ditto tool
 APP_SRC=$(find "$MOUNT_DIR" -maxdepth 2 -name "*.app" | head -n 1)
 
 if [ -z "$APP_SRC" ]; then
@@ -76,14 +76,17 @@ if [ -d "$APP_DEST" ]; then
     rm -rf "$APP_DEST"
 fi
 
-cp -R "$APP_SRC" "/Applications/"
+# ditto preserves Mach-O execution permissions, symlinks, and code signature
+ditto "$APP_SRC" "$APP_DEST"
 
 # 6. Unmount & Cleanup Temp
 hdiutil detach "$MOUNT_DIR" -quiet || true
 rm -rf "$TEMP_DIR"
 
-# 7. Strip Quarantine Extended Attribute (Bypasses Gatekeeper "Damaged" check)
+# 7. Strip Quarantine & Guarantee Executable Permissions
 echo "• Removing Gatekeeper quarantine flags..."
+chmod -R a+rx "$APP_DEST/Contents/MacOS" 2>/dev/null || true
+xattr -cr "$APP_DEST" 2>/dev/null || true
 xattr -dr com.apple.quarantine "$APP_DEST" 2>/dev/null || true
 
 echo ""

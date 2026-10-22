@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-CpwZU_JZ.js","./UniversalActivationCard-BhbLI4aD.js","./PaywallPopover-Cb62pnfq.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-DixN9oPA.js","./UniversalActivationCard-DG28Pycc.js","./PaywallPopover-WBOp6y0O.js"])))=>i.map(i=>d[i]);
 const sharedConfig = {
   context: void 0,
   registry: void 0,
@@ -27762,10 +27762,10 @@ function ReaderModeModal() {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-CpwZU_JZ.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-D4jH-qj_.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-DZZs-6Aa.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-Cb62pnfq.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-DixN9oPA.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-B9Zcv5b6.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-_BcPynbR.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-WBOp6y0O.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
