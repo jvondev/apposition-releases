@@ -86,7 +86,12 @@ jobs:
       - name: Upload Release Assets (Mac & Linux)
         if: matrix.platform != 'win'
         run: |
-          gh release upload "${{ github.ref_name }}" dist/*.dmg dist/*.AppImage dist/*.deb dist/*.yml dist/*.blockmap --clobber
+          shopt -s nullglob
+          gh release view "${{ github.ref_name }}" || gh release create "${{ github.ref_name }}" --title "${{ github.ref_name }}" --prerelease || true
+          ASSETS=(dist/*.dmg dist/*.AppImage dist/*.deb dist/*.yml dist/*.blockmap)
+          if [ ${#ASSETS[@]} -gt 0 ]; then
+            gh release upload "${{ github.ref_name }}" "${ASSETS[@]}" --clobber
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
