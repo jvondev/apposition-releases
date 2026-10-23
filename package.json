@@ -1,6 +1,6 @@
 {
   "name": "apposition",
-  "version": "1.3.8",
+  "version": "1.3.9-canary.93",
   "description": "A smart digital workspace to organize web apps, accounts, and tasks in one place.",
   "main": "./out/main/index.js",
   "author": "jvondev <jvondev@users.noreply.github.com>",
@@ -15,6 +15,7 @@
     "test:e2e": "playwright test",
     "db:reset": "node scripts/reset-db.js",
     "sentry": "node scripts/sentry.js",
+    "canary": "node scripts/canary.js",
     "ship": "node scripts/ship.js",
     "sync:refs": "node scripts/apposition-references.js",
     "start": "electron-vite preview",
@@ -37,6 +38,8 @@
     "dev:gatekeep": "cross-env FORCE_GATEKEEP=1 electron-vite dev",
     "dev:web": "pnpm --filter web dev",
     "dev:app:web": "vite -c vite.app.config.ts",
+    "video:dev": "pnpm --filter @apposition/video dev",
+    "video:render": "pnpm --filter @apposition/video build",
     "qa": "node scripts/qa.mjs",
     "build": "npm run typecheck && electron-vite build",
     "build:web": "pnpm --filter web build",
@@ -84,5 +87,6 @@
     "vite": "^6.0.0",
     "vite-plugin-solid": "^2.10.0",
     "vitest": "^4.1.10"
-  }
+  },
+  "productName": "Apposition Canary"
 }
