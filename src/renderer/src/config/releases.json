@@ -1,5 +1,53 @@
 [
   {
+    "version": "1.4.0",
+    "tag": "v1.4.0",
+    "title": "AppSumo Official Launch — Side-by-Side Screen Splitting & Separate Client Logins",
+    "publishedAt": "2026-10-23",
+    "heroImage": "https://github.com/jvondev/apposition-releases/releases/download/v1.4.0/showcase-00-split-screen.png",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Side-by-Side Screen Splitting",
+            "description": "Snap windows into 2, 3, or 4 side-by-side panes. Keep your storefront, analytics, and project boards visible on one screen without tab juggling."
+          },
+          {
+            "title": "Separate Client Logins",
+            "description": "Stay logged into conflicting client accounts simultaneously in dedicated workspaces without signing out or opening incognito windows."
+          },
+          {
+            "title": "1-Second Search (Cmd+K)",
+            "description": "Instant keyboard search lets you jump directly to any client tab, document, or workspace in milliseconds."
+          },
+          {
+            "title": "Multi-Device Access",
+            "description": "Use your lifetime license across 2 computers (Desktop + Laptop) with 1-click self-service license transfer in Settings."
+          },
+          {
+            "title": "Tactile Restart Curtain",
+            "description": "Smooth, instant transition curtain when applying updates with zero window freeze or sudden closures."
+          },
+          {
+            "title": "Nighttime Auto-Updates",
+            "description": "Updates apply silently in the background while your computer is idle and plugged in, ensuring you always wake up to the latest build."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Side-by-Side Screen Splitting",
+        "description": "Snap windows into 2, 3, or 4 side-by-side panes. Keep your storefront, analytics, and project boards visible on one screen without tab juggling."
+      },
+      {
+        "title": "Separate Client Logins",
+        "description": "Stay logged into conflicting client accounts simultaneously in dedicated workspaces without signing out or opening incognito windows."
+      }
+    ]
+  },
+  {
     "version": "1.3.9",
     "tag": "v1.3.9",
     "title": "Tactile Restart Transitions, Nighttime Auto-Updates & Window Geometry Persistence",
