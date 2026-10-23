@@ -1,5 +1,44 @@
 [
   {
+    "version": "1.3.9",
+    "tag": "v1.3.9",
+    "title": "Tactile Restart Transitions, Nighttime Auto-Updates & Window Geometry Persistence",
+    "publishedAt": "2026-10-23",
+    "categories": [
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Seamless Update Feedback",
+            "description": "The update flow now features refined monochromatic controls and an instant \"Restarting Apposition\" transition curtain, providing clear tactile confirmation and removing restart freezes."
+          },
+          {
+            "title": "Nighttime Auto-Apply",
+            "description": "Downloaded updates can now apply silently during prolonged system idle when the workstation is closed, plugged into power, and free of playing audio or active calls."
+          },
+          {
+            "title": "macOS Window Maximization & Fullscreen State",
+            "description": "The window now reliably restores its exact maximized or fullscreen state when reopened from the Dock after being closed with the red close button, and native macOS Zoom toggling fills the usable display area smoothly without geometry drift."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Seamless Update Feedback",
+        "description": "The update flow now features refined monochromatic controls and an instant \"Restarting Apposition\" transition curtain, providing clear tactile confirmation and removing restart freezes."
+      },
+      {
+        "title": "Nighttime Auto-Apply",
+        "description": "Downloaded updates can now apply silently during prolonged system idle when the workstation is closed, plugged into power, and free of playing audio or active calls."
+      },
+      {
+        "title": "macOS Window Maximization & Fullscreen State",
+        "description": "The window now reliably restores its exact maximized or fullscreen state when reopened from the Dock after being closed with the red close button, and native macOS Zoom toggling fills the usable display area smoothly without geometry drift."
+      }
+    ]
+  },
+  {
     "version": "1.3.8",
     "tag": "v1.3.8",
     "title": "Atomic Background Updates, Persistent macOS Workspaces & Instant Dock Restoration",
