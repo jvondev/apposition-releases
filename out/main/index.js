@@ -7,13 +7,13 @@ const fs = require("fs");
 const child_process = require("child_process");
 require("readline");
 const Database = require("better-sqlite3");
+const util = require("util");
+const https = require("https");
 const crypto = require("crypto");
 const os = require("os");
 const Sentry = require("@sentry/electron/main");
 const promises = require("fs/promises");
 const http = require("http");
-const util = require("util");
-const https = require("https");
 const server = require("@trpc/server");
 const zod = require("zod");
 function _interopNamespaceDefault(e) {
@@ -499,7 +499,7 @@ class Logger {
     }
   }
 }
-const logger$5 = new Logger("MAIN");
+const logger$6 = new Logger("MAIN");
 const createLogger = (domain, opts) => new Logger(domain, opts);
 function printStartupBanner(version2 = "1.1.3", logFile = "apposition.log") {
   const isDev2 = typeof process !== "undefined" && process.env.NODE_ENV !== "production";
@@ -4406,9 +4406,12 @@ function centerInWorkArea(target, width, height) {
   const y = Math.round(target.y + (target.height - clampedHeight) / 2);
   return { x, y, width: clampedWidth, height: clampedHeight };
 }
+function isRectMatchingWorkArea(bounds, workArea, tolerance = 2) {
+  return Math.abs(bounds.x - workArea.x) <= tolerance && Math.abs(bounds.y - workArea.y) <= tolerance && Math.abs(bounds.width - workArea.width) <= tolerance && Math.abs(bounds.height - workArea.height) <= tolerance;
+}
 function resolveSafeWindowBounds(saved, displays, defaults = DEFAULT_WINDOW_DIMENSIONS, isMac = typeof process !== "undefined" && process.platform === "darwin") {
-  const isMaximized = saved != null ? Boolean(saved.isMaximized) : !isMac;
-  const isFullScreen = Boolean(saved?.isFullScreen);
+  const isMaximized = saved != null ? Boolean(saved.isMaximized) : isMac ? false : true;
+  const isFullScreen = isMac ? saved != null ? Boolean(saved.isFullScreen || saved.isMaximized) : true : Boolean(saved?.isFullScreen);
   const primary = displays.find((d) => d.isPrimary) || displays[0];
   if (!primary) {
     return {
@@ -4437,22 +4440,31 @@ function resolveSafeWindowBounds(saved, displays, defaults = DEFAULT_WINDOW_DIME
     isFullScreen
   };
 }
+function toggleZoomBounds(current, workArea, lastNormal) {
+  if (isRectMatchingWorkArea(current, workArea)) {
+    const fallback = centerInWorkArea(workArea, 1200, 800);
+    const valid = isFiniteRect(lastNormal) && !isRectMatchingWorkArea(lastNormal, workArea);
+    const restore = valid ? lastNormal : fallback;
+    return { nextBounds: restore, isMaximized: false, nextNormal: restore };
+  }
+  return {
+    nextBounds: workArea,
+    isMaximized: true,
+    nextNormal: isFiniteRect(current) ? current : lastNormal
+  };
+}
 const log = createLogger("WINDOW");
 class WindowStateManager {
   activeWindow = null;
   lastNormalBounds = { x: 0, y: 0, width: 1200, height: 800 };
   maximized = false;
   fullScreen = false;
+  frozen = false;
   debounceTimer = null;
   displayRemovedListener = null;
   mapDisplays(displays) {
-    const primaryId = electron.screen.getPrimaryDisplay()?.id;
-    return displays.map((d) => ({
-      id: d.id,
-      bounds: d.bounds,
-      workArea: d.workArea,
-      isPrimary: d.id === primaryId
-    }));
+    const pid = electron.screen.getPrimaryDisplay()?.id;
+    return displays.map((d) => ({ id: d.id, bounds: d.bounds, workArea: d.workArea, isPrimary: d.id === pid }));
   }
   getInitialState() {
     const displays = this.mapDisplays(electron.screen.getAllDisplays());
@@ -4464,29 +4476,47 @@ class WindowStateManager {
     log.info(`Resolved window state: bounds=${JSON.stringify(resolved.bounds)} max=${resolved.isMaximized}`);
     return resolved;
   }
+  savedFsOnClose = false;
+  savedMaxOnClose = false;
   shouldMaximize() {
     return this.maximized;
   }
   shouldFullScreen() {
     return this.fullScreen;
   }
+  freezeForClose() {
+    this.frozen = true;
+    this.savedFsOnClose = this.fullScreen;
+    this.savedMaxOnClose = this.maximized;
+  }
+  unfreeze() {
+    this.frozen = false;
+  }
+  toggleMacZoom(win) {
+    if (!win || win.isDestroyed()) return;
+    const workArea = electron.screen.getDisplayMatching(win.getBounds()).workArea;
+    const { nextBounds, isMaximized, nextNormal } = toggleZoomBounds(win.getBounds(), workArea, this.lastNormalBounds);
+    this.lastNormalBounds = nextNormal;
+    this.maximized = isMaximized;
+    win.setBounds(nextBounds);
+    this.scheduleDebouncedSave(100);
+    global.appOverlayView?.webContents.send("window:maximize-changed", isMaximized);
+  }
   manage(win) {
     this.activeWindow = win;
-    if (this.maximized) {
-      try {
-        win.maximize();
-      } catch {
-      }
-    } else if (this.fullScreen) {
-      try {
-        win.setFullScreen(true);
-      } catch {
-      }
+    win.on("show", () => {
+      this.unfreeze();
+    });
+    try {
+      if (this.fullScreen || process.platform === "darwin" && this.maximized) win.setFullScreen(true);
+      else if (this.maximized) win.maximize();
+    } catch {
     }
     const onBoundsChange = () => {
-      if (!win || win.isDestroyed() || win.isMinimized()) return;
-      if (win.isMaximized() || win.isFullScreen()) {
-        this.maximized = win.isMaximized();
+      if (this.frozen || !win || win.isDestroyed() || win.isMinimized() || !win.isVisible()) return;
+      const isMax = win.isMaximized() || process.platform === "darwin" && isRectMatchingWorkArea(win.getBounds(), electron.screen.getDisplayMatching(win.getBounds()).workArea);
+      if (isMax || win.isFullScreen()) {
+        this.maximized = isMax;
         this.fullScreen = win.isFullScreen();
         this.scheduleDebouncedSave();
         return;
@@ -4525,6 +4555,7 @@ class WindowStateManager {
       this.scheduleDebouncedSave(100);
     });
     win.on("leave-full-screen", () => {
+      if (this.frozen) return;
       this.fullScreen = false;
       this.scheduleDebouncedSave(100);
     });
@@ -4571,12 +4602,14 @@ class WindowStateManager {
     }
     if (!this.lastNormalBounds || !isFiniteRect(this.lastNormalBounds)) return;
     if (this.activeWindow && !this.activeWindow.isDestroyed()) {
-      if (this.activeWindow.isMaximized()) {
-        this.maximized = true;
-      } else if (!this.activeWindow.isMinimized()) {
-        this.maximized = false;
+      if (this.frozen) {
+        this.fullScreen = this.savedFsOnClose;
+        this.maximized = this.savedMaxOnClose;
+      } else {
+        const isMax = this.activeWindow.isMaximized() || process.platform === "darwin" && isRectMatchingWorkArea(this.activeWindow.getBounds(), electron.screen.getDisplayMatching(this.activeWindow.getBounds()).workArea);
+        this.maximized = isMax ? true : !this.activeWindow.isMinimized() ? false : this.maximized;
+        this.fullScreen = this.activeWindow.isFullScreen();
       }
-      this.fullScreen = this.activeWindow.isFullScreen();
     }
     saveWindowState({
       x: this.lastNormalBounds.x,
@@ -4721,6 +4754,965 @@ function initWindowManagerIpc() {
   });
   initTearWindowIpc();
 }
+const logger$5 = createLogger("UPDATE");
+const REPO_URL = "https://github.com/jvondev/apposition-releases";
+class WindowsUpdateDriver {
+  name = "windows-velopack";
+  updateManager = null;
+  pendingUpdateInfo = null;
+  isSupported() {
+    return process.platform === "win32" && electron.app.isPackaged;
+  }
+  getManager() {
+    if (!this.isSupported()) return null;
+    if (!this.updateManager) {
+      try {
+        this.updateManager = new velopack.UpdateManager(new velopack.GithubSource(REPO_URL, void 0, false));
+      } catch (err) {
+        logger$5.warn("Velopack UpdateManager init failed", err?.message || err);
+      }
+    }
+    return this.updateManager;
+  }
+  async checkForUpdates() {
+    const um = this.getManager();
+    if (!um) {
+      return { hasUpdate: false };
+    }
+    try {
+      const updateInfo = await um.checkForUpdatesAsync();
+      this.pendingUpdateInfo = updateInfo;
+      if (!updateInfo) {
+        return { hasUpdate: false };
+      }
+      const version2 = updateInfo.TargetFullRelease?.Version || "latest";
+      const releaseNotes = updateInfo.TargetFullRelease?.NotesMarkdown || void 0;
+      return {
+        hasUpdate: true,
+        version: version2,
+        releaseNotes
+      };
+    } catch (err) {
+      logger$5.warn("Velopack check failed", err?.message || err);
+      throw err;
+    }
+  }
+  async downloadUpdate(onProgress) {
+    const um = this.getManager();
+    if (!um || !this.pendingUpdateInfo) {
+      throw new Error("No pending update to download on Windows.");
+    }
+    try {
+      await um.downloadUpdateAsync(this.pendingUpdateInfo, (percent) => {
+        onProgress(Math.min(100, Math.max(0, Math.round(percent))));
+      });
+      onProgress(100);
+    } catch (err) {
+      logger$5.error("Velopack download failed", err?.message || err);
+      throw err;
+    }
+  }
+  async applyUpdate(relaunch = true, launchArgs = []) {
+    const um = this.getManager();
+    if (!um || !this.pendingUpdateInfo) {
+      throw new Error("No downloaded update to apply on Windows.");
+    }
+    logger$5.info("Applying Velopack update silently and restarting...");
+    um.waitExitThenApplyUpdate(this.pendingUpdateInfo, true, relaunch, launchArgs || []);
+    if (relaunch) electron.app.quit();
+  }
+}
+const GITHUB_REPO = "jvondev/apposition-releases";
+const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
+const LATEST_API = `${RELEASES_API}/latest`;
+const FALLBACK_CDN = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/releases.json`;
+async function fetchLatestRelease(isPreRelease = false) {
+  const url = isPreRelease ? RELEASES_API : LATEST_API;
+  try {
+    const res = await fetch(url, {
+      headers: { "User-Agent": "Apposition-Desktop-Client" }
+    });
+    if (res.ok) {
+      const json = await res.json();
+      let data = json;
+      if (isPreRelease && Array.isArray(json)) {
+        const candidates = json.filter((r) => r.prerelease && !r.draft);
+        candidates.sort((a, b) => {
+          const vA = (a.tag_name || "").replace(/^v/, "").trim();
+          const vB = (b.tag_name || "").replace(/^v/, "").trim();
+          const cmp = compareSemver(vB, vA);
+          return cmp !== 0 ? cmp : new Date(b.published_at || 0).getTime() - new Date(a.published_at || 0).getTime();
+        });
+        data = candidates[0];
+      }
+      if (data && data.tag_name) {
+        return {
+          version: (data.tag_name || "").replace(/^v/, "").trim(),
+          tag: data.tag_name || "",
+          body: data.body || "",
+          assets: (data.assets || []).map((a) => ({
+            name: a.name,
+            browser_download_url: a.browser_download_url,
+            size: a.size || 0
+          }))
+        };
+      }
+    }
+  } catch {
+  }
+  try {
+    const res = await fetch(FALLBACK_CDN, {
+      headers: { "User-Agent": "Apposition-Desktop-Client" }
+    });
+    if (res.ok) {
+      const releases = await res.json();
+      if (Array.isArray(releases) && releases.length > 0) {
+        const top = releases[0];
+        return {
+          version: (top.version || "").replace(/^v/, "").trim(),
+          tag: top.tag || `v${top.version}`,
+          body: top.title || "",
+          assets: []
+        };
+      }
+    }
+  } catch {
+  }
+  return null;
+}
+function isNewerVersion(remoteVersion, currentVersion) {
+  return compareSemver(remoteVersion, currentVersion) > 0;
+}
+function downloadFileWithProgress(url, destPath, onProgress) {
+  return new Promise((resolve, reject) => {
+    const fileStream = fs.createWriteStream(destPath);
+    let lastBytes = 0;
+    let lastTime = Date.now();
+    let redirectCount = 0;
+    const MAX_REDIRECTS = 5;
+    const request = (targetUrl) => {
+      try {
+        const parsedUrl = new URL(targetUrl);
+        if (parsedUrl.protocol !== "https:") {
+          fileStream.close();
+          fs.unlink(destPath, () => {
+          });
+          reject(new Error(`Insecure download protocol: ${parsedUrl.protocol}`));
+          return;
+        }
+        https.get(targetUrl, { headers: { "User-Agent": "Apposition-Desktop-Client" } }, (res) => {
+          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+            res.resume();
+            redirectCount++;
+            if (redirectCount > MAX_REDIRECTS) {
+              fileStream.close();
+              fs.unlink(destPath, () => {
+              });
+              reject(new Error("Too many redirects during download"));
+              return;
+            }
+            request(res.headers.location);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            fileStream.close();
+            fs.unlink(destPath, () => {
+            });
+            reject(new Error(`Download failed with status code ${res.statusCode}`));
+            return;
+          }
+          const totalBytes = parseInt(res.headers["content-length"] || "0", 10);
+          let receivedBytes = 0;
+          let lastReportedPercent = -1;
+          let lastReportedTime = 0;
+          res.on("data", (chunk) => {
+            receivedBytes += chunk.length;
+            const now = Date.now();
+            const elapsed = (now - lastTime) / 1e3;
+            let bytesPerSec;
+            if (elapsed >= 0.5) {
+              bytesPerSec = Math.round((receivedBytes - lastBytes) / elapsed);
+              lastBytes = receivedBytes;
+              lastTime = now;
+            }
+            if (totalBytes > 0) {
+              const percent = Math.min(100, Math.round(receivedBytes / totalBytes * 100));
+              if (percent === 100 || percent !== lastReportedPercent && now - lastReportedTime >= 150) {
+                lastReportedPercent = percent;
+                lastReportedTime = now;
+                onProgress(percent, bytesPerSec);
+              }
+            }
+          });
+          res.pipe(fileStream);
+          fileStream.on("finish", () => {
+            fileStream.close(() => {
+              onProgress(100);
+              resolve();
+            });
+          });
+        }).on("error", (err) => {
+          fileStream.close();
+          fs.unlink(destPath, () => {
+          });
+          reject(err);
+        });
+      } catch (err) {
+        fileStream.close();
+        fs.unlink(destPath, () => {
+        });
+        reject(err);
+      }
+    };
+    request(url);
+  });
+}
+const logger$4 = createLogger("UPDATE");
+const execFileAsync = util.promisify(child_process.execFile);
+function resolveDestinationApp(execPath = process.execPath) {
+  const match = execPath.match(/^(.+?\.app)(?:\/.*)?$/);
+  if (match && !match[1].startsWith("/Volumes/")) {
+    return match[1];
+  }
+  return "/Applications/Apposition.app";
+}
+class MacosUpdateDriver {
+  name = "macos-dmg";
+  targetVersion;
+  downloadUrl;
+  releaseNotes;
+  downloadedDmgPath;
+  isSupported() {
+    return process.platform === "darwin";
+  }
+  async checkForUpdates() {
+    const currentVersion = electron.app.getVersion();
+    const isPreRelease = currentVersion.includes("-");
+    const release = await fetchLatestRelease(isPreRelease);
+    if (!release) return { hasUpdate: false };
+    if (!isNewerVersion(release.version, currentVersion)) {
+      return { hasUpdate: false };
+    }
+    const isArm = process.arch === "arm64";
+    let matchingAsset = release.assets.find(
+      (a) => isArm ? /arm64.*\.dmg$/i.test(a.name) : /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)
+    );
+    if (!matchingAsset) {
+      matchingAsset = release.assets.find((a) => /\.dmg$/i.test(a.name));
+    }
+    if (!matchingAsset) {
+      return { hasUpdate: false };
+    }
+    this.targetVersion = release.version;
+    this.downloadUrl = matchingAsset.browser_download_url;
+    this.releaseNotes = release.body;
+    return {
+      hasUpdate: true,
+      version: release.version,
+      releaseNotes: release.body,
+      downloadUrl: matchingAsset.browser_download_url
+    };
+  }
+  async downloadUpdate(onProgress) {
+    if (!this.downloadUrl || !this.targetVersion) {
+      throw new Error("No update available to download on macOS.");
+    }
+    const tempDir = electron.app.getPath("temp");
+    const dmgPath = path.join(tempDir, `Apposition-${this.targetVersion}.dmg`);
+    logger$4.info(`Downloading macOS DMG from ${this.downloadUrl} to ${dmgPath}`);
+    await downloadFileWithProgress(this.downloadUrl, dmgPath, onProgress);
+    this.downloadedDmgPath = dmgPath;
+    logger$4.info("macOS DMG download verified.");
+  }
+  async applyUpdate(relaunch = true, launchArgs = []) {
+    if (!this.downloadedDmgPath || !fs.existsSync(this.downloadedDmgPath)) {
+      throw new Error("Downloaded DMG not found.");
+    }
+    const dmgPath = this.downloadedDmgPath;
+    const tempDir = electron.app.getPath("temp");
+    const mountDir = path.join(tempDir, `apposition-mount-${Date.now()}`);
+    const destApp = resolveDestinationApp();
+    try {
+      logger$4.info(`Mounting DMG ${dmgPath} to ${mountDir}`);
+      await fs.promises.mkdir(mountDir, { recursive: true });
+      await execFileAsync("hdiutil", ["attach", dmgPath, "-nobrowse", "-quiet", "-mountpoint", mountDir]);
+      const entries = await fs.promises.readdir(mountDir);
+      const appFolder = entries.find((e) => e.endsWith(".app"));
+      if (!appFolder) {
+        throw new Error("Could not find .app in mounted DMG.");
+      }
+      const srcApp = path.join(mountDir, appFolder);
+      const workerScriptPath = path.join(tempDir, `apposition-update-worker-${Date.now()}.sh`);
+      const logFile = path.join(electron.app.getPath("userData"), "update-worker.log");
+      const scriptContent = `#!/bin/bash
+set -u
+PID="$1"
+SRC="$2"
+DEST="$3"
+MOUNT="$4"
+DMG="$5"
+LOG="$6"
+RELAUNCH="$7"
+ARGS="\${8:-}"
+
+echo "=== Apposition macOS Update Worker ===" >> "$LOG"
+echo "Target: $DEST" >> "$LOG"
+echo "Source: $SRC" >> "$LOG"
+
+# 1. Wait for parent PID to exit cleanly (max 15s)
+COUNT=0
+while kill -0 "$PID" 2>/dev/null; do
+  sleep 0.2
+  COUNT=$((COUNT + 1))
+  if [ "$COUNT" -ge 75 ]; then
+    kill -9 "$PID" 2>/dev/null || true
+    sleep 0.2
+    break
+  fi
+done
+
+# 2. Atomic bundle copy with Apple ditto tool (preserves Mach-O permissions & symlinks)
+rm -rf "$DEST"
+ditto "$SRC" "$DEST"
+
+# 3. Ensure executable permission on binary
+chmod -R a+rx "$DEST/Contents/MacOS" 2>/dev/null || true
+
+# 4. Clear Gatekeeper quarantine
+xattr -cr "$DEST" 2>/dev/null || true
+xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
+
+# 5. Relaunch fresh application immediately if requested (minimizes downtime)
+if [ "$RELAUNCH" = "1" ]; then
+  if [ -n "$ARGS" ]; then
+    open -g -n -a "$DEST" --args $ARGS
+  else
+    open -n -a "$DEST"
+  fi
+fi
+
+# 6. Background cleanup: detach DMG and clean temp
+hdiutil detach "$MOUNT" -quiet -force 2>/dev/null || true
+rm -f "$DMG" 2>/dev/null || true
+echo "Update applied successfully!" >> "$LOG"
+`;
+      await fs.promises.writeFile(workerScriptPath, scriptContent, { mode: 493 });
+      logger$4.info(`Spawning detached macOS update worker for ${destApp} (relaunch=${relaunch})...`);
+      const child = child_process.spawn("/bin/bash", [
+        workerScriptPath,
+        String(process.pid),
+        srcApp,
+        destApp,
+        mountDir,
+        dmgPath,
+        logFile,
+        relaunch ? "1" : "0",
+        (launchArgs || []).join(" ")
+      ], {
+        detached: true,
+        stdio: "ignore"
+      });
+      child.unref();
+      if (relaunch) {
+        electron.app.exit(0);
+      }
+    } catch (err) {
+      logger$4.error("Failed to stage macOS update worker", err?.message || err);
+      await execFileAsync("hdiutil", ["detach", mountDir, "-quiet"]).catch(() => {
+      });
+      throw err;
+    }
+  }
+}
+const logger$3 = createLogger("UPDATE");
+class LinuxUpdateDriver {
+  name = "linux-appimage";
+  targetVersion;
+  downloadUrl;
+  releaseNotes;
+  downloadedAppImagePath;
+  isSupported() {
+    return process.platform === "linux";
+  }
+  isAppImage() {
+    return Boolean(process.env.APPIMAGE);
+  }
+  async checkForUpdates() {
+    const release = await fetchLatestRelease();
+    if (!release) return { hasUpdate: false };
+    const currentVersion = electron.app.getVersion();
+    if (!isNewerVersion(release.version, currentVersion)) {
+      return { hasUpdate: false };
+    }
+    this.targetVersion = release.version;
+    this.releaseNotes = release.body;
+    if (!this.isAppImage()) {
+      const debAsset = release.assets.find((a) => /\.deb$/i.test(a.name));
+      const downloadUrl = debAsset?.browser_download_url || `https://github.com/jvondev/apposition-releases/releases/tag/v${release.version}`;
+      return {
+        hasUpdate: true,
+        version: release.version,
+        releaseNotes: release.body,
+        downloadUrl,
+        manualActionRequired: true,
+        manualReason: "linux-deb",
+        terminalCommand: "curl -fsSL https://raw.githubusercontent.com/jvondev/apposition-releases/main/scripts/install-linux.sh | bash"
+      };
+    }
+    const appImageAsset = release.assets.find((a) => /\.AppImage$/i.test(a.name));
+    if (!appImageAsset) {
+      return { hasUpdate: false };
+    }
+    this.downloadUrl = appImageAsset.browser_download_url;
+    return {
+      hasUpdate: true,
+      version: release.version,
+      releaseNotes: release.body,
+      downloadUrl: appImageAsset.browser_download_url
+    };
+  }
+  async downloadUpdate(onProgress) {
+    if (!this.isAppImage() || !this.downloadUrl || !this.targetVersion) {
+      throw new Error("No AppImage update available to download.");
+    }
+    const tempDir = electron.app.getPath("temp");
+    const appImagePath = path.join(tempDir, `Apposition-${this.targetVersion}.AppImage`);
+    logger$3.info(`Downloading Linux AppImage from ${this.downloadUrl} to ${appImagePath}`);
+    await downloadFileWithProgress(this.downloadUrl, appImagePath, onProgress);
+    await fs.promises.chmod(appImagePath, 493);
+    this.downloadedAppImagePath = appImagePath;
+    logger$3.info("Linux AppImage download verified and made executable.");
+  }
+  async applyUpdate(relaunch = true, launchArgs = []) {
+    const currentAppImage = process.env.APPIMAGE;
+    if (!this.downloadedAppImagePath || !currentAppImage || !fs.existsSync(this.downloadedAppImagePath)) {
+      throw new Error("Target AppImage executable not found.");
+    }
+    logger$3.info(`Replacing ${currentAppImage} with ${this.downloadedAppImagePath}`);
+    const targetDir = path.dirname(currentAppImage);
+    const tempInSameDir = path.join(targetDir, `.${path.basename(currentAppImage)}.update-${Date.now()}`);
+    try {
+      await fs.promises.copyFile(this.downloadedAppImagePath, tempInSameDir);
+      await fs.promises.chmod(tempInSameDir, 493);
+      await fs.promises.rename(tempInSameDir, currentAppImage);
+      await fs.promises.rm(this.downloadedAppImagePath, { force: true }).catch(() => {
+      });
+      if (relaunch) {
+        logger$3.info("Linux AppImage in-place update completed. Spawning detached process...");
+        const child = child_process.spawn(currentAppImage, [...process.argv.slice(1), ...launchArgs || []], {
+          detached: true,
+          stdio: "ignore",
+          env: { ...process.env, APPIMAGE: currentAppImage }
+        });
+        child.unref();
+        electron.app.exit(0);
+      } else {
+        logger$3.info("Linux AppImage in-place update completed (silent on-quit).");
+      }
+    } catch (err) {
+      await fs.promises.rm(tempInSameDir, { force: true }).catch(() => {
+      });
+      logger$3.error("Failed to perform in-place Linux update", err?.message || err);
+      throw err;
+    }
+  }
+}
+const logger$2 = createLogger("UPDATE");
+class FallbackEngine {
+  targetVersion;
+  downloadUrl;
+  downloadedFilePath;
+  releaseNotes;
+  rescueUrl;
+  async checkForUpdates() {
+    const release = await fetchLatestRelease();
+    if (!release) return { hasUpdate: false };
+    const currentVersion = electron.app.getVersion();
+    if (!isNewerVersion(release.version, currentVersion)) {
+      return { hasUpdate: false };
+    }
+    const rescueUrl = `https://github.com/jvondev/apposition-releases/releases/tag/${release.tag || `v${release.version}`}`;
+    this.rescueUrl = rescueUrl;
+    this.targetVersion = release.version;
+    this.releaseNotes = release.body;
+    const matchedAsset = this.resolveAssetForPlatform(release.assets);
+    if (!matchedAsset) {
+      return {
+        hasUpdate: true,
+        version: release.version,
+        releaseNotes: release.body,
+        manualActionRequired: true,
+        manualReason: "fallback-exhausted",
+        downloadUrl: rescueUrl,
+        rescueUrl
+      };
+    }
+    this.downloadUrl = matchedAsset.browser_download_url;
+    return {
+      hasUpdate: true,
+      version: release.version,
+      releaseNotes: release.body,
+      downloadUrl: matchedAsset.browser_download_url,
+      rescueUrl
+    };
+  }
+  resolveAssetForPlatform(assets) {
+    if (process.platform === "win32") {
+      return assets.find((a) => /Apposition.*Setup\.exe$/i.test(a.name)) || assets.find((a) => /Apposition.*\.exe$/i.test(a.name));
+    }
+    if (process.platform === "darwin") {
+      const isArm = process.arch === "arm64";
+      return assets.find((a) => isArm ? /arm64.*\.dmg$/i.test(a.name) : /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)) || assets.find((a) => /\.dmg$/i.test(a.name));
+    }
+    if (process.platform === "linux") {
+      return assets.find((a) => /\.AppImage$/i.test(a.name)) || assets.find((a) => /\.deb$/i.test(a.name));
+    }
+    return void 0;
+  }
+  async downloadUpdate(onProgress) {
+    if (!this.downloadUrl || !this.targetVersion) {
+      throw new Error("No fallback update available to download.");
+    }
+    const tempDir = electron.app.getPath("temp");
+    const ext = process.platform === "win32" ? ".exe" : process.platform === "darwin" ? ".dmg" : ".AppImage";
+    const destPath = path.join(tempDir, `Apposition-${this.targetVersion}-installer${ext}`);
+    logger$2.info(`Streaming Tier 2 fallback binary from ${this.downloadUrl} to ${destPath}`);
+    await downloadFileWithProgress(this.downloadUrl, destPath, onProgress);
+    if (process.platform !== "win32") {
+      await fs.promises.chmod(destPath, 493).catch(() => {
+      });
+    }
+    this.downloadedFilePath = destPath;
+    logger$2.info("Tier 2 fallback binary verified and staged.");
+    return destPath;
+  }
+  async applyUpdate(relaunch = true, _launchArgs = []) {
+    if (!this.downloadedFilePath || !fs.existsSync(this.downloadedFilePath)) {
+      throw new Error("Staged fallback installer not found.");
+    }
+    const installerPath = this.downloadedFilePath;
+    logger$2.info(`Executing fallback update via: ${installerPath}`);
+    if (process.platform === "win32") {
+      const args = relaunch ? ["/SILENT"] : ["/SILENT", "/NORESTART"];
+      const child2 = child_process.spawn(installerPath, args, {
+        detached: true,
+        stdio: "ignore"
+      });
+      child2.unref();
+      if (relaunch) electron.app.quit();
+      return;
+    }
+    if (process.platform === "linux" && process.env.APPIMAGE) {
+      const currentAppImage = process.env.APPIMAGE;
+      await fs.promises.copyFile(installerPath, currentAppImage);
+      await fs.promises.chmod(currentAppImage, 493);
+      if (relaunch) electron.app.relaunch({ execPath: currentAppImage });
+      if (relaunch) electron.app.quit();
+      return;
+    }
+    if (!relaunch) return;
+    const child = child_process.spawn(installerPath, [], { detached: true, stdio: "ignore" });
+    child.unref();
+    electron.app.quit();
+  }
+  getRescueUrl() {
+    return this.rescueUrl || "https://github.com/jvondev/apposition-releases/releases/latest";
+  }
+}
+const fallbackEngine = new FallbackEngine();
+const DEFAULT_CACHE_QUOTA_BYTES = 250 * 1024 * 1024;
+class StorageQuotaService {
+  isPruning = false;
+  async prunePartition(partition, thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
+    try {
+      const ses = electron.session.fromPartition(partition);
+      const cacheSize = await ses.getCacheSize();
+      if (cacheSize > thresholdBytes) {
+        logger$6.info(
+          `[StorageQuota] Partition ${partition} cache (${Math.round(cacheSize / 1024 / 1024)}MB) exceeds quota (${Math.round(thresholdBytes / 1024 / 1024)}MB). Pruning transient caches...`
+        );
+        await ses.clearStorageData({
+          storages: ["shadercache", "serviceworkers", "cachestorage"]
+        });
+        await ses.clearCache();
+        logger$6.info(`[StorageQuota] Partition ${partition} cache successfully pruned.`);
+        return true;
+      }
+    } catch (err) {
+      logger$6.debug(`[StorageQuota] Failed to prune partition ${partition}:`, err);
+    }
+    return false;
+  }
+  async pruneAllPartitions(thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
+    if (this.isPruning) return;
+    this.isPruning = true;
+    try {
+      const profiles = getProfiles() || [];
+      const partitions = /* @__PURE__ */ new Set([
+        "persist:main",
+        ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+      ]);
+      for (const part of partitions) {
+        await this.prunePartition(part, thresholdBytes);
+      }
+    } finally {
+      this.isPruning = false;
+    }
+  }
+  initBackgroundPruner() {
+    setInterval(() => {
+      this.pruneAllPartitions().catch(() => {
+      });
+    }, 15 * 60 * 1e3);
+  }
+}
+const storageQuota = new StorageQuotaService();
+async function flushAllSessions() {
+  try {
+    const profiles = getProfiles();
+    const partitions = /* @__PURE__ */ new Set([
+      "persist:main",
+      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
+    ]);
+    for (const part of partitions) {
+      try {
+        const ses = electron.session.fromPartition(part);
+        await ses.flushStorageData();
+      } catch (err) {
+        logger$6.debug(`Flush failed for ${part}`, err);
+      }
+    }
+    await electron.session.defaultSession.flushStorageData();
+  } catch (e) {
+    logger$6.warn("Failed to flush session storage", e);
+  }
+}
+const monitoredPartitions = /* @__PURE__ */ new Set();
+function monitorPartitionCookies(partition) {
+  if (monitoredPartitions.has(partition)) return;
+  monitoredPartitions.add(partition);
+  try {
+    const ses = electron.session.fromPartition(partition);
+    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
+      if (!removed && cause === "explicit") {
+        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+          global.mainWindow.webContents.send("partition.cookie-changed", {
+            partition,
+            domain: cookie.domain,
+            name: cookie.name
+          });
+        }
+      }
+    });
+  } catch (e) {
+    logger$6.debug(`Failed to attach cookie monitor for ${partition}`, e);
+  }
+}
+function initSessionPersistenceHooks() {
+  try {
+    electron.powerMonitor.on("suspend", async () => {
+      logger$6.info("System suspending - flushing session data to disk");
+      await flushAllSessions();
+      await storageQuota.pruneAllPartitions();
+    });
+    storageQuota.initBackgroundPruner();
+    electron.powerMonitor.on("resume", () => {
+      logger$6.info("System resumed from suspend - verifying app overlay and views");
+      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
+        syncAppOverlayBounds(global.mainWindow);
+      }
+      const overlay = global.appOverlayView;
+      if (overlay && !overlay.webContents.isDestroyed()) {
+        if (overlay.webContents.isCrashed()) {
+          logger$6.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
+          overlay.webContents.reload();
+        } else {
+          overlay.webContents.send("app:env", { nativeViews: true });
+        }
+      }
+    });
+    setInterval(() => {
+      flushAllSessions().catch(() => {
+      });
+    }, 6e4);
+    monitorPartitionCookies("persist:main");
+    const profiles = getProfiles();
+    for (const p of profiles) {
+      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
+      monitorPartitionCookies(part);
+    }
+  } catch (e) {
+    logger$6.warn("PowerMonitor / Cookie monitor hook unavailable", e);
+  }
+}
+const logger$1 = createLogger("UPDATE");
+function createPlatformDriver() {
+  if (process.platform === "win32") return new WindowsUpdateDriver();
+  if (process.platform === "darwin") return new MacosUpdateDriver();
+  return new LinuxUpdateDriver();
+}
+class UpdateEngine {
+  driver = createPlatformDriver();
+  state = { status: "idle", currentVersion: electron.app.getVersion(), isDev: !electron.app.isPackaged };
+  activeCheck = null;
+  activeDownload = null;
+  failureCount = 0;
+  lastCheckTime = 0;
+  init() {
+    logger$1.info(`UpdateEngine using driver: ${this.driver.name} (v${electron.app.getVersion()})`);
+    setTimeout(() => this.checkForUpdates(true).catch((e) => logger$1.warn("Startup check failed", e?.message)), 1e4);
+    setInterval(() => this.checkForUpdates(true).catch((e) => logger$1.warn("Periodic check failed", e?.message)), 4 * 3600 * 1e3);
+    electron.powerMonitor.on("resume", () => this.checkForUpdates(true).catch((e) => logger$1.warn("Resume check failed", e?.message)));
+  }
+  checkThrottled(minIntervalMs = 15 * 60 * 1e3) {
+    if (Date.now() - this.lastCheckTime < minIntervalMs) return;
+    this.checkForUpdates(true).catch((e) => logger$1.warn("Throttled check failed", e?.message));
+  }
+  getState() {
+    return this.state;
+  }
+  broadcast(nextState) {
+    this.state = nextState;
+    const payload = { state: nextState };
+    if (global.mainWindow && !global.mainWindow.isDestroyed()) global.mainWindow.webContents.send(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, payload);
+    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) global.appOverlayView.webContents.send(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, payload);
+  }
+  async checkForUpdates(isBackground = false) {
+    this.lastCheckTime = Date.now();
+    if (this.activeCheck) return this.activeCheck;
+    this.activeCheck = (async () => {
+      const currentVersion = electron.app.getVersion();
+      const isDev2 = !electron.app.isPackaged;
+      if (isDev2) {
+        const devState = { status: "idle", currentVersion, lastCheckedAt: Date.now(), isDev: true };
+        this.broadcast(devState);
+        return { success: true, hasUpdate: false, isDev: true, state: devState };
+      }
+      this.broadcast({ status: "checking", currentVersion, isDev: isDev2, tier: 1 });
+      try {
+        const result = await this.driver.checkForUpdates().catch(async (err) => {
+          logger$1.warn("Tier 1 check failed, attempting Tier 2 fallback", err?.message);
+          this.failureCount++;
+          return fallbackEngine.checkForUpdates();
+        });
+        if (!result.hasUpdate || !result.version) {
+          const idleState = { status: "idle", currentVersion, lastCheckedAt: Date.now(), isDev: false };
+          this.broadcast(idleState);
+          return { success: true, hasUpdate: false, state: idleState };
+        }
+        if (result.manualActionRequired && result.downloadUrl) {
+          const manualState = {
+            status: "manual-action-required",
+            currentVersion,
+            targetVersion: result.version,
+            downloadUrl: result.downloadUrl,
+            rescueUrl: result.downloadUrl,
+            reason: result.manualReason || "linux-deb",
+            terminalCommand: result.terminalCommand,
+            isDev: false,
+            tier: 3
+          };
+          this.broadcast(manualState);
+          return { success: true, hasUpdate: true, version: result.version, state: manualState };
+        }
+        const availableState = {
+          status: "available",
+          currentVersion,
+          targetVersion: result.version,
+          releaseNotes: result.releaseNotes,
+          downloadUrl: result.downloadUrl,
+          isDev: false,
+          tier: result.rescueUrl ? 2 : 1
+        };
+        this.broadcast(availableState);
+        if (isBackground) {
+          this.downloadUpdate().catch((e) => logger$1.warn("Auto-download failed", e?.message));
+        }
+        return { success: true, hasUpdate: true, version: result.version, state: availableState };
+      } catch (err) {
+        const errorState = {
+          status: "error",
+          currentVersion,
+          message: err?.message || String(err),
+          rescueUrl: fallbackEngine.getRescueUrl(),
+          failureCount: ++this.failureCount,
+          isDev: isDev2
+        };
+        this.broadcast(errorState);
+        return { success: false, hasUpdate: false, error: err?.message || String(err), state: errorState };
+      } finally {
+        this.activeCheck = null;
+      }
+    })();
+    return this.activeCheck;
+  }
+  async downloadUpdate() {
+    if (this.activeDownload) return this.activeDownload;
+    if (this.state.status !== "available" && this.state.status !== "downloading") {
+      return { success: false, state: this.state, error: "No update available to download." };
+    }
+    const { currentVersion, targetVersion, isDev: isDev2, tier } = this.state;
+    this.activeDownload = (async () => {
+      this.broadcast({ status: "downloading", currentVersion, targetVersion, percent: 0, isDev: isDev2, tier });
+      try {
+        if (tier === 2) {
+          await fallbackEngine.downloadUpdate((percent, bytesPerSec) => {
+            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 2 });
+          });
+        } else {
+          await this.driver.downloadUpdate((percent, bytesPerSec) => {
+            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 1 });
+          }).catch(async (e) => {
+            logger$1.warn("Tier 1 download failed, cascading to Tier 2", e?.message);
+            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent: 0, isDev: isDev2, tier: 2 });
+            await fallbackEngine.downloadUpdate((percent, bytesPerSec) => {
+              this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 2 });
+            });
+          });
+        }
+        const readyState = { status: "ready", currentVersion, targetVersion, isDev: isDev2, tier };
+        this.broadcast(readyState);
+        return { success: true, state: readyState };
+      } catch (err) {
+        const rescueUrl = fallbackEngine.getRescueUrl();
+        const errorState = {
+          status: "manual-action-required",
+          currentVersion,
+          targetVersion,
+          downloadUrl: rescueUrl,
+          rescueUrl,
+          reason: "fallback-exhausted",
+          isDev: isDev2,
+          tier: 3
+        };
+        this.broadcast(errorState);
+        return { success: false, state: errorState, error: err?.message || String(err) };
+      } finally {
+        this.activeDownload = null;
+      }
+    })();
+    return this.activeDownload;
+  }
+  hasReadyUpdate() {
+    return this.state.status === "ready";
+  }
+  async applyOnQuit() {
+    if (this.state.status !== "ready") return;
+    try {
+      logger$1.info("Applying update silently on quit...");
+      await Promise.race([
+        this.state.tier === 2 ? fallbackEngine.applyUpdate(false) : this.driver.applyUpdate(false),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("Timeout")), 5e3))
+      ]);
+    } catch (err) {
+      logger$1.warn("applyOnQuit failed or timed out", err?.message || err);
+    }
+  }
+  async applyUpdate(relaunch = true, launchArgs = []) {
+    if (this.state.status !== "ready") {
+      return { success: false, state: this.state, error: "Update is not ready to apply." };
+    }
+    try {
+      logger$1.info(`Executing pre-update state snapshot and session flush (relaunch=${relaunch})...`);
+      await flushAllSessions();
+      if (this.state.tier === 2) {
+        await fallbackEngine.applyUpdate(relaunch, launchArgs);
+      } else {
+        await this.driver.applyUpdate(relaunch, launchArgs);
+      }
+      return { success: true, state: this.state };
+    } catch (err) {
+      const errorState = {
+        status: "error",
+        currentVersion: this.state.currentVersion,
+        message: `Failed to apply update: ${err?.message || String(err)}`,
+        rescueUrl: fallbackEngine.getRescueUrl(),
+        isDev: this.state.isDev
+      };
+      this.broadcast(errorState);
+      return { success: false, state: errorState, error: err?.message || String(err) };
+    }
+  }
+}
+const updateEngine = new UpdateEngine();
+const logger = createLogger("UPDATE");
+const isTestMode = process.argv.includes("--test-idle-update") || process.env.APP_TEST_IDLE_UPDATE === "1";
+const MIN_HIDDEN_DURATION_MS = isTestMode ? 10 * 1e3 : 30 * 60 * 1e3;
+const MIN_SYSTEM_IDLE_SECONDS = isTestMode ? 5 : 1800;
+const CHECK_INTERVAL_MS = isTestMode ? 5 * 1e3 : 15 * 60 * 1e3;
+class IdleAutoUpdater {
+  hiddenSince = null;
+  attemptedVersion = null;
+  timer = null;
+  init() {
+    logger.info("Initializing IdleAutoUpdater daemon...");
+    this.timer = setInterval(() => this.checkAndApply(), CHECK_INTERVAL_MS);
+  }
+  stop() {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+  onWindowHidden() {
+    if (this.hiddenSince === null) {
+      this.hiddenSince = Date.now();
+      logger.info(`Window hidden tracked at ${new Date(this.hiddenSince).toLocaleTimeString()}`);
+    }
+  }
+  onWindowShown() {
+    this.hiddenSince = null;
+  }
+  hasActiveAudio() {
+    for (const view of viewRegistry.activeViews.values()) {
+      if (view.webContents && !view.webContents.isDestroyed() && view.webContents.isCurrentlyAudible()) {
+        return true;
+      }
+    }
+    return false;
+  }
+  canSafelyAutoApply() {
+    if (!updateEngine.hasReadyUpdate()) return false;
+    const state = updateEngine.getState();
+    const targetVer = state.targetVersion || "ready";
+    if (this.attemptedVersion === targetVer) return false;
+    const win = global.mainWindow;
+    if (!win || win.isDestroyed() || win.isVisible()) return false;
+    if (this.hiddenSince === null || Date.now() - this.hiddenSince < MIN_HIDDEN_DURATION_MS) {
+      return false;
+    }
+    try {
+      const idleSeconds = electron.powerMonitor.getSystemIdleTime();
+      if (idleSeconds < MIN_SYSTEM_IDLE_SECONDS) return false;
+    } catch {
+    }
+    if (this.hasActiveAudio()) {
+      logger.info("Deferring auto-apply: active audio playing in workspace");
+      return false;
+    }
+    try {
+      if (electron.powerMonitor.isOnBatteryPower?.()) {
+        logger.info("Deferring auto-apply: running on battery power");
+        return false;
+      }
+    } catch {
+    }
+    return true;
+  }
+  async checkAndApply() {
+    if (!this.canSafelyAutoApply()) return;
+    const state = updateEngine.getState();
+    const targetVer = state.targetVersion || "ready";
+    this.attemptedVersion = targetVer;
+    logger.info(`Verified all safety preconditions. Executing Ghost Auto-Apply for v${targetVer}...`);
+    try {
+      await updateEngine.applyUpdate(true, ["--hidden", "--background-update"]);
+    } catch (err) {
+      logger.warn("Ghost Auto-Apply failed, falling back to manual restart", err?.message || err);
+    }
+  }
+}
+const idleAutoUpdater = new IdleAutoUpdater();
 function resolvePreload(name) {
   return path.join(__dirname, "../preload", name);
 }
@@ -4731,11 +5723,13 @@ function resolveAppIcon() {
 }
 function createWindow() {
   const initial = windowStateManager.getInitialState();
+  const primary = electron.screen.getPrimaryDisplay();
+  const target = process.platform !== "darwin" && initial.isMaximized && primary?.workArea ? primary.workArea : initial.bounds;
   const win = new electron.BrowserWindow({
-    x: initial.bounds.x,
-    y: initial.bounds.y,
-    width: initial.bounds.width,
-    height: initial.bounds.height,
+    x: target.x,
+    y: target.y,
+    width: target.width,
+    height: target.height,
     icon: resolveAppIcon(),
     transparent: false,
     backgroundColor: "#F7F7F5",
@@ -4764,23 +5758,40 @@ function createWindow() {
   win.on("close", (event) => {
     if (process.platform === "darwin" && !global.isQuittingApp) {
       event.preventDefault();
-      win.hide();
+      if (win.isFullScreen()) {
+        windowStateManager.freezeForClose();
+        const finishHide = () => {
+          if (!win.isDestroyed()) {
+            win.hide();
+            windowStateManager.flushSync();
+          }
+        };
+        win.once("leave-full-screen", finishHide);
+        setTimeout(finishHide, 600);
+        win.setFullScreen(false);
+      } else {
+        win.hide();
+        windowStateManager.flushSync();
+      }
       FocusArbiter.blur(win);
       hibernationEngine.setAppMinimized(true);
       return;
     }
+    FocusArbiter.blur(win);
   });
+  win.on("show", () => {
+    idleAutoUpdater.onWindowShown();
+    updateEngine.checkThrottled(15 * 60 * 1e3);
+  });
+  win.on("hide", () => idleAutoUpdater.onWindowHidden());
   win.on("minimize", () => hibernationEngine.setAppMinimized(true));
   win.on("restore", () => hibernationEngine.setAppMinimized(false));
   win.on("blur", () => FocusArbiter.blur(win));
   win.on("focus", () => {
     if (!win.isMinimized()) hibernationEngine.setAppMinimized(false);
     const activePaneId = FocusArbiter.getActivePaneId(win.id);
-    if (activePaneId) {
-      FocusArbiter.focusGuest(win, activePaneId);
-    } else {
-      FocusArbiter.focusOverlay(win);
-    }
+    if (activePaneId) FocusArbiter.focusGuest(win, activePaneId);
+    else FocusArbiter.focusOverlay(win);
   });
   win.on("enter-full-screen", () => {
     syncAppOverlayBounds(win);
@@ -4823,11 +5834,11 @@ function createAppOverlay(win) {
   global.overlayWindow = win;
   syncAppOverlayBounds(win);
   view.webContents.on("render-process-gone", (_event, details) => {
-    logger$5.warn(`[OVERLAY] Render process gone (${details.reason}, code: ${details.exitCode})`);
+    logger$6.warn(`[OVERLAY] Render process gone (${details.reason}, code: ${details.exitCode})`);
     if (details.reason !== "clean-exit" && !view.webContents.isDestroyed()) {
       setTimeout(() => {
         if (!view.webContents.isDestroyed()) {
-          logger$5.info("[OVERLAY] Reloading app overlay view following crash...");
+          logger$6.info("[OVERLAY] Reloading app overlay view following crash...");
           loadOverlay();
         }
       }, 500);
@@ -4835,7 +5846,7 @@ function createAppOverlay(win) {
   });
   view.webContents.on("did-fail-load", (_event, errorCode, desc, validatedURL) => {
     if (utils.is.dev) {
-      logger$5.warn(`[OVERLAY] Load failed (${errorCode}): ${desc} at ${validatedURL}`);
+      logger$6.warn(`[OVERLAY] Load failed (${errorCode}): ${desc} at ${validatedURL}`);
       setTimeout(() => {
         if (!view.webContents.isDestroyed()) {
           loadOverlay();
@@ -4856,131 +5867,6 @@ function syncAppOverlayBounds(win) {
   const [w, h] = win.getContentSize();
   if (w > 0 && h > 0) {
     view.setBounds({ x: 0, y: 0, width: w, height: h });
-  }
-}
-const DEFAULT_CACHE_QUOTA_BYTES = 250 * 1024 * 1024;
-class StorageQuotaService {
-  isPruning = false;
-  async prunePartition(partition, thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
-    try {
-      const ses = electron.session.fromPartition(partition);
-      const cacheSize = await ses.getCacheSize();
-      if (cacheSize > thresholdBytes) {
-        logger$5.info(
-          `[StorageQuota] Partition ${partition} cache (${Math.round(cacheSize / 1024 / 1024)}MB) exceeds quota (${Math.round(thresholdBytes / 1024 / 1024)}MB). Pruning transient caches...`
-        );
-        await ses.clearStorageData({
-          storages: ["shadercache", "serviceworkers", "cachestorage"]
-        });
-        await ses.clearCache();
-        logger$5.info(`[StorageQuota] Partition ${partition} cache successfully pruned.`);
-        return true;
-      }
-    } catch (err) {
-      logger$5.debug(`[StorageQuota] Failed to prune partition ${partition}:`, err);
-    }
-    return false;
-  }
-  async pruneAllPartitions(thresholdBytes = DEFAULT_CACHE_QUOTA_BYTES) {
-    if (this.isPruning) return;
-    this.isPruning = true;
-    try {
-      const profiles = getProfiles() || [];
-      const partitions = /* @__PURE__ */ new Set([
-        "persist:main",
-        ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
-      ]);
-      for (const part of partitions) {
-        await this.prunePartition(part, thresholdBytes);
-      }
-    } finally {
-      this.isPruning = false;
-    }
-  }
-  initBackgroundPruner() {
-    setInterval(() => {
-      this.pruneAllPartitions().catch(() => {
-      });
-    }, 15 * 60 * 1e3);
-  }
-}
-const storageQuota = new StorageQuotaService();
-async function flushAllSessions() {
-  try {
-    const profiles = getProfiles();
-    const partitions = /* @__PURE__ */ new Set([
-      "persist:main",
-      ...profiles.map((p) => p.is_ephemeral ? p.id : `persist:${p.id}`)
-    ]);
-    for (const part of partitions) {
-      try {
-        const ses = electron.session.fromPartition(part);
-        await ses.flushStorageData();
-      } catch (err) {
-        logger$5.debug(`Flush failed for ${part}`, err);
-      }
-    }
-    await electron.session.defaultSession.flushStorageData();
-  } catch (e) {
-    logger$5.warn("Failed to flush session storage", e);
-  }
-}
-const monitoredPartitions = /* @__PURE__ */ new Set();
-function monitorPartitionCookies(partition) {
-  if (monitoredPartitions.has(partition)) return;
-  monitoredPartitions.add(partition);
-  try {
-    const ses = electron.session.fromPartition(partition);
-    ses.cookies.on("changed", (_event, cookie, cause, removed) => {
-      if (!removed && cause === "explicit") {
-        if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          global.mainWindow.webContents.send("partition.cookie-changed", {
-            partition,
-            domain: cookie.domain,
-            name: cookie.name
-          });
-        }
-      }
-    });
-  } catch (e) {
-    logger$5.debug(`Failed to attach cookie monitor for ${partition}`, e);
-  }
-}
-function initSessionPersistenceHooks() {
-  try {
-    electron.powerMonitor.on("suspend", async () => {
-      logger$5.info("System suspending - flushing session data to disk");
-      await flushAllSessions();
-      await storageQuota.pruneAllPartitions();
-    });
-    storageQuota.initBackgroundPruner();
-    electron.powerMonitor.on("resume", () => {
-      logger$5.info("System resumed from suspend - verifying app overlay and views");
-      if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-        syncAppOverlayBounds(global.mainWindow);
-      }
-      const overlay = global.appOverlayView;
-      if (overlay && !overlay.webContents.isDestroyed()) {
-        if (overlay.webContents.isCrashed()) {
-          logger$5.info("[OVERLAY] Detected crashed overlay on wake, reloading...");
-          overlay.webContents.reload();
-        } else {
-          overlay.webContents.send("app:env", { nativeViews: true });
-        }
-      }
-    });
-    setInterval(() => {
-      flushAllSessions().catch(() => {
-      });
-    }, 6e4);
-    monitorPartitionCookies("persist:main");
-    const profiles = getProfiles();
-    for (const p of profiles) {
-      const part = p.is_ephemeral ? p.id : `persist:${p.id}`;
-      monitorPartitionCookies(part);
-    }
-  } catch (e) {
-    logger$5.warn("PowerMonitor / Cookie monitor hook unavailable", e);
   }
 }
 function getMachineKeyFilePath() {
@@ -8178,15 +9064,15 @@ class ProxyCredentialBroker {
       const matchedProxy = this.findProxyForRequest(webContents, authInfo);
       if (matchedProxy && matchedProxy.credentials) {
         if (this.isRateLimited(key)) {
-          logger$5.warn(`[ProxyCredentialBroker] Authentication rate-limited for ${key} to prevent freeze.`);
+          logger$6.warn(`[ProxyCredentialBroker] Authentication rate-limited for ${key} to prevent freeze.`);
           callback("", "");
           return;
         }
         event.preventDefault();
-        logger$5.debug(`[ProxyCredentialBroker] Dispatched credentials for proxy ${key} (${matchedProxy.credentials.username})`);
+        logger$6.debug(`[ProxyCredentialBroker] Dispatched credentials for proxy ${key} (${matchedProxy.credentials.username})`);
         callback(matchedProxy.credentials.username, matchedProxy.credentials.password || "");
       } else {
-        logger$5.debug(`[ProxyCredentialBroker] No registered credentials for proxy challenge on ${key}`);
+        logger$6.debug(`[ProxyCredentialBroker] No registered credentials for proxy challenge on ${key}`);
       }
     });
   }
@@ -8267,7 +9153,7 @@ ${ANTI_DETECTION_SCRIPT}`
         await webContents.debugger.sendCommand("Emulation.setTimezoneOverride", {
           timezoneId: geo.timezone
         }).catch((err) => {
-          logger$5.debug(`[GeoTemporalHarmonizer] Failed to set timezone ${geo.timezone}:`, err);
+          logger$6.debug(`[GeoTemporalHarmonizer] Failed to set timezone ${geo.timezone}:`, err);
         });
       }
       if (geo && typeof geo.latitude === "number" && typeof geo.longitude === "number") {
@@ -8276,7 +9162,7 @@ ${ANTI_DETECTION_SCRIPT}`
           longitude: geo.longitude,
           accuracy: 100
         }).catch((err) => {
-          logger$5.debug(`[GeoTemporalHarmonizer] Failed to set geolocation:`, err);
+          logger$6.debug(`[GeoTemporalHarmonizer] Failed to set geolocation:`, err);
         });
       }
       if (customUserAgent || geo?.locale) {
@@ -8286,9 +9172,9 @@ ${ANTI_DETECTION_SCRIPT}`
         }).catch(() => {
         });
       }
-      logger$5.debug(`[GeoTemporalHarmonizer] Harmonized WebContents ${wcId} with timezone: ${geo?.timezone || "system"}`);
+      logger$6.debug(`[GeoTemporalHarmonizer] Harmonized WebContents ${wcId} with timezone: ${geo?.timezone || "system"}`);
     } catch (err) {
-      logger$5.debug(`[GeoTemporalHarmonizer] CDP Harmonization skipped for WebContents ${wcId}:`, err);
+      logger$6.debug(`[GeoTemporalHarmonizer] CDP Harmonization skipped for WebContents ${wcId}:`, err);
     }
   }
   cacheGeo(host, geo) {
@@ -8397,7 +9283,7 @@ async function testProxyConnection(rawProxy) {
     }
   } catch (err) {
     const errorMsg = err?.message || String(err);
-    logger$5.debug("[ProxyDiagnostics] Proxy test failed:", errorMsg);
+    logger$6.debug("[ProxyDiagnostics] Proxy test failed:", errorMsg);
     return {
       success: false,
       latencyMs: 0,
@@ -9735,6 +10621,9 @@ const allReleases = /* @__PURE__ */ JSON.parse('[{"version":"1.3.8","tag":"v1.3.
 function initChangelogIpc() {
   electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.GET_STATUS, () => {
     const currentVersion = electron.app.getVersion();
+    if (currentVersion.includes("-")) {
+      return { shouldShowWhatsNew: false, currentVersion, lastSeenVersion: currentVersion };
+    }
     const lastSeen = getLastSeenVersion();
     const evaluation = evaluateUpgradeState(lastSeen, currentVersion);
     if (evaluation.isFreshInstall) {
@@ -9759,8 +10648,8 @@ function initChangelogIpc() {
       lastSeenVersion: lastSeen
     };
   });
-  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, (_, version2) => {
-    const targetVersion = version2 || electron.app.getVersion();
+  electron.ipcMain.handle(IPC_CHANNELS.CHANGELOG.MARK_SEEN, () => {
+    const targetVersion = electron.app.getVersion();
     setLastSeenVersion(targetVersion);
     return { success: true, version: targetVersion };
   });
@@ -10437,711 +11326,6 @@ function initNetworkOptimizer() {
     }
   });
 }
-const logger$4 = createLogger("UPDATE");
-const REPO_URL = "https://github.com/jvondev/apposition-releases";
-class WindowsUpdateDriver {
-  name = "windows-velopack";
-  updateManager = null;
-  pendingUpdateInfo = null;
-  isSupported() {
-    return process.platform === "win32" && electron.app.isPackaged;
-  }
-  getManager() {
-    if (!this.isSupported()) return null;
-    if (!this.updateManager) {
-      try {
-        this.updateManager = new velopack.UpdateManager(new velopack.GithubSource(REPO_URL, void 0, false));
-      } catch (err) {
-        logger$4.warn("Velopack UpdateManager init failed", err?.message || err);
-      }
-    }
-    return this.updateManager;
-  }
-  async checkForUpdates() {
-    const um = this.getManager();
-    if (!um) {
-      return { hasUpdate: false };
-    }
-    try {
-      const updateInfo = await um.checkForUpdatesAsync();
-      this.pendingUpdateInfo = updateInfo;
-      if (!updateInfo) {
-        return { hasUpdate: false };
-      }
-      const version2 = updateInfo.TargetFullRelease?.Version || "latest";
-      const releaseNotes = updateInfo.TargetFullRelease?.NotesMarkdown || void 0;
-      return {
-        hasUpdate: true,
-        version: version2,
-        releaseNotes
-      };
-    } catch (err) {
-      logger$4.warn("Velopack check failed", err?.message || err);
-      throw err;
-    }
-  }
-  async downloadUpdate(onProgress) {
-    const um = this.getManager();
-    if (!um || !this.pendingUpdateInfo) {
-      throw new Error("No pending update to download on Windows.");
-    }
-    try {
-      await um.downloadUpdateAsync(this.pendingUpdateInfo, (percent) => {
-        onProgress(Math.min(100, Math.max(0, Math.round(percent))));
-      });
-      onProgress(100);
-    } catch (err) {
-      logger$4.error("Velopack download failed", err?.message || err);
-      throw err;
-    }
-  }
-  async applyUpdate() {
-    const um = this.getManager();
-    if (!um || !this.pendingUpdateInfo) {
-      throw new Error("No downloaded update to apply on Windows.");
-    }
-    logger$4.info("Applying Velopack update silently and restarting...");
-    um.waitExitThenApplyUpdate(this.pendingUpdateInfo, true, true);
-    electron.app.quit();
-  }
-}
-const GITHUB_REPO = "jvondev/apposition-releases";
-const LATEST_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
-const FALLBACK_CDN = `https://raw.githubusercontent.com/${GITHUB_REPO}/main/releases.json`;
-async function fetchLatestRelease() {
-  try {
-    const res = await fetch(LATEST_API, {
-      headers: { "User-Agent": "Apposition-Desktop-Client" }
-    });
-    if (res.ok) {
-      const data = await res.json();
-      return {
-        version: (data.tag_name || "").replace(/^v/, "").trim(),
-        tag: data.tag_name || "",
-        body: data.body || "",
-        assets: (data.assets || []).map((a) => ({
-          name: a.name,
-          browser_download_url: a.browser_download_url,
-          size: a.size || 0
-        }))
-      };
-    }
-  } catch {
-  }
-  try {
-    const res = await fetch(FALLBACK_CDN, {
-      headers: { "User-Agent": "Apposition-Desktop-Client" }
-    });
-    if (res.ok) {
-      const releases = await res.json();
-      if (Array.isArray(releases) && releases.length > 0) {
-        const top = releases[0];
-        return {
-          version: (top.version || "").replace(/^v/, "").trim(),
-          tag: top.tag || `v${top.version}`,
-          body: top.title || "",
-          assets: []
-        };
-      }
-    }
-  } catch {
-  }
-  return null;
-}
-function isNewerVersion(remoteVersion, currentVersion) {
-  return compareSemver(remoteVersion, currentVersion) > 0;
-}
-function downloadFileWithProgress(url, destPath, onProgress) {
-  return new Promise((resolve, reject) => {
-    const fileStream = fs.createWriteStream(destPath);
-    let lastBytes = 0;
-    let lastTime = Date.now();
-    let redirectCount = 0;
-    const MAX_REDIRECTS = 5;
-    const request = (targetUrl) => {
-      try {
-        const parsedUrl = new URL(targetUrl);
-        if (parsedUrl.protocol !== "https:") {
-          fileStream.close();
-          fs.unlink(destPath, () => {
-          });
-          reject(new Error(`Insecure download protocol: ${parsedUrl.protocol}`));
-          return;
-        }
-        https.get(targetUrl, { headers: { "User-Agent": "Apposition-Desktop-Client" } }, (res) => {
-          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
-            redirectCount++;
-            if (redirectCount > MAX_REDIRECTS) {
-              fileStream.close();
-              fs.unlink(destPath, () => {
-              });
-              reject(new Error("Too many redirects during download"));
-              return;
-            }
-            request(res.headers.location);
-            return;
-          }
-          if (res.statusCode !== 200) {
-            fileStream.close();
-            fs.unlink(destPath, () => {
-            });
-            reject(new Error(`Download failed with status code ${res.statusCode}`));
-            return;
-          }
-          const totalBytes = parseInt(res.headers["content-length"] || "0", 10);
-          let receivedBytes = 0;
-          let lastReportedPercent = -1;
-          let lastReportedTime = 0;
-          res.on("data", (chunk) => {
-            receivedBytes += chunk.length;
-            const now = Date.now();
-            const elapsed = (now - lastTime) / 1e3;
-            let bytesPerSec;
-            if (elapsed >= 0.5) {
-              bytesPerSec = Math.round((receivedBytes - lastBytes) / elapsed);
-              lastBytes = receivedBytes;
-              lastTime = now;
-            }
-            if (totalBytes > 0) {
-              const percent = Math.min(100, Math.round(receivedBytes / totalBytes * 100));
-              if (percent === 100 || percent !== lastReportedPercent && now - lastReportedTime >= 150) {
-                lastReportedPercent = percent;
-                lastReportedTime = now;
-                onProgress(percent, bytesPerSec);
-              }
-            }
-          });
-          res.pipe(fileStream);
-          fileStream.on("finish", () => {
-            fileStream.close(() => {
-              onProgress(100);
-              resolve();
-            });
-          });
-        }).on("error", (err) => {
-          fileStream.close();
-          fs.unlink(destPath, () => {
-          });
-          reject(err);
-        });
-      } catch (err) {
-        fileStream.close();
-        fs.unlink(destPath, () => {
-        });
-        reject(err);
-      }
-    };
-    request(url);
-  });
-}
-const logger$3 = createLogger("UPDATE");
-const execFileAsync = util.promisify(child_process.execFile);
-function resolveDestinationApp(execPath = process.execPath) {
-  const match = execPath.match(/^(.+?\.app)(?:\/.*)?$/);
-  if (match && !match[1].startsWith("/Volumes/")) {
-    return match[1];
-  }
-  return "/Applications/Apposition.app";
-}
-class MacosUpdateDriver {
-  name = "macos-dmg";
-  targetVersion;
-  downloadUrl;
-  releaseNotes;
-  downloadedDmgPath;
-  isSupported() {
-    return process.platform === "darwin";
-  }
-  async checkForUpdates() {
-    const release = await fetchLatestRelease();
-    if (!release) return { hasUpdate: false };
-    const currentVersion = electron.app.getVersion();
-    if (!isNewerVersion(release.version, currentVersion)) {
-      return { hasUpdate: false };
-    }
-    const isArm = process.arch === "arm64";
-    let matchingAsset = release.assets.find(
-      (a) => isArm ? /arm64.*\.dmg$/i.test(a.name) : /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)
-    );
-    if (!matchingAsset) {
-      matchingAsset = release.assets.find((a) => /\.dmg$/i.test(a.name));
-    }
-    if (!matchingAsset) {
-      return { hasUpdate: false };
-    }
-    this.targetVersion = release.version;
-    this.downloadUrl = matchingAsset.browser_download_url;
-    this.releaseNotes = release.body;
-    return {
-      hasUpdate: true,
-      version: release.version,
-      releaseNotes: release.body,
-      downloadUrl: matchingAsset.browser_download_url
-    };
-  }
-  async downloadUpdate(onProgress) {
-    if (!this.downloadUrl || !this.targetVersion) {
-      throw new Error("No update available to download on macOS.");
-    }
-    const tempDir = electron.app.getPath("temp");
-    const dmgPath = path.join(tempDir, `Apposition-${this.targetVersion}.dmg`);
-    logger$3.info(`Downloading macOS DMG from ${this.downloadUrl} to ${dmgPath}`);
-    await downloadFileWithProgress(this.downloadUrl, dmgPath, onProgress);
-    this.downloadedDmgPath = dmgPath;
-    logger$3.info("macOS DMG download verified.");
-  }
-  async applyUpdate() {
-    if (!this.downloadedDmgPath || !fs.existsSync(this.downloadedDmgPath)) {
-      throw new Error("Downloaded DMG not found.");
-    }
-    const dmgPath = this.downloadedDmgPath;
-    const tempDir = electron.app.getPath("temp");
-    const mountDir = path.join(tempDir, `apposition-mount-${Date.now()}`);
-    const destApp = resolveDestinationApp();
-    try {
-      logger$3.info(`Mounting DMG ${dmgPath} to ${mountDir}`);
-      await fs.promises.mkdir(mountDir, { recursive: true });
-      await execFileAsync("hdiutil", ["attach", dmgPath, "-nobrowse", "-quiet", "-mountpoint", mountDir]);
-      const entries = await fs.promises.readdir(mountDir);
-      const appFolder = entries.find((e) => e.endsWith(".app"));
-      if (!appFolder) {
-        throw new Error("Could not find .app in mounted DMG.");
-      }
-      const srcApp = path.join(mountDir, appFolder);
-      const workerScriptPath = path.join(tempDir, `apposition-update-worker-${Date.now()}.sh`);
-      const logFile = path.join(electron.app.getPath("userData"), "update-worker.log");
-      const scriptContent = `#!/bin/bash
-set -u
-PID="$1"
-SRC="$2"
-DEST="$3"
-MOUNT="$4"
-DMG="$5"
-LOG="$6"
-
-echo "=== Apposition macOS Update Worker ===" >> "$LOG"
-echo "Target: $DEST" >> "$LOG"
-echo "Source: $SRC" >> "$LOG"
-
-# 1. Wait for parent PID to exit cleanly (max 15s)
-COUNT=0
-while kill -0 "$PID" 2>/dev/null; do
-  sleep 0.2
-  COUNT=$((COUNT + 1))
-  if [ "$COUNT" -ge 75 ]; then
-    kill -9 "$PID" 2>/dev/null || true
-    sleep 0.2
-    break
-  fi
-done
-
-# 2. Atomic bundle copy with Apple ditto tool (preserves Mach-O permissions & symlinks)
-rm -rf "$DEST"
-ditto "$SRC" "$DEST"
-
-# 3. Ensure executable permission on binary
-chmod -R a+rx "$DEST/Contents/MacOS" 2>/dev/null || true
-
-# 4. Clear Gatekeeper quarantine
-xattr -cr "$DEST" 2>/dev/null || true
-xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
-
-# 5. Detach DMG and clean temp
-hdiutil detach "$MOUNT" -quiet -force 2>/dev/null || true
-rm -f "$DMG" 2>/dev/null || true
-
-# 6. Relaunch fresh application
-open -n -a "$DEST"
-echo "Update applied successfully!" >> "$LOG"
-`;
-      await fs.promises.writeFile(workerScriptPath, scriptContent, { mode: 493 });
-      logger$3.info(`Spawning detached macOS update worker for ${destApp}...`);
-      const child = child_process.spawn("/bin/bash", [
-        workerScriptPath,
-        String(process.pid),
-        srcApp,
-        destApp,
-        mountDir,
-        dmgPath,
-        logFile
-      ], {
-        detached: true,
-        stdio: "ignore"
-      });
-      child.unref();
-      electron.app.exit(0);
-    } catch (err) {
-      logger$3.error("Failed to stage macOS update worker", err?.message || err);
-      await execFileAsync("hdiutil", ["detach", mountDir, "-quiet"]).catch(() => {
-      });
-      throw err;
-    }
-  }
-}
-const logger$2 = createLogger("UPDATE");
-class LinuxUpdateDriver {
-  name = "linux-appimage";
-  targetVersion;
-  downloadUrl;
-  releaseNotes;
-  downloadedAppImagePath;
-  isSupported() {
-    return process.platform === "linux";
-  }
-  isAppImage() {
-    return Boolean(process.env.APPIMAGE);
-  }
-  async checkForUpdates() {
-    const release = await fetchLatestRelease();
-    if (!release) return { hasUpdate: false };
-    const currentVersion = electron.app.getVersion();
-    if (!isNewerVersion(release.version, currentVersion)) {
-      return { hasUpdate: false };
-    }
-    this.targetVersion = release.version;
-    this.releaseNotes = release.body;
-    if (!this.isAppImage()) {
-      const debAsset = release.assets.find((a) => /\.deb$/i.test(a.name));
-      const downloadUrl = debAsset?.browser_download_url || `https://github.com/jvondev/apposition-releases/releases/tag/v${release.version}`;
-      return {
-        hasUpdate: true,
-        version: release.version,
-        releaseNotes: release.body,
-        downloadUrl,
-        manualActionRequired: true,
-        manualReason: "linux-deb",
-        terminalCommand: "curl -fsSL https://raw.githubusercontent.com/jvondev/apposition-releases/main/scripts/install-linux.sh | bash"
-      };
-    }
-    const appImageAsset = release.assets.find((a) => /\.AppImage$/i.test(a.name));
-    if (!appImageAsset) {
-      return { hasUpdate: false };
-    }
-    this.downloadUrl = appImageAsset.browser_download_url;
-    return {
-      hasUpdate: true,
-      version: release.version,
-      releaseNotes: release.body,
-      downloadUrl: appImageAsset.browser_download_url
-    };
-  }
-  async downloadUpdate(onProgress) {
-    if (!this.isAppImage() || !this.downloadUrl || !this.targetVersion) {
-      throw new Error("No AppImage update available to download.");
-    }
-    const tempDir = electron.app.getPath("temp");
-    const appImagePath = path.join(tempDir, `Apposition-${this.targetVersion}.AppImage`);
-    logger$2.info(`Downloading Linux AppImage from ${this.downloadUrl} to ${appImagePath}`);
-    await downloadFileWithProgress(this.downloadUrl, appImagePath, onProgress);
-    await fs.promises.chmod(appImagePath, 493);
-    this.downloadedAppImagePath = appImagePath;
-    logger$2.info("Linux AppImage download verified and made executable.");
-  }
-  async applyUpdate() {
-    const currentAppImage = process.env.APPIMAGE;
-    if (!this.downloadedAppImagePath || !currentAppImage || !fs.existsSync(this.downloadedAppImagePath)) {
-      throw new Error("Target AppImage executable not found.");
-    }
-    logger$2.info(`Replacing ${currentAppImage} with ${this.downloadedAppImagePath}`);
-    const targetDir = path.dirname(currentAppImage);
-    const tempInSameDir = path.join(targetDir, `.${path.basename(currentAppImage)}.update-${Date.now()}`);
-    try {
-      await fs.promises.copyFile(this.downloadedAppImagePath, tempInSameDir);
-      await fs.promises.chmod(tempInSameDir, 493);
-      await fs.promises.rename(tempInSameDir, currentAppImage);
-      await fs.promises.rm(this.downloadedAppImagePath, { force: true }).catch(() => {
-      });
-      logger$2.info("Linux AppImage in-place update completed. Spawning detached process...");
-      const child = child_process.spawn(currentAppImage, process.argv.slice(1), {
-        detached: true,
-        stdio: "ignore",
-        env: { ...process.env, APPIMAGE: currentAppImage }
-      });
-      child.unref();
-      electron.app.exit(0);
-    } catch (err) {
-      await fs.promises.rm(tempInSameDir, { force: true }).catch(() => {
-      });
-      logger$2.error("Failed to perform in-place Linux update", err?.message || err);
-      throw err;
-    }
-  }
-}
-const logger$1 = createLogger("UPDATE");
-class FallbackEngine {
-  targetVersion;
-  downloadUrl;
-  downloadedFilePath;
-  releaseNotes;
-  rescueUrl;
-  async checkForUpdates() {
-    const release = await fetchLatestRelease();
-    if (!release) return { hasUpdate: false };
-    const currentVersion = electron.app.getVersion();
-    if (!isNewerVersion(release.version, currentVersion)) {
-      return { hasUpdate: false };
-    }
-    const rescueUrl = `https://github.com/jvondev/apposition-releases/releases/tag/${release.tag || `v${release.version}`}`;
-    this.rescueUrl = rescueUrl;
-    this.targetVersion = release.version;
-    this.releaseNotes = release.body;
-    const matchedAsset = this.resolveAssetForPlatform(release.assets);
-    if (!matchedAsset) {
-      return {
-        hasUpdate: true,
-        version: release.version,
-        releaseNotes: release.body,
-        manualActionRequired: true,
-        manualReason: "fallback-exhausted",
-        downloadUrl: rescueUrl,
-        rescueUrl
-      };
-    }
-    this.downloadUrl = matchedAsset.browser_download_url;
-    return {
-      hasUpdate: true,
-      version: release.version,
-      releaseNotes: release.body,
-      downloadUrl: matchedAsset.browser_download_url,
-      rescueUrl
-    };
-  }
-  resolveAssetForPlatform(assets) {
-    if (process.platform === "win32") {
-      return assets.find((a) => /Apposition.*Setup\.exe$/i.test(a.name)) || assets.find((a) => /Apposition.*\.exe$/i.test(a.name));
-    }
-    if (process.platform === "darwin") {
-      const isArm = process.arch === "arm64";
-      return assets.find((a) => isArm ? /arm64.*\.dmg$/i.test(a.name) : /\.dmg$/i.test(a.name) && !/arm64/i.test(a.name)) || assets.find((a) => /\.dmg$/i.test(a.name));
-    }
-    if (process.platform === "linux") {
-      return assets.find((a) => /\.AppImage$/i.test(a.name)) || assets.find((a) => /\.deb$/i.test(a.name));
-    }
-    return void 0;
-  }
-  async downloadUpdate(onProgress) {
-    if (!this.downloadUrl || !this.targetVersion) {
-      throw new Error("No fallback update available to download.");
-    }
-    const tempDir = electron.app.getPath("temp");
-    const ext = process.platform === "win32" ? ".exe" : process.platform === "darwin" ? ".dmg" : ".AppImage";
-    const destPath = path.join(tempDir, `Apposition-${this.targetVersion}-installer${ext}`);
-    logger$1.info(`Streaming Tier 2 fallback binary from ${this.downloadUrl} to ${destPath}`);
-    await downloadFileWithProgress(this.downloadUrl, destPath, onProgress);
-    if (process.platform !== "win32") {
-      await fs.promises.chmod(destPath, 493).catch(() => {
-      });
-    }
-    this.downloadedFilePath = destPath;
-    logger$1.info("Tier 2 fallback binary verified and staged.");
-    return destPath;
-  }
-  async applyUpdate() {
-    if (!this.downloadedFilePath || !fs.existsSync(this.downloadedFilePath)) {
-      throw new Error("Staged fallback installer not found.");
-    }
-    const installerPath = this.downloadedFilePath;
-    logger$1.info(`Executing fallback update via: ${installerPath}`);
-    if (process.platform === "win32") {
-      const child2 = child_process.spawn(installerPath, ["/SILENT"], {
-        detached: true,
-        stdio: "ignore"
-      });
-      child2.unref();
-      electron.app.quit();
-      return;
-    }
-    if (process.platform === "linux" && process.env.APPIMAGE) {
-      const currentAppImage = process.env.APPIMAGE;
-      await fs.promises.copyFile(installerPath, currentAppImage);
-      await fs.promises.chmod(currentAppImage, 493);
-      electron.app.relaunch({ execPath: currentAppImage });
-      electron.app.quit();
-      return;
-    }
-    const child = child_process.spawn(installerPath, [], { detached: true, stdio: "ignore" });
-    child.unref();
-    electron.app.quit();
-  }
-  getRescueUrl() {
-    return this.rescueUrl || "https://github.com/jvondev/apposition-releases/releases/latest";
-  }
-}
-const fallbackEngine = new FallbackEngine();
-const logger = createLogger("UPDATE");
-function createPlatformDriver() {
-  if (process.platform === "win32") return new WindowsUpdateDriver();
-  if (process.platform === "darwin") return new MacosUpdateDriver();
-  return new LinuxUpdateDriver();
-}
-class UpdateEngine {
-  driver = createPlatformDriver();
-  state = { status: "idle", currentVersion: electron.app.getVersion(), isDev: !electron.app.isPackaged };
-  activeCheck = null;
-  activeDownload = null;
-  failureCount = 0;
-  init() {
-    logger.info(`UpdateEngine using driver: ${this.driver.name} (v${electron.app.getVersion()})`);
-    setTimeout(() => this.checkForUpdates(true).catch((e) => logger.warn("Startup check failed", e?.message)), 1e4);
-    setInterval(() => this.checkForUpdates(true).catch((e) => logger.warn("Periodic check failed", e?.message)), 4 * 3600 * 1e3);
-    electron.powerMonitor.on("resume", () => this.checkForUpdates(true).catch((e) => logger.warn("Resume check failed", e?.message)));
-  }
-  getState() {
-    return this.state;
-  }
-  broadcast(nextState) {
-    this.state = nextState;
-    const payload = { state: nextState };
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      global.mainWindow.webContents.send(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, payload);
-    }
-    if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-      global.appOverlayView.webContents.send(IPC_CHANNELS.EVENTS.UPDATE_STATE_CHANGED, payload);
-    }
-  }
-  async checkForUpdates(isBackground = false) {
-    if (this.activeCheck) return this.activeCheck;
-    this.activeCheck = (async () => {
-      const currentVersion = electron.app.getVersion();
-      const isDev2 = !electron.app.isPackaged;
-      if (isDev2) {
-        const devState = { status: "idle", currentVersion, lastCheckedAt: Date.now(), isDev: true };
-        this.broadcast(devState);
-        return { success: true, hasUpdate: false, isDev: true, state: devState };
-      }
-      this.broadcast({ status: "checking", currentVersion, isDev: isDev2, tier: 1 });
-      try {
-        const result = await this.driver.checkForUpdates().catch(async (err) => {
-          logger.warn("Tier 1 check failed, attempting Tier 2 fallback", err?.message);
-          this.failureCount++;
-          return fallbackEngine.checkForUpdates();
-        });
-        if (!result.hasUpdate || !result.version) {
-          const idleState = { status: "idle", currentVersion, lastCheckedAt: Date.now(), isDev: false };
-          this.broadcast(idleState);
-          return { success: true, hasUpdate: false, state: idleState };
-        }
-        if (result.manualActionRequired && result.downloadUrl) {
-          const manualState = {
-            status: "manual-action-required",
-            currentVersion,
-            targetVersion: result.version,
-            downloadUrl: result.downloadUrl,
-            rescueUrl: result.downloadUrl,
-            reason: result.manualReason || "linux-deb",
-            terminalCommand: result.terminalCommand,
-            isDev: false,
-            tier: 3
-          };
-          this.broadcast(manualState);
-          return { success: true, hasUpdate: true, version: result.version, state: manualState };
-        }
-        const availableState = {
-          status: "available",
-          currentVersion,
-          targetVersion: result.version,
-          releaseNotes: result.releaseNotes,
-          downloadUrl: result.downloadUrl,
-          isDev: false,
-          tier: result.rescueUrl ? 2 : 1
-        };
-        this.broadcast(availableState);
-        if (isBackground) {
-          this.downloadUpdate().catch((e) => logger.warn("Auto-download failed", e?.message));
-        }
-        return { success: true, hasUpdate: true, version: result.version, state: availableState };
-      } catch (err) {
-        const errorState = {
-          status: "error",
-          currentVersion,
-          message: err?.message || String(err),
-          rescueUrl: fallbackEngine.getRescueUrl(),
-          failureCount: ++this.failureCount,
-          isDev: isDev2
-        };
-        this.broadcast(errorState);
-        return { success: false, hasUpdate: false, error: err?.message || String(err), state: errorState };
-      } finally {
-        this.activeCheck = null;
-      }
-    })();
-    return this.activeCheck;
-  }
-  async downloadUpdate() {
-    if (this.activeDownload) return this.activeDownload;
-    if (this.state.status !== "available" && this.state.status !== "downloading") {
-      return { success: false, state: this.state, error: "No update available to download." };
-    }
-    const { currentVersion, targetVersion, isDev: isDev2, tier } = this.state;
-    this.activeDownload = (async () => {
-      this.broadcast({ status: "downloading", currentVersion, targetVersion, percent: 0, isDev: isDev2, tier });
-      try {
-        if (tier === 2) {
-          await fallbackEngine.downloadUpdate((percent, bytesPerSec) => {
-            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 2 });
-          });
-        } else {
-          await this.driver.downloadUpdate((percent, bytesPerSec) => {
-            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 1 });
-          }).catch(async (e) => {
-            logger.warn("Tier 1 download failed, cascading to Tier 2", e?.message);
-            this.broadcast({ status: "downloading", currentVersion, targetVersion, percent: 0, isDev: isDev2, tier: 2 });
-            await fallbackEngine.downloadUpdate((percent, bytesPerSec) => {
-              this.broadcast({ status: "downloading", currentVersion, targetVersion, percent, bytesPerSec, isDev: isDev2, tier: 2 });
-            });
-          });
-        }
-        const readyState = { status: "ready", currentVersion, targetVersion, isDev: isDev2, tier };
-        this.broadcast(readyState);
-        return { success: true, state: readyState };
-      } catch (err) {
-        const rescueUrl = fallbackEngine.getRescueUrl();
-        const errorState = {
-          status: "manual-action-required",
-          currentVersion,
-          targetVersion,
-          downloadUrl: rescueUrl,
-          rescueUrl,
-          reason: "fallback-exhausted",
-          isDev: isDev2,
-          tier: 3
-        };
-        this.broadcast(errorState);
-        return { success: false, state: errorState, error: err?.message || String(err) };
-      } finally {
-        this.activeDownload = null;
-      }
-    })();
-    return this.activeDownload;
-  }
-  async applyUpdate() {
-    if (this.state.status !== "ready") {
-      return { success: false, state: this.state, error: "Update is not ready to apply." };
-    }
-    try {
-      logger.info("Executing pre-update state snapshot and session flush...");
-      await flushAllSessions();
-      if (this.state.tier === 2) {
-        await fallbackEngine.applyUpdate();
-      } else {
-        await this.driver.applyUpdate();
-      }
-      return { success: true, state: this.state };
-    } catch (err) {
-      const errorState = {
-        status: "error",
-        currentVersion: this.state.currentVersion,
-        message: `Failed to apply update: ${err?.message || String(err)}`,
-        rescueUrl: fallbackEngine.getRescueUrl(),
-        isDev: this.state.isDev
-      };
-      this.broadcast(errorState);
-      return { success: false, state: errorState, error: err?.message || String(err) };
-    }
-  }
-}
-const updateEngine = new UpdateEngine();
 function initUpdaterIpc() {
   updateEngine.init();
   electron.ipcMain.handle(IPC_CHANNELS.UPDATER.GET_STATE, () => {
@@ -11196,14 +11380,14 @@ function initDevCommandBridge(isDevMode2) {
       fs.unlinkSync(cmdPath);
       if (data.command === "reload") {
         if (global.appOverlayView && !global.appOverlayView.webContents.isDestroyed()) {
-          logger$5.info("Soft reloading app overlay view via dev command");
+          logger$6.info("Soft reloading app overlay view via dev command");
           global.appOverlayView.webContents.reload();
         } else if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-          logger$5.info("Soft reloading main window via dev command");
+          logger$6.info("Soft reloading main window via dev command");
           global.mainWindow.webContents.reload();
         }
       } else if (data.command === "quit") {
-        logger$5.info("Gracefully quitting via dev command");
+        logger$6.info("Gracefully quitting via dev command");
         electron.app.quit();
       }
     } catch {
@@ -11497,6 +11681,7 @@ function initGlobalServices(logFile, isDevMode2) {
   if (servicesInitialized) return;
   servicesInitialized = true;
   initUpdaterIpc();
+  idleAutoUpdater.init();
   setupMacApplicationMenu();
   utils.electronApp.setAppUserModelId(
     isDevMode2 ? "com.jvondev.apposition.dev" : "com.jvondev.apposition.app"
@@ -11549,11 +11734,17 @@ const isDevMode = utils.is.dev || electron.app.getName().includes("Dev") || proc
 initMainSentry(isDevMode);
 const isShowcase = process.env.APP_ENV === "showcase";
 const isolatedDir = process.env.APP_ISOLATED_DIR;
+const isCanary = electron.app.getVersion().includes("-") || process.env.APP_ENV === "test";
 if (isShowcase || isolatedDir) {
   electron.app.setName("Apposition Showcase");
   try {
-    const targetDir = isolatedDir || path.join(electron.app.getPath("appData"), "AppositionShowcase");
-    electron.app.setPath("userData", targetDir);
+    electron.app.setPath("userData", isolatedDir || path.join(electron.app.getPath("appData"), "AppositionShowcase"));
+  } catch {
+  }
+} else if (isCanary) {
+  electron.app.setName("Apposition Canary");
+  try {
+    electron.app.setPath("userData", path.join(electron.app.getPath("appData"), "AppositionCanary"));
   } catch {
   }
 } else if (isDevMode) {
@@ -11576,18 +11767,17 @@ if (!gotTheLock) {
     const showWindow = () => {
       if (!isShown && !win.isDestroyed()) {
         isShown = true;
-        if (process.platform === "darwin") {
+        win.show();
+        if (windowStateManager.shouldFullScreen() || process.platform === "darwin" && windowStateManager.shouldMaximize()) {
           win.setFullScreen(true);
         } else if (windowStateManager.shouldMaximize()) {
           win.maximize();
-        } else if (windowStateManager.shouldFullScreen()) {
-          win.setFullScreen(true);
         }
-        win.show();
         syncAppOverlayBounds(win);
       }
     };
-    electron.ipcMain.once("app:ui-mounted", showWindow);
+    const isBackground = process.argv.includes("--hidden") || process.argv.includes("--background-update");
+    if (!isBackground) electron.ipcMain.once("app:ui-mounted", showWindow);
     overlay.webContents.once("dom-ready", () => {
       syncAppOverlayBounds(win);
       setTimeout(() => sessionIdentityService.scanAllProfiles().catch(() => {
@@ -11608,12 +11798,16 @@ if (!gotTheLock) {
       syncPanes();
       global.appOverlayView?.webContents.send("app:window-restored");
     });
-    electron.screen.on("display-metrics-changed", () => {
-      syncAppOverlayBounds(win);
-      reRoundAllPanes(win);
-      repositionTransientOverlays(win);
-    });
+    const onMetrics = () => {
+      if (!win.isDestroyed()) {
+        syncAppOverlayBounds(win);
+        reRoundAllPanes(win);
+        repositionTransientOverlays(win);
+      }
+    };
+    electron.screen.on("display-metrics-changed", onMetrics);
     win.on("closed", () => {
+      electron.screen.removeListener("display-metrics-changed", onMetrics);
       unregisterAppShortcuts();
       composers.delete(win.id);
       global.mainWindow = null;
@@ -11624,7 +11818,7 @@ if (!gotTheLock) {
     return win;
   };
   const logFile = path.join(electron.app.getPath("userData"), "apposition.log");
-  logger$5.setFileSink(logFile);
+  logger$6.setFileSink(logFile);
   runtimeState.init(path.join(electron.app.getPath("userData"), ".apposition-runtime.json"));
   if (isDevMode) {
     printStartupBanner(electron.app.getVersion(), logFile);
@@ -11632,19 +11826,20 @@ if (!gotTheLock) {
   }
   process.on("uncaughtException", (err) => {
     runtimeState.incrementError();
-    logger$5.fatal("Uncaught Exception in Main Process", err?.stack || err);
+    logger$6.fatal("Uncaught Exception in Main Process", err?.stack || err);
     captureMainException(err);
   });
   process.on("unhandledRejection", (reason) => {
     runtimeState.incrementError();
-    logger$5.error("Unhandled Rejection in Main Process", reason);
+    logger$6.error("Unhandled Rejection in Main Process", reason);
     captureMainException(reason);
   });
   electron.app.on("second-instance", () => {
-    if (global.mainWindow && !global.mainWindow.isDestroyed()) {
-      if (global.mainWindow.isMinimized()) global.mainWindow.restore();
-      global.mainWindow.show();
-      global.mainWindow.focus();
+    const w = global.mainWindow;
+    if (w && !w.isDestroyed()) {
+      if (w.isMinimized()) w.restore();
+      w.show();
+      w.focus();
     }
   });
   initDeepLinking();
@@ -11657,15 +11852,32 @@ if (!gotTheLock) {
     if (win && !win.isDestroyed()) {
       if (win.isMinimized()) win.restore();
       win.show();
+      if (windowStateManager.shouldFullScreen() && !win.isFullScreen()) {
+        win.setFullScreen(true);
+      }
       win.focus();
       hibernationEngine.setAppMinimized(false);
     } else if (electron.BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
     }
   });
-  electron.app.on("before-quit", async () => {
+  let isApplyingUpdateOnQuit = false;
+  electron.app.on("before-quit", async (event) => {
+    if (isApplyingUpdateOnQuit) return;
     global.isQuittingApp = true;
     windowStateManager.flushSync();
+    if (updateEngine.hasReadyUpdate()) {
+      event.preventDefault();
+      isApplyingUpdateOnQuit = true;
+      try {
+        await flushAllSessions();
+        await updateEngine.applyOnQuit();
+      } catch (err) {
+        logger$6.error("Failed to apply update on quit", err?.message || err);
+      }
+      electron.app.quit();
+      return;
+    }
     try {
       await flushAllSessions();
     } catch {
@@ -11682,10 +11894,11 @@ if (!gotTheLock) {
   });
   electron.app.on("window-all-closed", async () => {
     try {
+      windowStateManager.flushSync();
       await flushAllSessions();
       destroyAllViews();
     } catch {
     }
-    if (process.platform !== "darwin") electron.app.quit();
+    electron.app.quit();
   });
 }
