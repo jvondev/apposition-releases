@@ -29,15 +29,15 @@ mac:
         - arm64
         - x64
   icon: assets/icon.png
-  identity: null
+  hardenedRuntime: true
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
   darkModeSupport: true
   minimumSystemVersion: "11.0.0"
+  afterSign: scripts/notarize.js
 
 dmg:
-  sign: false
   writeUpdateInfo: true
   contents:
     - x: 130
