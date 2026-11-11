@@ -1,5 +1,5 @@
-import { i as insert, c as createComponent, l as Show, e as createRenderEffect, f as className, F as For, t as template, q as layoutStore, r as createSignal, j as onMount, I as onCleanup, n as setLayoutStore, m as memo, y as addEventListener, O as DoubleBezel, h as delegateEvents, L as Portal, J as style } from "./index-B55Io7B7.js";
-import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-B0ow_f2L.js";
+import { i as insert, c as createComponent, l as Show, e as createRenderEffect, f as className, F as For, t as template, r as layoutStore, p as createSignal, j as onMount, K as onCleanup, n as setLayoutStore, m as memo, y as addEventListener, R as DoubleBezel, h as delegateEvents, O as Portal, L as style } from "./index-8eLPuZJn.js";
+import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-CoBsKg7a.js";
 var _tmpl$$3 = /* @__PURE__ */ template(`<div class="w-full font-sans select-none"><div class="overflow-x-auto rounded-xl border border-neutral-200/80 bg-white shadow-2xs [webkit-overflow-scrolling:touch]"><div class="sm:hidden text-center py-1.5 px-3 text-[11px] text-neutral-400 font-telemetry flex items-center justify-center gap-1.5 border-b border-neutral-100 bg-neutral-50/60"><span>Swipe horizontally to compare plans</span><span>→</span></div><table class="w-full min-w-[620px] text-left border-collapse"><thead><tr class="border-b border-neutral-200 bg-neutral-50/80 type-caption font-semibold text-neutral-900"><th>Feature</th><th>Free Forever</th><th>Pro ($10 - $12/mo)</th><th><div class="font-bold text-neutral-900">Lifetime ($149)</div><div class="type-caption text-neutral-500 font-normal mt-0.5">Pay once, own forever</div></th></tr></thead><tbody class="divide-y divide-neutral-200/60 type-caption text-neutral-700">`), _tmpl$2$2 = /* @__PURE__ */ template(`<tr class="hover:bg-neutral-50/60 transition-colors"><td></td><td></td><td></td><td>`), _tmpl$3$2 = /* @__PURE__ */ template(`<tr class="bg-neutral-100/70 font-semibold text-neutral-900 type-telemetry uppercase tracking-wider"><td colspan=4>`);
 const COMPARISON_DATA = [{
   name: "Workspace & Window Canvas",
@@ -9,7 +9,7 @@ const COMPARISON_DATA = [{
   isHeader: true
 }, {
   name: "Dedicated Workspaces",
-  starter: "2 Workspaces",
+  starter: "5 Workspaces",
   pro: "Unlimited",
   lifetime: "Unlimited"
 }, {
@@ -45,12 +45,12 @@ const COMPARISON_DATA = [{
   isHeader: true
 }, {
   name: "Isolated Account Profiles (Multi-Login)",
-  starter: "1 Profile (Default)",
+  starter: "2 Profiles",
   pro: "Unlimited Profiles",
   lifetime: "Unlimited Profiles"
 }, {
   name: "Cookie Partition Sandboxing",
-  starter: "Single Partition",
+  starter: "✓ Sandboxed (Up to 2)",
   pro: "✓ Sandboxed per Profile",
   lifetime: "✓ Sandboxed per Profile"
 }, {
@@ -181,13 +181,13 @@ function getPaywallReasonText(reason) {
   const tier = layoutStore.capabilities?.tier ?? "free";
   switch (reason) {
     case "workspace_limit":
-      return "Free plan includes 2 workspaces. Upgrade to Pro to organize unlimited client and business projects side-by-side.";
+      return "Free plan includes up to 5 workspaces. Upgrade to Pro to organize unlimited client and business projects side-by-side.";
     case "profile":
     case "multi_account":
       if (tier === "tier1") {
-        return "Staying logged into multiple client accounts on the same site requires Tier 2 or Pro. Upgrade your plan to manage all client logins at once.";
+        return "Managing 3 or more client accounts on the same site requires Tier 2 or Pro. Upgrade your plan to manage all client logins at once.";
       }
-      return "Staying logged into multiple client accounts on the same site is a Pro feature. Upgrade to Pro to manage all your client logins at the same time.";
+      return "Free plan includes 2 isolated account profiles. Upgrade to Pro to manage unlimited client logins simultaneously.";
     case "proxy_feature":
       if (tier === "tier1" || tier === "tier2") {
         return "Custom proxy setup (HTTP & SOCKS5) requires Tier 3 or Pro. Upgrade your plan to configure your own proxies for each account.";

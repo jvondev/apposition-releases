@@ -1,5 +1,66 @@
 [
   {
+    "version": "1.4.1",
+    "tag": "v1.4.1",
+    "title": "Promotional Code Stacking, Expanded Free Tier & Instant Localhost Navigation",
+    "publishedAt": "2026-11-11",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Promotional Code Stacking",
+            "description": "Stack additional license and promotion codes directly inside Account Settings to instantly upgrade tiers, unlock more account profiles, and expand multi-device seats."
+          },
+          {
+            "title": "Expanded Free Tier",
+            "description": "Free accounts now include up to 5 workspaces and 2 separate account profiles with zero credit card required."
+          },
+          {
+            "title": "Touch-Responsive Workspace Controls",
+            "description": "Pane headers now feature touch-responsive quick actions and a dedicated focus mode for distraction-free split-screen workflows."
+          }
+        ]
+      },
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Instant Localhost & Dev Navigation",
+            "description": "The searchbar now instantly detects local development servers, custom ports, and internal network addresses, opening them directly without redirecting to web search."
+          },
+          {
+            "title": "Seamless Split Pane Transitions",
+            "description": "Eliminated blank search flashes and URL flicker when switching focus between side-by-side panes."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Profile Quota Status",
+            "description": "Settings and profile menus now accurately display inactive badges only on profiles exceeding your active plan allowance."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Promotional Code Stacking",
+        "description": "Stack additional license and promotion codes directly inside Account Settings to instantly upgrade tiers, unlock more account profiles, and expand multi-device seats."
+      },
+      {
+        "title": "Expanded Free Tier",
+        "description": "Free accounts now include up to 5 workspaces and 2 separate account profiles with zero credit card required."
+      },
+      {
+        "title": "Instant Localhost & Dev Navigation",
+        "description": "The searchbar now instantly detects local development servers, custom ports, and internal network addresses, opening them directly without redirecting to web search."
+      }
+    ]
+  },
+  {
     "version": "1.4.0",
     "tag": "v1.4.0",
     "title": "AppSumo Official Launch — Side-by-Side Screen Splitting & Separate Client Logins",
