@@ -1,4 +1,4 @@
-import { p as createSignal, K as onCleanup, n as setLayoutStore, y as addEventListener, i as insert, c as createComponent, l as Show, m as memo, N as use, q as setAttribute, e as createRenderEffect, f as className, t as template, h as delegateEvents } from "./index-8eLPuZJn.js";
+import { q as createSignal, L as onCleanup, p as setLayoutStore, n as syncOverlayFocus, z as addEventListener, i as insert, c as createComponent, l as Show, m as memo, O as use, r as setAttribute, e as createRenderEffect, f as className, t as template, h as delegateEvents } from "./index-Cp9QXDOh.js";
 function sanitizeLicenseKey(rawKey) {
   if (!rawKey) return "";
   return rawKey.replace(/^[\uFEFF\xA0\s"']+|[\uFEFF\xA0\s"']+$/g, "").replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
@@ -185,10 +185,10 @@ function useLicenseActivationController(options = {}) {
     for (const eff of effects) {
       switch (eff.type) {
         case "FOCUS_EMAIL_INPUT":
-          requestAnimationFrame(() => emailInputRef?.focus());
+          requestAnimationFrame(() => syncOverlayFocus(emailInputRef));
           break;
         case "FOCUS_KEY_INPUT":
-          requestAnimationFrame(() => keyInputRef?.focus());
+          requestAnimationFrame(() => syncOverlayFocus(keyInputRef));
           break;
         case "SCHEDULE_CLOSE":
           closeTimeout = setTimeout(async () => {
@@ -277,7 +277,7 @@ function useLicenseActivationController(options = {}) {
     reset: () => dispatch({ type: "RESET" })
   };
 }
-var _tmpl$ = /* @__PURE__ */ template(`<div class="flex items-center justify-between"><label class="type-ui font-semibold text-neutral-900">`), _tmpl$2 = /* @__PURE__ */ template(`<svg class="animate-spin h-3.5 w-3.5 text-white"xmlns=http://www.w3.org/2000/svg fill=none viewBox="0 0 24 24"><circle class=opacity-25 cx=12 cy=12 r=10 stroke=currentColor stroke-width=4></circle><path class=opacity-75 fill=currentColor d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">`), _tmpl$3 = /* @__PURE__ */ template(`<button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 text-white rounded-lg type-caption font-semibold transition-all shadow-2xs active:scale-[0.98] cursor-pointer shrink-0 flex items-center justify-center min-w-[72px]">`), _tmpl$4 = /* @__PURE__ */ template(`<div class="p-2 bg-neutral-50 border border-neutral-200/90 rounded-lg flex items-center justify-between gap-2 shadow-2xs"><span class="type-caption text-neutral-600 leading-tight">Computer limit reached. Deactivate an older device:</span><button type=button class="px-2.5 py-1 bg-white hover:bg-neutral-100 text-neutral-800 rounded-md type-telemetry font-semibold border border-neutral-300 transition-colors shrink-0 cursor-pointer shadow-2xs">Manage Devices ↗`), _tmpl$5 = /* @__PURE__ */ template(`<div class="space-y-1.5 pt-1"><p class="type-caption text-red-600 font-medium leading-tight">`), _tmpl$6 = /* @__PURE__ */ template(`<div class="text-center pt-0.5"><button type=button class="type-caption text-neutral-500 hover:text-neutral-900 underline underline-offset-2 transition-colors cursor-pointer">`), _tmpl$7 = /* @__PURE__ */ template(`<div class="space-y-2 text-left w-full select-none"data-overlay-chrome=true><form><div class="flex items-center gap-2"><input type=text placeholder="Paste your license key..."class="flex-1 px-3 py-1.5 bg-neutral-50/80 hover:bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:bg-white focus:border-neutral-900 transition-all shadow-2xs"autocomplete=off></div><div><div class="overflow-hidden flex flex-col gap-1.5 pt-0.5"><div class="flex items-center justify-between"><span class="type-caption font-medium text-neutral-600">Email required to register and link your license:</span></div><div class="flex items-center gap-2"><input type=email placeholder=name@example.com class="flex-1 px-3 py-1.5 bg-neutral-50/80 hover:bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:bg-white focus:border-neutral-900 transition-all shadow-2xs"autocomplete=email><button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 text-white rounded-lg type-caption font-semibold transition-all shadow-2xs active:scale-[0.98] cursor-pointer shrink-0 flex items-center justify-center min-w-[72px]">`), _tmpl$8 = /* @__PURE__ */ template(`<span class="type-telemetry px-2 py-0.5 rounded-full bg-neutral-100 border border-neutral-200 text-neutral-700 font-semibold tracking-wide uppercase">`);
+var _tmpl$ = /* @__PURE__ */ template(`<div class="flex items-center justify-between"><label class="type-ui font-semibold text-neutral-900">`), _tmpl$2 = /* @__PURE__ */ template(`<svg class="animate-spin h-3.5 w-3.5 text-white"xmlns=http://www.w3.org/2000/svg fill=none viewBox="0 0 24 24"><circle class=opacity-25 cx=12 cy=12 r=10 stroke=currentColor stroke-width=4></circle><path class=opacity-75 fill=currentColor d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">`), _tmpl$3 = /* @__PURE__ */ template(`<button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 text-white rounded-lg type-caption font-semibold transition-all shadow-2xs active:scale-[0.98] cursor-pointer shrink-0 flex items-center justify-center min-w-[72px]">`), _tmpl$4 = /* @__PURE__ */ template(`<div class="p-2 bg-neutral-50 border border-neutral-200/90 rounded-lg flex items-center justify-between gap-2 shadow-2xs"><span class="type-caption text-neutral-600 leading-tight">Computer limit reached. Deactivate an older device:</span><button type=button class="px-2.5 py-1 bg-white hover:bg-neutral-100 text-neutral-800 rounded-md type-telemetry font-semibold border border-neutral-300 transition-colors shrink-0 cursor-pointer shadow-2xs">Manage Devices ↗`), _tmpl$5 = /* @__PURE__ */ template(`<div class="space-y-1.5 pt-1"><p class="type-caption text-red-600 font-medium leading-tight">`), _tmpl$6 = /* @__PURE__ */ template(`<div class="text-center pt-0.5"><button type=button class="type-caption text-neutral-500 hover:text-neutral-900 underline underline-offset-2 transition-colors cursor-pointer">`), _tmpl$7 = /* @__PURE__ */ template(`<div class="space-y-2 text-left w-full select-none"data-overlay-chrome=true><form><div class="flex items-center gap-2"><input type=text placeholder="Paste your license key..."class="flex-1 px-3 py-1.5 select-text bg-neutral-50/80 hover:bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:bg-white focus:border-neutral-900 transition-all shadow-2xs"autocomplete=off></div><div><div class="overflow-hidden flex flex-col gap-1.5 pt-0.5"><div class="flex items-center justify-between"><span class="type-caption font-medium text-neutral-600">Email required to register and link your license:</span></div><div class="flex items-center gap-2"><input type=email placeholder=name@example.com class="flex-1 px-3 py-1.5 select-text bg-neutral-50/80 hover:bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900 focus:bg-white focus:border-neutral-900 transition-all shadow-2xs"autocomplete=email><button type=submit class="px-3.5 py-1.5 bg-neutral-900 hover:bg-black disabled:bg-neutral-200 disabled:text-neutral-400 text-white rounded-lg type-caption font-semibold transition-all shadow-2xs active:scale-[0.98] cursor-pointer shrink-0 flex items-center justify-center min-w-[72px]">`), _tmpl$8 = /* @__PURE__ */ template(`<span class="type-telemetry px-2 py-0.5 rounded-full bg-neutral-100 border border-neutral-200 text-neutral-700 font-semibold tracking-wide uppercase">`);
 const UniversalActivationCard = (props) => {
   const ctrl = props.controller;
   const isInline = () => props.variant === "inline";
@@ -307,6 +307,8 @@ const UniversalActivationCard = (props) => {
         return _el$3;
       }
     }), _el$5);
+    _el$6.$$mousedown = () => syncOverlayFocus();
+    _el$6.addEventListener("focus", () => syncOverlayFocus());
     _el$6.$$input = (e) => ctrl.setKey(e.currentTarget.value);
     use((el) => ctrl.setKeyInputRef(el), _el$6);
     setAttribute(_el$6, "spellcheck", false);
@@ -329,6 +331,8 @@ const UniversalActivationCard = (props) => {
         return _el$7;
       }
     }), null);
+    _el$11.$$mousedown = () => syncOverlayFocus();
+    _el$11.addEventListener("focus", () => syncOverlayFocus());
     _el$11.$$input = (e) => ctrl.setEmail(e.currentTarget.value);
     use((el) => ctrl.setEmailInputRef(el), _el$11);
     setAttribute(_el$11, "spellcheck", false);
@@ -392,7 +396,7 @@ const UniversalActivationCard = (props) => {
     return _el$;
   })();
 };
-delegateEvents(["input", "click"]);
+delegateEvents(["input", "mousedown", "click"]);
 export {
   UniversalActivationCard as U,
   useLicenseActivationController as u

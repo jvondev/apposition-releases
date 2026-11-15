@@ -282,7 +282,7 @@ function initMediaSensor() {
   if (typeof window === "undefined") return;
   if (window.self !== window.top) return;
   const immediateEvents = ["play", "playing", "pause", "ended", "volumechange"];
-  const throttledEvents = ["timeupdate", "waiting", "canplay"];
+  const throttledEvents = ["waiting", "canplay"];
   immediateEvents.forEach((ev) => {
     window.addEventListener(ev, () => scheduleReport(true), true);
   });
@@ -685,9 +685,9 @@ function initSemanticTitleHarvester() {
     });
     const titleEl = document.querySelector("title");
     if (titleEl) {
-      observer.observe(titleEl, { childList: true, characterData: true, subtree: true });
+      observer.observe(titleEl, { childList: true, characterData: true });
     } else if (document.head) {
-      observer.observe(document.head, { childList: true, subtree: true });
+      observer.observe(document.head, { childList: true });
     }
     window.addEventListener("popstate", () => setTimeout(scanAndDispatch, 400), { passive: true });
     window.addEventListener("hashchange", () => setTimeout(scanAndDispatch, 400), {

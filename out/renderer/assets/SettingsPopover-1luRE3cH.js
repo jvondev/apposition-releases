@@ -1,5 +1,5 @@
-import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, i as insert, m as memo, b as isRestarting, e as createRenderEffect, f as className, o as openExternalUrl, g as applyUpdate, t as template, h as delegateEvents, j as onMount, k as initUpdateStore, l as Show, s as setStyleProperty, F as For, n as setLayoutStore, p as createSignal, q as setAttribute, r as layoutStore, W as WorkspaceIcon, v as createEffect, A as AppIcon, w as frecencyEngine, x as getAppNameFromUrl, y as addEventListener, z as getProviderDomain, B as canSwitchProfile, C as getSortedIdentities, D as canCreateProfile, P as ProfileForm, E as setActiveShortcuts, G as DEFAULT_SHORTCUTS, H as activeShortcuts, I as isMacPlatform, J as saveShortcut, K as onCleanup, L as style, N as use, O as Portal } from "./index-8eLPuZJn.js";
-import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-CoBsKg7a.js";
+import { c as createComponent, S as Switch, M as Match, a as checkForUpdates, u as updateStore, d as downloadUpdate, i as insert, m as memo, b as isRestarting, e as createRenderEffect, f as className, o as openExternalUrl, g as applyUpdate, t as template, h as delegateEvents, j as onMount, k as initUpdateStore, l as Show, s as setStyleProperty, F as For, n as syncOverlayFocus, p as setLayoutStore, q as createSignal, r as setAttribute, v as layoutStore, W as WorkspaceIcon, w as createEffect, A as AppIcon, x as frecencyEngine, y as getAppNameFromUrl, z as addEventListener, B as getProviderDomain, C as canSwitchProfile, D as getSortedIdentities, E as canCreateProfile, P as ProfileForm, G as setActiveShortcuts, H as DEFAULT_SHORTCUTS, I as activeShortcuts, J as isMacPlatform, K as saveShortcut, L as onCleanup, N as style, O as use, Q as Portal } from "./index-Cp9QXDOh.js";
+import { u as useLicenseActivationController, U as UniversalActivationCard } from "./UniversalActivationCard-CIQRYtoB.js";
 var _tmpl$$b = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 active:scale-[0.98] border border-neutral-300/80 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Check for Updates`), _tmpl$2$b = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg flex items-center gap-1.5 opacity-70 cursor-not-allowed"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-neutral-600"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path></svg>Checking...`), _tmpl$3$b = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-white bg-neutral-900 hover:bg-neutral-800 active:scale-[0.98] px-3.5 py-1.5 rounded-lg shadow-sm transition-all cursor-pointer">Download Update`), _tmpl$4$8 = /* @__PURE__ */ template(`<button disabled class="text-xs font-medium text-neutral-500 bg-neutral-100 border border-neutral-200 px-3 py-1.5 rounded-lg opacity-80 cursor-not-allowed">Downloading...`), _tmpl$5$6 = /* @__PURE__ */ template(`<button>`), _tmpl$6$5 = /* @__PURE__ */ template(`<button class="text-xs font-semibold text-neutral-900 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Download Package`), _tmpl$7$3 = /* @__PURE__ */ template(`<button class="text-xs font-medium text-neutral-800 bg-white hover:bg-neutral-100 border border-neutral-300 px-3 py-1.5 rounded-lg shadow-2xs transition-all cursor-pointer">Retry Check`), _tmpl$8$3 = /* @__PURE__ */ template(`<svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 class="animate-spin text-white"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67">`), _tmpl$9$1 = /* @__PURE__ */ template(`<span>Restarting...`);
 function UpdateActionButton() {
   const handleApply = async () => {
@@ -258,6 +258,9 @@ function AccountDevicesList(props) {
 }
 delegateEvents(["click"]);
 const AccountActivationBox = (props) => {
+  onMount(() => {
+    syncOverlayFocus();
+  });
   const controller = useLicenseActivationController({
     onSuccess: () => {
       window.dispatchEvent(new CustomEvent("app:toast", {
@@ -281,7 +284,7 @@ const AccountActivationBox = (props) => {
     }
   });
 };
-var _tmpl$$8 = /* @__PURE__ */ template(`<p class="type-caption text-red-600 text-[11px]">`), _tmpl$2$8 = /* @__PURE__ */ template(`<form class="space-y-2 bg-white rounded-xl border border-neutral-200 p-3 shadow-2xs"><div class="flex items-center justify-between"><span class="type-caption font-semibold text-neutral-800">Stack AppSumo Code</span><button type=button class="type-telemetry text-neutral-400 hover:text-neutral-600">Cancel</button></div><p class="type-caption text-neutral-500 text-[11px]">Paste your 2nd code for Tier 2 Pro (2 computers), or 3rd code for Tier 3 Agency (5 computers).</p><div class="flex items-center gap-2"><input type=text placeholder=APPO-XXXX-XXXX-XXXX class="flex-1 px-3 py-1.5 bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry uppercase text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900"><button type=submit class="px-3 py-1.5 bg-neutral-900 hover:bg-black text-white type-caption font-medium rounded-lg disabled:opacity-40 transition-colors cursor-pointer">`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="pt-2 border-t border-neutral-200/60">`), _tmpl$4$5 = /* @__PURE__ */ template(`<button type=button class="type-caption font-semibold text-neutral-700 hover:text-neutral-900 hover:underline cursor-pointer flex items-center gap-1"><span>+ Stack Additional AppSumo Code (Upgrade Tier)`);
+var _tmpl$$8 = /* @__PURE__ */ template(`<p class="type-caption text-red-600 text-[11px]">`), _tmpl$2$8 = /* @__PURE__ */ template(`<form class="space-y-2 bg-white rounded-xl border border-neutral-200 p-3 shadow-2xs"><div class="flex items-center justify-between"><span class="type-caption font-semibold text-neutral-800">Stack AppSumo Code</span><button type=button class="type-telemetry text-neutral-400 hover:text-neutral-600">Cancel</button></div><p class="type-caption text-neutral-500 text-[11px]">Paste your 2nd code for Tier 2 Pro (2 computers), or 3rd code for Tier 3 Agency (5 computers).</p><div class="flex items-center gap-2"><input type=text placeholder=APPO-XXXX-XXXX-XXXX class="flex-1 px-3 py-1.5 select-text bg-neutral-50 border border-neutral-300 rounded-lg type-caption font-telemetry uppercase text-neutral-900 focus:outline-none focus:ring-1 focus:ring-neutral-900"><button type=submit class="px-3 py-1.5 bg-neutral-900 hover:bg-black text-white type-caption font-medium rounded-lg disabled:opacity-40 transition-colors cursor-pointer">`), _tmpl$3$8 = /* @__PURE__ */ template(`<div class="pt-2 border-t border-neutral-200/60">`), _tmpl$4$5 = /* @__PURE__ */ template(`<button type=button class="type-caption font-semibold text-neutral-700 hover:text-neutral-900 hover:underline cursor-pointer flex items-center gap-1"><span>+ Stack Additional AppSumo Code (Upgrade Tier)`);
 const AccountStackCodeBox = (props) => {
   const [isOpen, setIsOpen] = createSignal(false);
   const [code, setCode] = createSignal("");
@@ -327,7 +330,10 @@ const AccountStackCodeBox = (props) => {
       get fallback() {
         return (() => {
           var _el$1 = _tmpl$4$5();
-          _el$1.$$click = () => setIsOpen(true);
+          _el$1.$$click = () => {
+            setIsOpen(true);
+            syncOverlayFocus();
+          };
           return _el$1;
         })();
       },
@@ -338,6 +344,8 @@ const AccountStackCodeBox = (props) => {
           setIsOpen(false);
           setError(null);
         };
+        _el$8.$$mousedown = () => syncOverlayFocus();
+        _el$8.addEventListener("focus", () => syncOverlayFocus());
         _el$8.$$input = (e) => setCode(e.currentTarget.value);
         insert(_el$9, () => loading() ? "Applying..." : "Stack");
         insert(_el$2, createComponent(Show, {
@@ -358,7 +366,7 @@ const AccountStackCodeBox = (props) => {
     return _el$;
   })();
 };
-delegateEvents(["click", "input"]);
+delegateEvents(["click", "input", "mousedown"]);
 var _tmpl$$7 = /* @__PURE__ */ template(`<img class="w-11 h-11 rounded-full border border-neutral-200 object-cover shadow-2xs">`), _tmpl$2$7 = /* @__PURE__ */ template(`<div class="absolute -bottom-1 -right-1 bg-neutral-900 text-white type-telemetry font-bold tracking-wider px-1.5 py-0.2 rounded-full border border-white shadow-2xs">PRO`), _tmpl$3$7 = /* @__PURE__ */ template(`<span class="type-caption font-semibold text-neutral-800 bg-neutral-100 border border-neutral-300 px-2.5 py-1 rounded-lg flex items-center gap-1.5 shadow-2xs"><span class="w-1.5 h-1.5 rounded-full bg-neutral-900"></span> Active`), _tmpl$4$4 = /* @__PURE__ */ template(`<div class="flex items-center gap-3.5 p-3.5 bg-neutral-50/60 border border-neutral-200/80 rounded-xl shadow-2xs"><div class="relative shrink-0"></div><div class="min-w-0 flex-1"><h3 class="type-ui font-semibold text-neutral-900 truncate"></h3><p class="type-caption text-neutral-500 font-normal truncate"></p></div><div>`), _tmpl$5$3 = /* @__PURE__ */ template(`<div class="w-11 h-11 rounded-full bg-neutral-100 border border-neutral-200/90 flex items-center justify-center text-neutral-700 shadow-2xs"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=1.75><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path><circle cx=12 cy=7 r=4>`), _tmpl$6$3 = /* @__PURE__ */ template(`<span class="type-caption font-medium text-neutral-600 bg-white border border-neutral-200/80 px-2.5 py-1 rounded-lg shadow-2xs">Free Plan`);
 const AccountProfileHeader = () => {
   return (() => {
@@ -639,7 +647,7 @@ function WorkspacesTab(props) {
     return _el$;
   })();
 }
-var _tmpl$$4 = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="type-ui font-semibold text-neutral-800 uppercase tracking-wider">Launchpad Shortcuts</h4><p class="type-telemetry text-neutral-500">Default bookmarks opened within this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 bg-white border border-neutral-200 rounded-lg px-3 py-2 type-ui text-neutral-800 outline-none focus:border-neutral-800 shadow-xs"placeholder="Website URL (e.g. app.slack.com)"><button class="type-ui font-medium bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg px-3.5 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-xs">Add</button></div><div class="border border-neutral-200/80 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="p-3 text-center type-caption text-neutral-400 italic">No shortcuts configured.`), _tmpl$3$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="type-ui font-medium text-neutral-800 truncate"></span><span class="type-telemetry text-neutral-400 font-telemetry truncate"></span></div></div><div class="flex items-center gap-1"><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▲</button><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▼</button><button class="p-1 hover:bg-red-50 text-neutral-400 hover:text-red-600 rounded cursor-pointer">✕`);
+var _tmpl$$4 = /* @__PURE__ */ template(`<div class="space-y-3 mt-4 border-t border-neutral-100 pt-4"><div class=space-y-0.5><h4 class="type-ui font-semibold text-neutral-800 uppercase tracking-wider">Launchpad Shortcuts</h4><p class="type-telemetry text-neutral-500">Default bookmarks opened within this profile</p></div><div class="flex items-center gap-2"><input type=text class="flex-1 select-text bg-white border border-neutral-200 rounded-lg px-3 py-2 type-ui text-neutral-800 outline-none focus:border-neutral-800 shadow-xs"placeholder="Website URL (e.g. app.slack.com)"><button class="type-ui font-medium bg-neutral-900 hover:bg-neutral-800 text-white rounded-lg px-3.5 py-2 disabled:opacity-50 transition-colors cursor-pointer shadow-xs">Add</button></div><div class="border border-neutral-200/80 rounded-xl overflow-hidden divide-y divide-neutral-100 max-h-40 overflow-y-auto bg-neutral-50/50">`), _tmpl$2$4 = /* @__PURE__ */ template(`<div class="p-3 text-center type-caption text-neutral-400 italic">No shortcuts configured.`), _tmpl$3$4 = /* @__PURE__ */ template(`<div class="flex items-center justify-between p-2 hover:bg-white transition-colors"><div class="flex items-center gap-2 min-w-0"><div class="flex flex-col min-w-0"><span class="type-ui font-medium text-neutral-800 truncate"></span><span class="type-telemetry text-neutral-400 font-telemetry truncate"></span></div></div><div class="flex items-center gap-1"><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▲</button><button class="p-1 hover:bg-neutral-100 rounded text-neutral-400 hover:text-neutral-700 disabled:opacity-30 cursor-pointer">▼</button><button class="p-1 hover:bg-red-50 text-neutral-400 hover:text-red-600 rounded cursor-pointer">✕`);
 function ProfileShortcutsManager(props) {
   const [apps, setApps] = createSignal([]);
   const [newUrl, setNewUrl] = createSignal("");
@@ -707,6 +715,8 @@ function ProfileShortcutsManager(props) {
   };
   return (() => {
     var _el$ = _tmpl$$4(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.nextSibling, _el$6 = _el$3.nextSibling;
+    _el$4.$$mousedown = () => syncOverlayFocus();
+    _el$4.addEventListener("focus", () => syncOverlayFocus());
     _el$4.$$input = (e) => setNewUrl(e.currentTarget.value);
     _el$5.$$click = handleAdd;
     insert(_el$6, createComponent(Show, {
@@ -751,7 +761,7 @@ function ProfileShortcutsManager(props) {
     return _el$;
   })();
 }
-delegateEvents(["input", "click"]);
+delegateEvents(["input", "mousedown", "click"]);
 var _tmpl$$3 = /* @__PURE__ */ template(`<span class="type-caption font-normal text-neutral-400">(Default)`), _tmpl$2$3 = /* @__PURE__ */ template(`<span class="type-telemetry font-medium text-neutral-500 bg-neutral-100 border border-neutral-200/80 px-1.5 py-0.2 rounded-md">Incognito`), _tmpl$3$3 = /* @__PURE__ */ template(`<span class="type-telemetry font-semibold text-neutral-500 bg-neutral-100 border border-neutral-200/80 px-1.5 py-0.2 rounded-md tracking-wider">PRO (Inactive)`), _tmpl$4$2 = /* @__PURE__ */ template(`<button title="Delete Profile"class="p-1 text-neutral-400 hover:text-red-600 hover:bg-red-50/70 rounded-md transition-colors cursor-pointer"><svg width=13 height=13 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2">`), _tmpl$5$1 = /* @__PURE__ */ template(`<div class="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-neutral-50/80 hover:bg-white border border-neutral-200/90 shadow-2xs transition-all cursor-pointer min-w-0"><div class="w-3.5 h-3.5 rounded-full bg-white border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3 h-3 object-contain"></div><span class="type-ui font-normal text-neutral-800 truncate max-w-[190px]">`), _tmpl$6$1 = /* @__PURE__ */ template(`<div class="flex flex-col gap-2.5 p-3.5 bg-white rounded-xl border border-neutral-200/80 shadow-2xs hover:border-neutral-300 transition-all group select-none"><div class="flex items-center justify-between"><div class="flex items-center gap-2.5 min-w-0"><div class="flex items-center justify-center w-7 h-7 rounded-lg text-white type-caption font-bold shadow-2xs shrink-0"></div><div class="flex items-center gap-1.5 min-w-0 flex-wrap"><span class="type-ui font-semibold text-neutral-900 truncate"></span></div></div><div class="flex items-center gap-1 shrink-0"><button class="px-2.5 py-1 type-caption font-medium text-neutral-700 hover:text-neutral-950 bg-white hover:bg-neutral-50 rounded-lg transition-all shrink-0 cursor-pointer border border-neutral-200/90 shadow-2xs active:scale-[0.98]">Configure</button></div></div><div class="flex items-center justify-between pt-2 border-t border-neutral-100 min-h-[30px]"><div class="flex items-center gap-1.5 overflow-hidden min-w-0">`), _tmpl$7$1 = /* @__PURE__ */ template(`<button type=button class="flex items-center gap-1 px-2 py-0.5 rounded-md border border-neutral-200/80 bg-neutral-50/60 hover:bg-neutral-100/80 type-caption font-medium text-neutral-600 hover:text-neutral-900 transition-all cursor-pointer shadow-2xs"><span>+</span><span>Connect account`), _tmpl$8$1 = /* @__PURE__ */ template(`<div class="w-6 h-6 rounded-md bg-neutral-50 border border-neutral-200/90 flex items-center justify-center shrink-0 shadow-2xs"><img class="w-3 h-3 object-contain">`);
 function ProfileCard(props) {
   const [copied, setCopied] = createSignal(false);
@@ -1147,7 +1157,7 @@ function computeSettingsPosition(anchor, portalRoot) {
   style2.height = `${popoverHeight}px`;
   return style2;
 }
-var _tmpl$ = /* @__PURE__ */ template(`<div data-overlay-chrome class="absolute inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2 = /* @__PURE__ */ template(`<div data-overlay-chrome class="absolute z-[99999] w-[560px] bg-white border border-neutral-200/90 rounded-2xl shadow-[0_24px_64px_-16px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.04)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 pointer-events-auto select-none"><div class="flex items-center justify-between px-5 py-3 border-b border-neutral-200/70 bg-white shrink-0"><div class="flex items-center gap-3.5"><h2 class="type-title font-semibold text-neutral-900 tracking-tight">Settings</h2><div class="flex items-center p-0.5 bg-neutral-100 rounded-lg border border-neutral-200/70"></div></div><button class="p-1.5 text-neutral-400 hover:text-neutral-800 rounded-lg hover:bg-neutral-100 transition-colors cursor-pointer"title=Close><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 min-h-0 overflow-y-auto bg-white p-5 relative z-10 overscroll-contain">`), _tmpl$3 = /* @__PURE__ */ template(`<button>`);
+var _tmpl$ = /* @__PURE__ */ template(`<div data-overlay-chrome class="absolute inset-0 z-[99998] bg-transparent pointer-events-auto">`), _tmpl$2 = /* @__PURE__ */ template(`<div data-overlay-chrome role=dialog aria-modal=true data-overlay-modal=true class="absolute z-[99999] w-[560px] bg-white border border-neutral-200/90 rounded-2xl shadow-[0_24px_64px_-16px_rgba(0,0,0,0.18),0_0_0_1px_rgba(0,0,0,0.04)] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 pointer-events-auto select-none"><div class="flex items-center justify-between px-5 py-3 border-b border-neutral-200/70 bg-white shrink-0"><div class="flex items-center gap-3.5"><h2 class="type-title font-semibold text-neutral-900 tracking-tight">Settings</h2><div class="flex items-center p-0.5 bg-neutral-100 rounded-lg border border-neutral-200/70"></div></div><button class="p-1.5 text-neutral-400 hover:text-neutral-800 rounded-lg hover:bg-neutral-100 transition-colors cursor-pointer"title=Close><svg width=14 height=14 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><line x1=18 y1=6 x2=6 y2=18></line><line x1=6 y1=6 x2=18 y2=18></line></svg></button></div><div class="flex-1 min-h-0 overflow-y-auto bg-white p-5 relative z-10 overscroll-contain">`), _tmpl$3 = /* @__PURE__ */ template(`<button>`);
 function SettingsPopover(props) {
   const [activeTab, setActiveTab] = createSignal(layoutStore.settingsActiveTab || "account");
   const [editingProfileId, setEditingProfileId] = createSignal(null);
@@ -1184,6 +1194,7 @@ function SettingsPopover(props) {
     }
   };
   onMount(() => {
+    syncOverlayFocus();
     const handleKeyDown = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
@@ -1213,7 +1224,10 @@ function SettingsPopover(props) {
         return _el$;
       })(), (() => {
         var _el$2 = _tmpl$2(), _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling, _el$7 = _el$4.nextSibling, _el$8 = _el$3.nextSibling;
-        _el$2.$$mousedown = (e) => e.stopPropagation();
+        _el$2.$$mousedown = (e) => {
+          syncOverlayFocus();
+          e.stopPropagation();
+        };
         var _ref$ = popoverRef;
         typeof _ref$ === "function" ? use(_ref$, _el$2) : popoverRef = _el$2;
         insert(_el$6, createComponent(For, {

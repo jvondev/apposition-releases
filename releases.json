@@ -1,5 +1,49 @@
 [
   {
+    "version": "1.4.2",
+    "tag": "v1.4.2",
+    "title": "Responsive Settings Inputs, Keystroke Routing & On-Device License Security",
+    "publishedAt": "2026-11-15",
+    "categories": [
+      {
+        "category": "Improvements",
+        "items": [
+          {
+            "title": "Responsive Settings Inputs",
+            "description": "Clicking into license activation and profile settings fields now immediately claims keyboard focus, ensuring smooth text entry without interference from background web pages."
+          },
+          {
+            "title": "Secure On-Device License Protection",
+            "description": "License verification and promotional code lookups now run with secure on-device encryption for instant, private offline redemption."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Settings Dialog Keystroke Routing",
+            "description": "Resolved an issue where background web pages could intercept keyboard strokes when typing inside settings forms and popups."
+          },
+          {
+            "title": "Immediate Promotional Code Redemption",
+            "description": "Fixed promotional code stacking in Account Settings so valid codes activate and upgrade tiers immediately with real-time confirmation."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Responsive Settings Inputs",
+        "description": "Clicking into license activation and profile settings fields now immediately claims keyboard focus, ensuring smooth text entry without interference from background web pages."
+      },
+      {
+        "title": "Secure On-Device License Protection",
+        "description": "License verification and promotional code lookups now run with secure on-device encryption for instant, private offline redemption."
+      }
+    ]
+  },
+  {
     "version": "1.4.1",
     "tag": "v1.4.1",
     "title": "Promotional Code Stacking, Expanded Free Tier & Instant Localhost Navigation",

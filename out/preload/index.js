@@ -636,13 +636,6 @@ const CURSOR_ALLOWLIST = /* @__PURE__ */ new Set([
 function modifiers(e) {
   return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0);
 }
-function isChrome(x, y) {
-  const el = document.elementFromPoint(x, y);
-  if (!el) return false;
-  if (el.closest("[data-overlay-chrome]")) return true;
-  if (el.closest("[role='dialog'], [role='menu'], [role='tooltip'], [role='toolbar'], [data-portal], portal-container, .portal-root, [aria-modal='true']")) return true;
-  return false;
-}
 function buildForwardMsg(type, e) {
   const x = e.clientX;
   const y = e.clientY;
@@ -670,16 +663,73 @@ function buildForwardMsg(type, e) {
     modifiers: mods
   };
 }
+function toCssCursor(type) {
+  if (type === "pointer") return "default";
+  if (type === "hand") return "pointer";
+  return CURSOR_ALLOWLIST.has(type) ? type : "default";
+}
+function isChrome(x, y, isDirectAction = false) {
+  if (!isDirectAction) {
+    const hasActiveModal = Boolean(
+      document.querySelector(
+        "#app-portal-root > *, [role='dialog'], [role='menu'], [role='tooltip'], [data-portal-child], portal-container, .portal-root, [aria-modal='true'], [data-overlay-modal]"
+      )
+    );
+    if (!hasActiveModal) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      if (x > 60 && y > 60 && x < w - 20 && y < h - 20) {
+        return false;
+      }
+    }
+  }
+  const el = document.elementFromPoint(x, y);
+  if (!el) return false;
+  if (el.closest("[data-overlay-chrome]")) return true;
+  if (el.closest(
+    "[role='dialog'], [role='menu'], [role='tooltip'], [role='toolbar'], [data-portal], portal-container, .portal-root, [aria-modal='true'], [data-overlay-modal]"
+  )) {
+    return true;
+  }
+  return false;
+}
 let gapInstalled = false;
 let isDraggingGuest = false;
 let wasInChrome = false;
+let pendingMoveMsg = null;
+let rafMoveId = null;
+function flushPendingMove() {
+  if (rafMoveId !== null) {
+    cancelAnimationFrame(rafMoveId);
+    rafMoveId = null;
+  }
+  if (pendingMoveMsg) {
+    const msg = pendingMoveMsg;
+    pendingMoveMsg = null;
+    electron.ipcRenderer.send(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, msg);
+  }
+}
+function queueMove(msg) {
+  pendingMoveMsg = msg;
+  if (rafMoveId === null) {
+    rafMoveId = requestAnimationFrame(() => {
+      rafMoveId = null;
+      if (pendingMoveMsg) {
+        const toSend = pendingMoveMsg;
+        pendingMoveMsg = null;
+        electron.ipcRenderer.send(IPC_CHANNELS.OVERLAY.FORWARD_POINTER, toSend);
+      }
+    });
+  }
+}
 function installGapPointerForwarding() {
   if (gapInstalled) return;
   gapInstalled = true;
   window.addEventListener(
     "pointerdown",
     (ev) => {
-      if (isChrome(ev.clientX, ev.clientY)) {
+      flushPendingMove();
+      if (isChrome(ev.clientX, ev.clientY, true)) {
         wasInChrome = true;
         electron.ipcRenderer.send("airspace:chrome-clicked");
         return;
@@ -701,14 +751,12 @@ function installGapPointerForwarding() {
     (ev) => {
       if (isDraggingGuest) {
         ev.preventDefault();
-        electron.ipcRenderer.send(
-          IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
-          buildForwardMsg("mousemove", ev)
-        );
+        queueMove(buildForwardMsg("mousemove", ev));
         return;
       }
       const inChrome = isChrome(ev.clientX, ev.clientY);
       if (inChrome) {
+        pendingMoveMsg = null;
         if (!wasInChrome) {
           wasInChrome = true;
           electron.ipcRenderer.send("airspace:chrome-entered");
@@ -721,16 +769,14 @@ function installGapPointerForwarding() {
       if (wasInChrome) {
         wasInChrome = false;
       }
-      electron.ipcRenderer.send(
-        IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
-        buildForwardMsg("mousemove", ev)
-      );
+      queueMove(buildForwardMsg("mousemove", ev));
     },
     { capture: true, passive: true }
   );
   window.addEventListener(
     "pointerup",
     (ev) => {
+      flushPendingMove();
       if (isDraggingGuest) {
         isDraggingGuest = false;
         ev.preventDefault();
@@ -740,7 +786,7 @@ function installGapPointerForwarding() {
         );
         return;
       }
-      if (isChrome(ev.clientX, ev.clientY)) return;
+      if (isChrome(ev.clientX, ev.clientY, true)) return;
       electron.ipcRenderer.send(
         IPC_CHANNELS.OVERLAY.FORWARD_POINTER,
         buildForwardMsg("mouseup", ev)
@@ -763,8 +809,9 @@ function installGapPointerForwarding() {
   window.addEventListener(
     "contextmenu",
     (ev) => {
+      flushPendingMove();
       isDraggingGuest = false;
-      if (isChrome(ev.clientX, ev.clientY)) return;
+      if (isChrome(ev.clientX, ev.clientY, true)) return;
       ev.preventDefault();
       ev.stopPropagation();
       ev.stopImmediatePropagation();
@@ -776,26 +823,25 @@ function installGapPointerForwarding() {
     },
     { capture: true, passive: false }
   );
-  window.addEventListener("blur", () => {
+  const resetState = () => {
+    flushPendingMove();
     isDraggingGuest = false;
     wasInChrome = false;
-  });
-  window.addEventListener("pointercancel", () => {
-    isDraggingGuest = false;
-    wasInChrome = false;
-  });
+  };
+  window.addEventListener("blur", resetState);
+  window.addEventListener("pointercancel", resetState);
 }
 let cursorInstalled = false;
-function toCssCursor(type) {
-  if (type === "pointer") return "default";
-  if (type === "hand") return "pointer";
-  return CURSOR_ALLOWLIST.has(type) ? type : "default";
-}
+let lastMirroredCursor = "default";
 function installCursorMirror() {
   if (cursorInstalled) return;
   cursorInstalled = true;
   electron.ipcRenderer.on(IPC_CHANNELS.OVERLAY.CURSOR, (_e, type) => {
-    document.documentElement.style.cursor = toCssCursor(type);
+    const nextCursor = toCssCursor(type);
+    if (nextCursor !== lastMirroredCursor) {
+      lastMirroredCursor = nextCursor;
+      document.documentElement.style.cursor = nextCursor;
+    }
   });
 }
 electron.ipcRenderer.setMaxListeners(100);

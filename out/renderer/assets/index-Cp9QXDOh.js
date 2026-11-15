@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-zfqiWYjj.js","./UniversalActivationCard-CoBsKg7a.js","./PaywallPopover-tWArTdrU.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-1luRE3cH.js","./UniversalActivationCard-CIQRYtoB.js","./PaywallPopover-DAFqcLBa.js"])))=>i.map(i=>d[i]);
 const sharedConfig = {
   context: void 0,
   registry: void 0,
@@ -2358,6 +2358,12 @@ function forceDomFocus(elementId, maxAttempts = 20, interval = 40, options = {})
   };
   attemptFocus();
   return cancel;
+}
+function syncOverlayFocus(el) {
+  window.api?.focusOverlayWindow?.();
+  if (el && typeof el.focus === "function") {
+    el.focus({ preventScroll: true });
+  }
 }
 function isElementInModal(el) {
   if (!el) return false;
@@ -21836,7 +21842,7 @@ function getPrimaryIdentityDisplay(rawJson) {
   const primary = getPrimaryIdentity(rawJson);
   return primary ? primary.displayLabel : "";
 }
-var _tmpl$$1E = /* @__PURE__ */ template(`<span class="type-caption font-normal text-neutral-400"> active`), _tmpl$2$17 = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 type-ui font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$O = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="type-ui font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$r = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="type-ui font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left type-caption font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$g = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
+var _tmpl$$1E = /* @__PURE__ */ template(`<span class="type-caption font-normal text-neutral-400"> active`), _tmpl$2$17 = /* @__PURE__ */ template(`<div class=relative><input type=text placeholder="Search accounts (Google, Figma, Stripe...)"class="w-full select-text bg-white border border-neutral-200/80 rounded-xl px-3 py-1.5 type-ui font-normal text-neutral-800 placeholder:text-neutral-400 outline-none focus:border-neutral-700 transition-colors shadow-2xs">`), _tmpl$3$O = /* @__PURE__ */ template(`<button type=button class="text-xs font-normal text-neutral-400 hover:text-neutral-700 pt-0.5 transition-colors w-full text-center cursor-pointer">`), _tmpl$4$A = /* @__PURE__ */ template(`<div class="space-y-2.5 p-3 bg-neutral-50/70 rounded-2xl border border-neutral-200/70 shadow-2xs"><div class="flex items-center justify-between px-0.5"><label class="type-ui font-normal text-neutral-500 block">Connected accounts</label></div><div class="space-y-1.5 max-h-[260px] overflow-y-auto pr-0.5">`), _tmpl$5$r = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white rounded-xl border border-neutral-200/90 shadow-[0_1px_2px_rgba(0,0,0,0.03),inset_0_1px_0_rgba(255,255,255,0.9)] hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/80 border border-neutral-200/60 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain"></div><div class="flex flex-col min-w-0"><div class="flex items-center gap-1.5"><span class="type-ui font-medium text-neutral-900 truncate"></span><div class="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0"title=Connected></div></div><button type=button title="Click to copy"class="text-left type-caption font-normal text-neutral-500 hover:text-neutral-900 truncate transition-colors cursor-pointer"></button></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-50 hover:bg-neutral-100 border border-neutral-200 rounded-lg text-neutral-600 hover:text-neutral-900 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer">`), _tmpl$6$g = /* @__PURE__ */ template(`<div class="flex items-center justify-between py-2 px-2.5 bg-white/60 rounded-xl border border-neutral-200/60 hover:bg-white hover:border-neutral-300 transition-all duration-150"><div class="flex items-center gap-2.5 overflow-hidden min-w-0 pr-2"><div class="w-6 h-6 rounded-lg bg-neutral-100/60 border border-neutral-200/40 flex items-center justify-center p-0.5 shrink-0 overflow-hidden"><img class="w-3.5 h-3.5 object-contain grayscale opacity-40"></div><div class="flex flex-col min-w-0"><span class="text-xs font-normal text-neutral-700 truncate"></span></div></div><button type=button class="text-xs font-normal px-2.5 py-1 bg-neutral-900 text-white rounded-lg hover:bg-neutral-800 active:scale-95 disabled:opacity-50 transition-all shrink-0 cursor-pointer shadow-xs">`);
 const PINNED_PROVIDERS = [{
   id: "google",
   name: "Google",
@@ -22021,6 +22027,8 @@ function ConnectedAccountsList(props) {
       },
       get children() {
         var _el$6 = _tmpl$2$17(), _el$7 = _el$6.firstChild;
+        _el$7.$$mousedown = () => syncOverlayFocus();
+        _el$7.addEventListener("focus", () => syncOverlayFocus());
         _el$7.$$input = (e) => setSearchQuery(e.currentTarget.value);
         createRenderEffect(() => _el$7.value = searchQuery());
         return _el$6;
@@ -22108,8 +22116,8 @@ function ConnectedAccountsList(props) {
     return _el$;
   })();
 }
-delegateEvents(["input", "click"]);
-var _tmpl$$1D = /* @__PURE__ */ template(`<button type=button class="type-telemetry text-neutral-700 dark:text-neutral-300 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 rounded px-2 py-0.5 transition-colors cursor-pointer disabled:opacity-50">`), _tmpl$2$16 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><label class="type-caption font-normal text-neutral-400">Proxy server</label></div><input type=text placeholder="e.g. socks5://127.0.0.1:9050 or host:port:user:pass"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal outline-none focus:border-neutral-700">`), _tmpl$3$N = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Exit IP:</span><span class="font-medium text-neutral-900 tabular-nums">`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Location:</span><span class="font-medium text-neutral-900">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Latency:</span><span class="font-medium text-neutral-900 tabular-nums">ms`), _tmpl$6$f = /* @__PURE__ */ template(`<p class="type-caption text-neutral-500 pt-0.5 border-t border-neutral-200/60">Timezone (<!>) and location are auto-harmonized.`), _tmpl$7$8 = /* @__PURE__ */ template(`<div class="rounded-lg border p-2 bg-neutral-50/50 space-y-1 border-neutral-200">`), _tmpl$8$7 = /* @__PURE__ */ template(`<p class="type-caption text-red-600 font-medium">`);
+delegateEvents(["input", "mousedown", "click"]);
+var _tmpl$$1D = /* @__PURE__ */ template(`<button type=button class="type-telemetry text-neutral-700 dark:text-neutral-300 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 rounded px-2 py-0.5 transition-colors cursor-pointer disabled:opacity-50">`), _tmpl$2$16 = /* @__PURE__ */ template(`<div class=space-y-2><div class="flex items-center justify-between"><label class="type-caption font-normal text-neutral-400">Proxy server</label></div><input type=text placeholder="e.g. socks5://127.0.0.1:9050 or host:port:user:pass"class="w-full select-text bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal outline-none focus:border-neutral-700">`), _tmpl$3$N = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Exit IP:</span><span class="font-medium text-neutral-900 tabular-nums">`), _tmpl$4$z = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Location:</span><span class="font-medium text-neutral-900">`), _tmpl$5$q = /* @__PURE__ */ template(`<div class="flex items-center justify-between type-telemetry font-telemetry"><span class=text-neutral-500>Latency:</span><span class="font-medium text-neutral-900 tabular-nums">ms`), _tmpl$6$f = /* @__PURE__ */ template(`<p class="type-caption text-neutral-500 pt-0.5 border-t border-neutral-200/60">Timezone (<!>) and location are auto-harmonized.`), _tmpl$7$8 = /* @__PURE__ */ template(`<div class="rounded-lg border p-2 bg-neutral-50/50 space-y-1 border-neutral-200">`), _tmpl$8$7 = /* @__PURE__ */ template(`<p class="type-caption text-red-600 font-medium">`);
 function ProxyConfigSection(props) {
   const [isTesting, setIsTesting] = createSignal(false);
   const [testResult, setTestResult] = createSignal(null);
@@ -22156,6 +22164,8 @@ function ProxyConfigSection(props) {
         return _el$4;
       }
     }), null);
+    _el$5.$$mousedown = () => syncOverlayFocus();
+    _el$5.addEventListener("focus", () => syncOverlayFocus());
     _el$5.$$input = (e) => {
       props.onProxyChange(e.currentTarget.value);
       setTestResult(null);
@@ -22209,8 +22219,8 @@ function ProxyConfigSection(props) {
     return _el$;
   })();
 }
-delegateEvents(["click", "input"]);
-var _tmpl$$1C = /* @__PURE__ */ template(`<div class="space-y-3.5 flex flex-col h-full"><div class="flex items-center justify-between border-b border-neutral-100 pb-2"><span class="type-ui font-semibold text-neutral-900">Connection & Privacy</span><span class="type-telemetry font-telemetry text-neutral-400 uppercase tracking-wider">Armor</span></div><div><div class="flex items-center gap-2.5"><div><svg class="w-4 h-4"viewBox="0 0 16 16"fill=currentColor><path fill-rule=evenodd d="m4.736 1.968-.892 3.269-.014.058C2.113 5.568 1 6.006 1 6.5 1 7.328 4.134 8 8 8s7-.672 7-1.5c0-.494-1.113-.932-2.83-1.205l-.014-.058-.892-3.27c-.146-.533-.698-.849-1.239-.734C9.411 1.363 8.62 1.5 8 1.5s-1.411-.136-2.025-.267c-.541-.115-1.093.2-1.239.735m.015 3.867a.25.25 0 0 1 .274-.224c.9.092 1.91.143 2.975.143a30 30 0 0 0 2.975-.143.25.25 0 0 1 .05.498c-.918.093-1.944.145-3.025.145s-2.107-.052-3.025-.145a.25.25 0 0 1-.224-.274M3.5 10h2a.5.5 0 0 1 .5.5v1a1.5 1.5 0 0 1-3 0v-1a.5.5 0 0 1 .5-.5m-1.5.5q.001-.264.085-.5H2a.5.5 0 0 1 0-1h3.5a1.5 1.5 0 0 1 1.488 1.312 3.5 3.5 0 0 1 2.024 0A1.5 1.5 0 0 1 10.5 9H14a.5.5 0 0 1 0 1h-.085q.084.236.085.5v1a2.5 2.5 0 0 1-5 0v-.14l-.21-.07a2.5 2.5 0 0 0-1.58 0l-.21.07v.14a2.5 2.5 0 0 1-5 0zm8.5-.5h2a.5.5 0 0 1 .5.5v1a1.5 1.5 0 0 1-3 0v-1a.5.5 0 0 1 .5-.5"></path></svg></div><div><span class="type-ui font-medium text-neutral-900 block leading-tight">Incognito Mode</span><span class="type-caption text-neutral-400 block text-[10px]">Wipes session data upon closing</span></div></div><div><div></div></div></div><div class=space-y-1><label class="type-caption font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal outline-none focus:border-neutral-700">`);
+delegateEvents(["click", "input", "mousedown"]);
+var _tmpl$$1C = /* @__PURE__ */ template(`<div class="space-y-3.5 flex flex-col h-full"><div class="flex items-center justify-between border-b border-neutral-100 pb-2"><span class="type-ui font-semibold text-neutral-900">Connection & Privacy</span><span class="type-telemetry font-telemetry text-neutral-400 uppercase tracking-wider">Armor</span></div><div><div class="flex items-center gap-2.5"><div><svg class="w-4 h-4"viewBox="0 0 16 16"fill=currentColor><path fill-rule=evenodd d="m4.736 1.968-.892 3.269-.014.058C2.113 5.568 1 6.006 1 6.5 1 7.328 4.134 8 8 8s7-.672 7-1.5c0-.494-1.113-.932-2.83-1.205l-.014-.058-.892-3.27c-.146-.533-.698-.849-1.239-.734C9.411 1.363 8.62 1.5 8 1.5s-1.411-.136-2.025-.267c-.541-.115-1.093.2-1.239.735m.015 3.867a.25.25 0 0 1 .274-.224c.9.092 1.91.143 2.975.143a30 30 0 0 0 2.975-.143.25.25 0 0 1 .05.498c-.918.093-1.944.145-3.025.145s-2.107-.052-3.025-.145a.25.25 0 0 1-.224-.274M3.5 10h2a.5.5 0 0 1 .5.5v1a1.5 1.5 0 0 1-3 0v-1a.5.5 0 0 1 .5-.5m-1.5.5q.001-.264.085-.5H2a.5.5 0 0 1 0-1h3.5a1.5 1.5 0 0 1 1.488 1.312 3.5 3.5 0 0 1 2.024 0A1.5 1.5 0 0 1 10.5 9H14a.5.5 0 0 1 0 1h-.085q.084.236.085.5v1a2.5 2.5 0 0 1-5 0v-.14l-.21-.07a2.5 2.5 0 0 0-1.58 0l-.21.07v.14a2.5 2.5 0 0 1-5 0zm8.5-.5h2a.5.5 0 0 1 .5.5v1a1.5 1.5 0 0 1-3 0v-1a.5.5 0 0 1 .5-.5"></path></svg></div><div><span class="type-ui font-medium text-neutral-900 block leading-tight">Incognito Mode</span><span class="type-caption text-neutral-400 block text-[10px]">Wipes session data upon closing</span></div></div><div><div></div></div></div><div class=space-y-1><label class="type-caption font-normal text-neutral-400">Custom user agent</label><input type=text placeholder="e.g. Mozilla/5.0..."class="w-full select-text bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal outline-none focus:border-neutral-700">`);
 function ProfileAdvancedPanel(props) {
   return (() => {
     var _el$ = _tmpl$$1C(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$4.nextSibling, _el$7 = _el$6.firstChild, _el$8 = _el$3.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling;
@@ -22223,6 +22233,8 @@ function ProfileAdvancedPanel(props) {
         return props.onProxyChange;
       }
     }), _el$8);
+    _el$0.$$mousedown = () => syncOverlayFocus();
+    _el$0.addEventListener("focus", () => syncOverlayFocus());
     _el$0.$$input = (e) => props.onUserAgentChange(e.currentTarget.value);
     createRenderEffect((_p$) => {
       var _v$ = `flex items-center justify-between p-2.5 rounded-xl border transition-all cursor-pointer select-none ${props.isEphemeral ? "bg-neutral-100/80 border-neutral-300 shadow-xs" : "bg-white border-neutral-200/80 hover:border-neutral-300"}`, _v$2 = `w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${props.isEphemeral ? "bg-neutral-900 text-white" : "bg-neutral-100 text-neutral-600"}`, _v$3 = `w-8 h-4.5 rounded-full p-0.5 transition-colors duration-200 ease-in-out ${props.isEphemeral ? "bg-neutral-900" : "bg-neutral-300"}`, _v$4 = `w-3.5 h-3.5 rounded-full bg-white shadow-xs transform transition-transform duration-200 ease-in-out ${props.isEphemeral ? "translate-x-3.5" : "translate-x-0"}`;
@@ -22241,8 +22253,8 @@ function ProfileAdvancedPanel(props) {
     return _el$;
   })();
 }
-delegateEvents(["click", "input"]);
-var _tmpl$$1B = /* @__PURE__ */ template(`<div class="flex flex-col max-h-[min(620px,calc(100vh-120px))]"><div class="overflow-y-auto pr-1 flex-1 pb-1"><div class="grid grid-cols-2 gap-4.5 w-[580px]"><div class=space-y-3.5><div class=space-y-1><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2.5 py-1.5 pl-1.5 pr-1 items-center"></div></div></div><div class="pl-4 border-l border-neutral-200/80"></div></div></div><div class="flex items-center justify-between pt-3 mt-1.5 border-t border-neutral-100 shrink-0 bg-white"><div></div><div class="flex items-center gap-2"><button type=button class="type-ui font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded cursor-pointer">Cancel</button><button type=button class="type-ui font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$2$15 = /* @__PURE__ */ template(`<button type=button>`), _tmpl$3$M = /* @__PURE__ */ template(`<button type=button class="type-ui font-medium text-red-500 hover:text-red-700 px-2 py-1 rounded transition-colors cursor-pointer">Delete`);
+delegateEvents(["click", "input", "mousedown"]);
+var _tmpl$$1B = /* @__PURE__ */ template(`<div class="flex flex-col max-h-[min(620px,calc(100vh-120px))]"><div class="overflow-y-auto pr-1 flex-1 pb-1"><div class="grid grid-cols-2 gap-4.5 w-[580px]"><div class=space-y-3.5><div class=space-y-1><label class="text-xs font-normal text-neutral-500 block">Profile name</label><input type=text placeholder="e.g. Personal, Work, Projects"class="w-full select-text bg-white border border-neutral-200 rounded-lg px-2.5 py-1.5 type-ui font-normal text-neutral-900 placeholder:text-neutral-400 outline-none focus:border-neutral-700"autofocus></div><div class=space-y-1.5><label class="text-xs font-normal text-neutral-500 block">Color</label><div class="flex flex-wrap gap-2.5 py-1.5 pl-1.5 pr-1 items-center"></div></div></div><div class="pl-4 border-l border-neutral-200/80"></div></div></div><div class="flex items-center justify-between pt-3 mt-1.5 border-t border-neutral-100 shrink-0 bg-white"><div></div><div class="flex items-center gap-2"><button type=button class="type-ui font-medium text-neutral-500 hover:text-neutral-800 px-3 py-1.5 rounded cursor-pointer">Cancel</button><button type=button class="type-ui font-medium bg-neutral-900 text-white hover:bg-neutral-800 disabled:opacity-50 px-3.5 py-1.5 rounded transition-colors shadow-xs cursor-pointer">Save Profile`), _tmpl$2$15 = /* @__PURE__ */ template(`<button type=button>`), _tmpl$3$M = /* @__PURE__ */ template(`<button type=button class="type-ui font-medium text-red-500 hover:text-red-700 px-2 py-1 rounded transition-colors cursor-pointer">Delete`);
 const COLORS = ["#e11d48", "#ea580c", "#d97706", "#16a34a", "#0891b2", "#2563eb", "#4f46e5", "#7c3aed", "#475569", "#18181b"];
 function ProfileForm(props) {
   const [name, setName] = createSignal(props.initialData?.name || "");
@@ -22269,6 +22281,8 @@ function ProfileForm(props) {
   };
   return (() => {
     var _el$ = _tmpl$$1B(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$6 = _el$5.firstChild, _el$7 = _el$6.nextSibling, _el$8 = _el$5.nextSibling, _el$9 = _el$8.firstChild, _el$0 = _el$9.nextSibling, _el$1 = _el$4.nextSibling, _el$10 = _el$2.nextSibling, _el$11 = _el$10.firstChild, _el$12 = _el$11.nextSibling, _el$13 = _el$12.firstChild, _el$14 = _el$13.nextSibling;
+    _el$7.$$mousedown = () => syncOverlayFocus();
+    _el$7.addEventListener("focus", () => syncOverlayFocus());
     _el$7.$$input = (e) => setName(e.currentTarget.value);
     insert(_el$4, createComponent(ConnectedAccountsList, {
       get profileId() {
@@ -22314,7 +22328,7 @@ function ProfileForm(props) {
     return _el$;
   })();
 }
-delegateEvents(["input", "click"]);
+delegateEvents(["input", "mousedown", "click"]);
 var _tmpl$$1A = /* @__PURE__ */ template(`<svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round class="text-neutral-400 shrink-0"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path><line x1=1 y1=1 x2=23 y2=23>`), _tmpl$2$14 = /* @__PURE__ */ template(`<div class="absolute right-2.5 top-1/2 -translate-y-1/2 group-hover/prow:opacity-0 transition-opacity pointer-events-none"><svg width=12 height=12 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=3 stroke-linecap=round stroke-linejoin=round class="text-neutral-900 shrink-0"><polyline points="20 6 9 17 4 12">`), _tmpl$3$L = /* @__PURE__ */ template(`<button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Open Side-by-Side"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><rect x=3 y=3 width=18 height=18 rx=2 ry=2></rect><line x1=12 y1=3 x2=12 y2=21>`), _tmpl$4$y = /* @__PURE__ */ template(`<div><div class="flex items-center gap-2.5 min-w-0 flex-1 pr-10"><div class="flex items-center justify-center w-[18px] h-[18px] rounded-full text-white type-telemetry font-bold shadow-[inset_0_1px_1px_rgba(255,255,255,0.4),0_1px_2px_rgba(0,0,0,0.15)] ring-1 ring-black/10 shrink-0"></div><div class="flex flex-col flex-1 min-w-0"><span class="truncate type-ui font-medium"></span></div></div><div class="absolute right-1.5 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover/prow:opacity-100 transition-opacity"><button class="p-1 text-neutral-400 hover:text-neutral-900 bg-white/90 hover:bg-white border border-neutral-200/60 shadow-xs rounded-[5px] transition-all active:scale-95 cursor-pointer"title="Edit Profile"><svg width=11 height=11 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2.5 stroke-linecap=round stroke-linejoin=round><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z">`), _tmpl$5$p = /* @__PURE__ */ template(`<span class="type-telemetry font-telemetry text-neutral-600 truncate mt-0.5 flex items-center gap-1"><img class="w-2.5 h-2.5 object-contain shrink-0"><span class=truncate>`), _tmpl$6$e = /* @__PURE__ */ template(`<span class="type-telemetry text-neutral-400 font-sans shrink-0 hover:text-neutral-600">+`), _tmpl$7$7 = /* @__PURE__ */ template(`<span class="type-telemetry font-telemetry text-neutral-500 truncate mt-0.5">`), _tmpl$8$6 = /* @__PURE__ */ template(`<span class="type-telemetry font-telemetry text-neutral-400 truncate mt-0.5">`);
 function ProfileMenuItem(props) {
   const sortedIdentities = () => getSortedIdentities(props.profile?.identities_json);
@@ -28072,10 +28086,10 @@ function ReaderModeModal() {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-zfqiWYjj.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-CNKPV3MO.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-CoUvzIub.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-tWArTdrU.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-1luRE3cH.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-BIKniT_B.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-B2qhLxb-.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-DAFqcLBa.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
@@ -34478,7 +34492,7 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
     });
     if (isNative()) {
       const container = getContainerRef();
-      const rect = container?.getBoundingClientRect();
+      container?.getBoundingClientRect();
       const hasInitialUrl = Boolean(initialUrl && initialUrl.trim().length > 0 && initialUrl !== "about:blank");
       const node = layoutStore.nodes[paneId];
       let safeNavEntries = void 0;
@@ -34501,24 +34515,35 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
         safeNavEntries = void 0;
       }
       const navActiveIndex = typeof node?.navActiveIndex === "number" ? node.navActiveIndex : typeof node?.historyIndex === "number" ? node.historyIndex : void 0;
-      const panePayload = {
-        paneId: String(paneId),
-        url: String(initialUrl || ""),
-        partition: String(currentPartition() || ""),
-        userAgent: String(currentUserAgent() || window.api?.defaultUserAgent || ""),
-        navEntries: safeNavEntries,
-        navActiveIndex,
-        rect: hasInitialUrl && rect && rect.width > 0 && rect.height > 0 ? {
-          x: Math.round(rect.left),
-          y: Math.round(rect.top),
-          width: Math.round(rect.width),
-          height: Math.round(rect.height)
-        } : { x: -1e4, y: -1e4, width: 100, height: 100 }
+      let isPaneMounted = false;
+      const ensureNativePane = (targetUrl) => {
+        if (isPaneMounted) return;
+        const eff = targetUrl || (currentUrl ? currentUrl() : "") || initialUrl;
+        if (!eff || !eff.trim() || eff === "about:blank") return;
+        isPaneMounted = true;
+        const curRect = container?.getBoundingClientRect();
+        const panePayload = {
+          paneId: String(paneId),
+          url: String(eff),
+          partition: String(currentPartition() || ""),
+          userAgent: String(currentUserAgent() || window.api?.defaultUserAgent || ""),
+          navEntries: safeNavEntries,
+          navActiveIndex,
+          rect: curRect && curRect.width > 0 && curRect.height > 0 ? {
+            x: Math.round(curRect.left),
+            y: Math.round(curRect.top),
+            width: Math.round(curRect.width),
+            height: Math.round(curRect.height)
+          } : { x: -1e4, y: -1e4, width: 100, height: 100 }
+        };
+        try {
+          window.api?.view?.createPane(JSON.parse(JSON.stringify(panePayload)));
+        } catch (err) {
+          console.error("[useNativePaneView] createPane error:", err);
+        }
       };
-      try {
-        window.api?.view?.createPane(JSON.parse(JSON.stringify(panePayload)));
-      } catch (err) {
-        console.error("[useNativePaneView] createPane error:", err);
+      if (hasInitialUrl) {
+        ensureNativePane(initialUrl);
       }
       const unregAirspace = airspaceCoordinator.register(
         paneId,
@@ -34530,10 +34555,15 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
       window.addEventListener("resize", scheduleSync);
       window.addEventListener("app:layout-sync", scheduleSync);
       window.addEventListener("pane.force-sync-bounds", scheduleSync);
+      const onNavigated = (ev) => {
+        if (ev?.detail?.id === paneId && ev?.detail?.url) ensureNativePane(ev.detail.url);
+        scheduleSync();
+      };
+      window.addEventListener("pane.navigated", onNavigated);
       if (currentUrl) {
-        window.addEventListener("pane.navigated", scheduleSync);
         createEffect(() => {
-          currentUrl();
+          const u = currentUrl();
+          if (u && u !== "about:blank") ensureNativePane(u);
           scheduleSync();
         });
       }
@@ -34553,10 +34583,12 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
         window.removeEventListener("resize", scheduleSync);
         window.removeEventListener("app:layout-sync", scheduleSync);
         window.removeEventListener("pane.force-sync-bounds", scheduleSync);
-        if (currentUrl) window.removeEventListener("pane.navigated", scheduleSync);
+        window.removeEventListener("pane.navigated", onNavigated);
         unsubCrash?.();
         unsubRestored?.();
-        window.api?.viewSetBounds?.(paneId, { x: -1e4, y: -1e4, width: 1, height: 1 });
+        if (isPaneMounted) {
+          window.api?.viewSetBounds?.(paneId, { x: -1e4, y: -1e4, width: 1, height: 1 });
+        }
       });
     } else {
       onCleanup(() => {
@@ -36561,16 +36593,23 @@ function useWakeRegions() {
       cancelAnimationFrame(frameId);
       frameId = requestAnimationFrame(updateRegions);
     };
-    const interval = setInterval(scheduleUpdate, 500);
     const resizeObserver = new ResizeObserver(scheduleUpdate);
     resizeObserver.observe(document.body);
+    const portalRoot = document.getElementById("app-portal-root");
+    let mutationObserver = null;
+    if (portalRoot) {
+      mutationObserver = new MutationObserver(scheduleUpdate);
+      mutationObserver.observe(portalRoot, { childList: true, subtree: true });
+    }
     window.addEventListener("resize", scheduleUpdate);
+    window.addEventListener("app:layout-sync", scheduleUpdate);
     updateRegions();
     onCleanup(() => {
       cancelAnimationFrame(frameId);
-      clearInterval(interval);
       resizeObserver.disconnect();
+      if (mutationObserver) mutationObserver.disconnect();
       window.removeEventListener("resize", scheduleUpdate);
+      window.removeEventListener("app:layout-sync", scheduleUpdate);
     });
   });
 }
@@ -37059,25 +37098,26 @@ if (root) {
 }
 export {
   AppIcon as A,
-  canSwitchProfile as B,
-  getSortedIdentities as C,
-  canCreateProfile as D,
-  setActiveShortcuts as E,
+  getProviderDomain as B,
+  canSwitchProfile as C,
+  getSortedIdentities as D,
+  canCreateProfile as E,
   For as F,
-  DEFAULT_SHORTCUTS as G,
-  activeShortcuts as H,
-  isMacPlatform as I,
-  saveShortcut as J,
-  onCleanup as K,
-  style as L,
+  setActiveShortcuts as G,
+  DEFAULT_SHORTCUTS as H,
+  activeShortcuts as I,
+  isMacPlatform as J,
+  saveShortcut as K,
+  onCleanup as L,
   Match as M,
-  use as N,
-  Portal as O,
+  style as N,
+  use as O,
   ProfileForm as P,
-  createMemo as Q,
-  DoubleBezel as R,
+  Portal as Q,
+  createMemo as R,
   Switch as S,
-  ModalShell as T,
+  DoubleBezel as T,
+  ModalShell as U,
   WorkspaceIcon as W,
   checkForUpdates as a,
   isRestarting as b,
@@ -37092,17 +37132,17 @@ export {
   initUpdateStore as k,
   Show as l,
   memo as m,
-  setLayoutStore as n,
+  syncOverlayFocus as n,
   openExternalUrl as o,
-  createSignal as p,
-  setAttribute as q,
-  layoutStore as r,
+  setLayoutStore as p,
+  createSignal as q,
+  setAttribute as r,
   setStyleProperty as s,
   template as t,
   updateStore as u,
-  createEffect as v,
-  frecencyEngine as w,
-  getAppNameFromUrl as x,
-  addEventListener as y,
-  getProviderDomain as z
+  layoutStore as v,
+  createEffect as w,
+  frecencyEngine as x,
+  getAppNameFromUrl as y,
+  addEventListener as z
 };
