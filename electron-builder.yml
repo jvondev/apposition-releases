@@ -4,6 +4,7 @@ compression: maximum
 asar: true
 asarUnpack:
   - "**/*.node"
+afterSign: scripts/notarize.js
 directories:
   buildResources: assets
   output: dist
@@ -35,7 +36,6 @@ mac:
   entitlementsInherit: build/entitlements.mac.inherit.plist
   darkModeSupport: true
   minimumSystemVersion: "11.0.0"
-  afterSign: scripts/notarize.js
 
 dmg:
   writeUpdateInfo: true
