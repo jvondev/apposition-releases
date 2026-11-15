@@ -4,7 +4,6 @@ compression: maximum
 asar: true
 asarUnpack:
   - "**/*.node"
-afterSign: scripts/notarize.js
 directories:
   buildResources: assets
   output: dist
@@ -30,7 +29,7 @@ mac:
         - arm64
         - x64
   icon: assets/icon.png
-  hardenedRuntime: true
+  identity: null
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.inherit.plist
@@ -38,6 +37,7 @@ mac:
   minimumSystemVersion: "11.0.0"
 
 dmg:
+  sign: false
   writeUpdateInfo: true
   contents:
     - x: 130
