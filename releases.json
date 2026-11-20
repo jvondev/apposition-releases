@@ -1,5 +1,37 @@
 [
   {
+    "version": "1.4.3",
+    "tag": "v1.4.3",
+    "title": "In-App User Feedback & Fast Tab Stability",
+    "publishedAt": "2026-11-20",
+    "categories": [
+      {
+        "category": "Features",
+        "items": [
+          {
+            "title": "Added a native in-app feedback",
+            "description": "Added a native in-app feedback dialog to easily report bugs, share feature requests, and attach screenshots directly from the bottom-left support menu."
+          }
+        ]
+      },
+      {
+        "category": "Bug Fixes",
+        "items": [
+          {
+            "title": "Resolved an issue where workspace",
+            "description": "Resolved an issue where workspace screens could prematurely reopen or flicker during fast tab transitions."
+          }
+        ]
+      }
+    ],
+    "highlights": [
+      {
+        "title": "Added a native in-app feedback",
+        "description": "Added a native in-app feedback dialog to easily report bugs, share feature requests, and attach screenshots directly from the bottom-left support menu."
+      }
+    ]
+  },
+  {
     "version": "1.4.2",
     "tag": "v1.4.2",
     "title": "Responsive Settings Inputs, Keystroke Routing & On-Device License Security",

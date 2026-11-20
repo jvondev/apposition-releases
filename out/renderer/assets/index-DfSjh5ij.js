@@ -1,4 +1,4 @@
-const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-1luRE3cH.js","./UniversalActivationCard-CIQRYtoB.js","./PaywallPopover-DAFqcLBa.js"])))=>i.map(i=>d[i]);
+const __vite__mapDeps=(i,m=__vite__mapDeps,d=(m.f||(m.f=["./SettingsPopover-jEp3OnQc.js","./UniversalActivationCard-Bk1Tx962.js","./PaywallPopover-BOCqUy96.js"])))=>i.map(i=>d[i]);
 const sharedConfig = {
   context: void 0,
   registry: void 0,
@@ -2036,6 +2036,7 @@ const [layoutStore, setLayoutStore] = createStore({
   hasUnreadRelease: false,
   showWhatsNew: false,
   whatsNewRelease: null,
+  showFeedback: false,
   isDevToolsOpen: false,
   splitPreview: null,
   lastSplitDirection: "right"
@@ -3630,6 +3631,125 @@ function collapseNavigationHistory(rawEntries, activeIndex) {
     forwardEntries
   };
 }
+const GATE_WATCHDOG_MS = 6e3;
+function parseGateDomain(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const u = new URL(rawUrl);
+    return u.hostname;
+  } catch {
+    return rawUrl.replace(/^https?:\/\/(www\.)?/, "").split("/")[0].split("?")[0] || "";
+  }
+}
+function parseGateLabel(rawUrl) {
+  if (!rawUrl) return { label: "Preparing Workspace", domain: "" };
+  const query = extractSearchQuery(rawUrl);
+  const domain = parseGateDomain(rawUrl);
+  if (query) {
+    return { label: `Searching: ${query}`, domain: "google.com" };
+  }
+  return { label: domain || "Preparing Workspace", domain };
+}
+function createInitialGateState(paneId) {
+  return {
+    phase: "idle",
+    paneId,
+    targetUrl: null,
+    targetDomain: "",
+    targetLabel: "",
+    epoch: 0,
+    isCommitted: false,
+    hasFirstPaint: false,
+    startedAt: 0
+  };
+}
+function isUrlMatch(a, b) {
+  if (!a || !b) return false;
+  if (isCanonicalSameUrl(a, b)) return true;
+  const domA = parseGateDomain(a);
+  const domB = parseGateDomain(b);
+  return Boolean(domA && domB && (domA === domB || domA.endsWith(`.${domB}`) || domB.endsWith(`.${domA}`)));
+}
+function reduceGate(state, action) {
+  if (action.paneId !== state.paneId) return state;
+  switch (action.type) {
+    case "START_GATE": {
+      const { label, domain } = parseGateLabel(action.targetUrl);
+      return {
+        phase: "locked",
+        paneId: state.paneId,
+        targetUrl: action.targetUrl,
+        targetDomain: domain,
+        targetLabel: label,
+        epoch: state.epoch + 1,
+        isCommitted: false,
+        hasFirstPaint: false,
+        startedAt: action.now
+      };
+    }
+    case "DOC_COMMITTED": {
+      if (state.phase !== "locked") return state;
+      const isCommitted = true;
+      const isInPageOrDirectMatch = isUrlMatch(action.committedUrl, state.targetUrl);
+      const shouldReveal = state.hasFirstPaint || isInPageOrDirectMatch && action.committedUrl.includes("#");
+      return {
+        ...state,
+        isCommitted,
+        phase: shouldReveal ? "revealing" : state.phase
+      };
+    }
+    case "FIRST_PAINT": {
+      if (state.phase !== "locked") return state;
+      const isVerifiedTarget = action.paintUrl ? isUrlMatch(action.paintUrl, state.targetUrl) : false;
+      if (!state.isCommitted && !isVerifiedTarget) {
+        return state;
+      }
+      return {
+        ...state,
+        hasFirstPaint: true,
+        isCommitted: true,
+        phase: "revealing"
+      };
+    }
+    case "DOC_LOADED": {
+      if (state.phase !== "locked") return state;
+      const isVerifiedTarget = action.loadedUrl ? isUrlMatch(action.loadedUrl, state.targetUrl) : false;
+      if (!state.isCommitted && !isVerifiedTarget) {
+        return state;
+      }
+      return {
+        ...state,
+        phase: "revealing"
+      };
+    }
+    case "NAV_FAILED": {
+      if (state.phase !== "locked") return state;
+      return {
+        ...state,
+        phase: "failed"
+      };
+    }
+    case "WATCHDOG_TIMEOUT": {
+      if (state.phase !== "locked") return state;
+      if (action.epoch !== state.epoch) return state;
+      if (action.now - state.startedAt < GATE_WATCHDOG_MS) return state;
+      return {
+        ...state,
+        phase: "revealing"
+      };
+    }
+    case "REVEAL_COMPLETED": {
+      if (action.epoch !== state.epoch) return state;
+      return {
+        ...state,
+        phase: "idle"
+      };
+    }
+    case "RESET": {
+      return createInitialGateState(state.paneId);
+    }
+  }
+}
 const MAX_WARM_LRU_TABS = 4;
 function createInitialTabPoolState() {
   return {
@@ -4065,6 +4185,131 @@ function computeFallbackWorkspace(workspaces, deleteId) {
     };
   }
   return null;
+}
+function parseDsn(dsn) {
+  const match = dsn.trim().match(/^https?:\/\/([^@]+)@([^/]+)\/(.+)$/);
+  if (!match) return null;
+  const [, publicKey, host, projectId] = match;
+  return {
+    publicKey,
+    host,
+    projectId,
+    envelopeEndpoint: `https://${host}/api/${projectId}/envelope/?sentry_key=${publicKey}&sentry_version=7`
+  };
+}
+function generateEventId() {
+  const chars = "0123456789abcdef";
+  let id = "";
+  for (let i = 0; i < 32; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return id;
+}
+function parseDataUrl(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  const [, mimeType, b64] = match;
+  if (typeof atob === "function") {
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return { mimeType, bytes };
+  } else if (typeof Buffer !== "undefined") {
+    const buf = Buffer.from(b64, "base64");
+    return { mimeType, bytes: new Uint8Array(buf.buffer, buf.byteOffset, buf.length) };
+  }
+  return null;
+}
+function buildFeedbackEnvelope(submission, dsn, forcedEventId) {
+  const eventId = forcedEventId || generateEventId();
+  const sanitizedMsg = sanitizeStringForOpsec(submission.message || "");
+  const enc = new TextEncoder();
+  const envHeader = JSON.stringify({
+    event_id: eventId,
+    sent_at: (/* @__PURE__ */ new Date()).toISOString(),
+    dsn: dsn.trim()
+  });
+  const itemHeader = JSON.stringify({
+    type: "feedback",
+    content_type: "application/json"
+  });
+  const itemPayload = JSON.stringify({
+    event_id: eventId,
+    level: "info",
+    timestamp: Math.floor((submission.timestamp || Date.now()) / 1e3),
+    platform: "javascript",
+    environment: "production",
+    contexts: {
+      feedback: {
+        message: sanitizedMsg,
+        contact_email: submission.email?.trim() || void 0,
+        name: submission.name?.trim() || void 0,
+        source: "custom_modal"
+      }
+    },
+    tags: {
+      category: submission.category,
+      ...submission.metadata || {}
+    }
+  });
+  let textPart = `${envHeader}
+${itemHeader}
+${itemPayload}
+`;
+  let attachment = submission.screenshotDataUrl ? parseDataUrl(submission.screenshotDataUrl) : null;
+  if (attachment) {
+    const ext = attachment.mimeType.includes("jpeg") ? "jpg" : "webp";
+    const attachHeader = JSON.stringify({
+      type: "attachment",
+      filename: `screenshot.${ext}`,
+      content_type: attachment.mimeType,
+      length: attachment.bytes.length
+    });
+    textPart += `${attachHeader}
+`;
+    const textBytes = enc.encode(textPart);
+    const combined = new Uint8Array(textBytes.length + attachment.bytes.length + 1);
+    combined.set(textBytes, 0);
+    combined.set(attachment.bytes, textBytes.length);
+    combined[combined.length - 1] = 10;
+    return { bytes: combined, eventId };
+  }
+  return { bytes: enc.encode(textPart), eventId };
+}
+async function sendFeedbackEnvelope(submission, dsn, customFetch) {
+  const parsed = parseDsn(dsn);
+  if (!parsed) {
+    return { success: false, error: "Invalid Sentry DSN configuration" };
+  }
+  const { bytes, eventId } = buildFeedbackEnvelope(submission, dsn);
+  const fetchImpl = globalThis.fetch;
+  if (!fetchImpl) {
+    return { success: false, error: "No fetch runtime available" };
+  }
+  try {
+    const res = await fetchImpl(parsed.envelopeEndpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-sentry-envelope"
+      },
+      body: bytes
+    });
+    if (res.status >= 200 && res.status < 300) {
+      return { success: true, eventId };
+    }
+    return {
+      success: false,
+      error: `Ingest rejected with HTTP ${res.status}`
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: err?.message || "Network transmission failed"
+    };
+  }
 }
 function findSpatialTargetPane(activeId, dir, treeOverride) {
   const tree = {
@@ -24286,72 +24531,6 @@ function GlobalAudioMasterPill(props) {
   });
 }
 delegateEvents(["click", "contextmenu"]);
-function useFeaturebase() {
-  const [hasUnread, setHasUnread] = createSignal(false);
-  onMount(() => {
-    if (document.getElementById("featurebase-sdk")) return;
-    if (typeof window.Featurebase !== "function") {
-      window.Featurebase = function() {
-        (window.Featurebase.q = window.Featurebase.q || []).push(arguments);
-      };
-    }
-    window.Featurebase(
-      "initialize",
-      {
-        organization: "apposition",
-        // Replace with real Org ID later
-        theme: "light"
-      },
-      (err, data) => {
-        if (data?.action === "unread_count_updated" && data.count) {
-          setHasUnread(data.count > 0);
-        }
-      }
-    );
-    const script = document.createElement("script");
-    script.src = "https://do.featurebase.app/js/sdk.js";
-    script.id = "featurebase-sdk";
-    script.async = true;
-    document.head.appendChild(script);
-    const style2 = document.createElement("style");
-    style2.innerHTML = `
-      #featurebase-widget {
-        --fb-primary: #171717 !important;
-        --fb-bg: #ffffff !important;
-        --fb-border: rgba(23, 23, 23, 0.1) !important;
-      }
-    `;
-    document.head.appendChild(style2);
-  });
-  createEffect(() => {
-    if (layoutStore.licenseState?.customer?.email) {
-      window.Featurebase("identify", {
-        email: layoutStore.licenseState.customer.email,
-        name: layoutStore.licenseState.customer.name || "Apposition User"
-      });
-    }
-  });
-  const openFeedback = () => {
-    if (!navigator.onLine) {
-      alert(
-        "You're offline. Reconnect to view the community roadmap and share your thoughts."
-      );
-      return;
-    }
-    window.Featurebase("show");
-  };
-  const openUpdates = () => {
-    if (!navigator.onLine) {
-      alert(
-        "You're offline. Reconnect to view the community roadmap and share your thoughts."
-      );
-      return;
-    }
-    window.Featurebase("showChangelog");
-    setHasUnread(false);
-  };
-  return { openFeedback, openUpdates, hasUnread };
-}
 const initialVersion = "1.3.1";
 const [isRestarting, setIsRestarting] = createSignal(false);
 const [updateStore, setUpdateStore] = createStore({
@@ -24448,9 +24627,6 @@ if (typeof window !== "undefined") {
 }
 var _tmpl$$1h = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none animate-pulse">`), _tmpl$2$S = /* @__PURE__ */ template(`<div class="absolute top-0 right-0 w-2.5 h-2.5 bg-neutral-900 rounded-full border-2 border-white pointer-events-none">`), _tmpl$3$B = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round class=group-hover/updates:animate-pulse><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0">`), _tmpl$4$q = /* @__PURE__ */ template(`<button class="flex items-center justify-center w-[40px] h-[40px] rounded-2xl bg-white border border-neutral-200/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.8),0_1px_2px_rgba(0,0,0,0.05)] transition-all duration-300 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700 active:scale-[0.92] cursor-pointer"><svg width=18 height=18 viewBox="0 0 24 24"fill=none stroke=currentColor stroke-width=2 stroke-linecap=round stroke-linejoin=round><circle cx=12 cy=12 r=10></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01">`), _tmpl$5$j = /* @__PURE__ */ template(`<div class="absolute bottom-full pb-2 left-0 flex flex-col-reverse gap-2 transition-all duration-300 ease-out opacity-0 translate-y-4 pointer-events-none group-hover/cluster:translate-y-0 group-hover/cluster:opacity-100 group-hover/cluster:pointer-events-auto"><div class="relative group/updates"></div><div class="relative group/feedback">`);
 function SupportClusterHoverStack(props) {
-  const {
-    hasUnread
-  } = useFeaturebase();
   return (() => {
     var _el$ = _tmpl$5$j(), _el$2 = _el$.firstChild, _el$7 = _el$2.nextSibling;
     insert(_el$2, createComponent(ActionTooltip, {
@@ -24472,7 +24648,7 @@ function SupportClusterHoverStack(props) {
         }), null);
         insert(_el$3, createComponent(Show, {
           get when() {
-            return memo(() => updateStore.status !== "ready")() && (layoutStore.hasUnreadRelease || hasUnread());
+            return memo(() => updateStore.status !== "ready")() && layoutStore.hasUnreadRelease;
           },
           get children() {
             return _tmpl$2$S();
@@ -24482,7 +24658,7 @@ function SupportClusterHoverStack(props) {
       }
     }));
     insert(_el$7, createComponent(ActionTooltip, {
-      label: "Feedback & Roadmap",
+      label: "Feedback",
       placement: "right",
       get children() {
         var _el$8 = _tmpl$4$q();
@@ -24507,19 +24683,8 @@ function SupportCluster(props) {
     setLayoutStore("settingsActiveTab", "account");
     setLayoutStore("showSettings", !layoutStore.showSettings);
   };
-  const handleOpenFeedback = async () => {
-    if (!navigator.onLine) {
-      window.dispatchEvent(new CustomEvent("app:toast", {
-        detail: {
-          message: "You're offline. Reconnect to view the community roadmap.",
-          type: "error"
-        }
-      }));
-      return;
-    }
-    if (typeof props.ws?.handleOpenUrlInPaneOrTab === "function") {
-      props.ws.handleOpenUrlInPaneOrTab("https://apposition.featurebase.app");
-    }
+  const handleOpenFeedback = () => {
+    setLayoutStore("showFeedback", true);
   };
   const handleOpenUpdates = (e) => {
     const rect = e.currentTarget.getBoundingClientRect();
@@ -28086,10 +28251,11 @@ function ReaderModeModal() {
   });
 }
 delegateEvents(["click"]);
-const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-1luRE3cH.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
-const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-BIKniT_B.js"), true ? [] : void 0, import.meta.url));
-const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-B2qhLxb-.js"), true ? [] : void 0, import.meta.url));
-const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-DAFqcLBa.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
+const SettingsPopover = lazy(() => __vitePreload(() => import("./SettingsPopover-jEp3OnQc.js"), true ? __vite__mapDeps([0,1]) : void 0, import.meta.url));
+const ChangelogPopover = lazy(() => __vitePreload(() => import("./ChangelogPopover-TSz1w9Ir.js"), true ? [] : void 0, import.meta.url));
+const WhatsNewModal = lazy(() => __vitePreload(() => import("./WhatsNewModal-7spzd631.js"), true ? [] : void 0, import.meta.url));
+const PaywallPopover = lazy(() => __vitePreload(() => import("./PaywallPopover-BOCqUy96.js"), true ? __vite__mapDeps([2,1]) : void 0, import.meta.url));
+const FeedbackModal = lazy(() => __vitePreload(() => import("./FeedbackModal-w_DD84_Z.js"), true ? [] : void 0, import.meta.url));
 function AppModals(props) {
   const handleConfirmCascade = async () => {
     const prompt = props.cascadePrompt();
@@ -28162,6 +28328,18 @@ function AppModals(props) {
     get children() {
       return createComponent(ChangelogPopover, {
         onClose: () => setLayoutStore("showChangelog", false)
+      });
+    }
+  }), createComponent(Show, {
+    get when() {
+      return layoutStore.showFeedback;
+    },
+    get children() {
+      return createComponent(FeedbackModal, {
+        get isOpen() {
+          return layoutStore.showFeedback;
+        },
+        onClose: () => setLayoutStore("showFeedback", false)
       });
     }
   }), createComponent(CheatSheetModal, {}), createComponent(ConfirmationModal, {
@@ -34176,7 +34354,7 @@ function PaneWebviewSurface(props) {
     }
   });
 }
-var _tmpl$$c = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 flex items-end justify-center pb-4 relative z-10"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.1)] backdrop-blur-xl"><div class="bg-white rounded-[calc(2rem-0.375rem)] shadow-[inset_0_1px_1px_rgba(255,255,255,1)] flex items-center px-4 h-12 gap-3"><span class="text-neutral-800 type-body font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 flex items-start justify-center pt-4 relative z-10"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
+var _tmpl$$c = /* @__PURE__ */ template(`<img class="w-5 h-5 rounded-sm object-contain animate-pulse">`), _tmpl$2$5 = /* @__PURE__ */ template(`<div class="absolute inset-0 pointer-events-none flex flex-col z-30 overflow-hidden"><div class="flex-1 bg-neutral-50 dark:bg-neutral-900 flex items-end justify-center pb-4 relative z-10 border-b border-neutral-200/80 dark:border-neutral-800"><div class="absolute bottom-0 left-0 right-0 h-[1px] bg-neutral-200/60 dark:bg-neutral-800/60 shadow-[0_4px_12px_rgba(0,0,0,0.03)]"></div></div><div class="absolute top-1/2 left-0 right-0 -translate-y-1/2 flex justify-center z-40"><div class="bg-neutral-200/50 dark:bg-neutral-800/50 p-1.5 rounded-[2rem] ring-1 ring-black/5 dark:ring-white/10 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.12)] backdrop-blur-xl"><div class="bg-white dark:bg-neutral-900 rounded-[calc(2rem-0.375rem)] shadow-double-bezel-flat flex items-center px-4 h-12 gap-3 border border-neutral-200/80 dark:border-neutral-800"><span class="text-neutral-900 dark:text-neutral-100 type-body font-medium tracking-tight pr-1"></span></div></div></div><div class="flex-1 bg-neutral-50 dark:bg-neutral-900 flex items-start justify-center pt-4 relative z-10 border-t border-neutral-200/60 dark:border-neutral-800"><div class="absolute top-0 left-0 right-0 h-[1px] bg-white/60 dark:bg-neutral-800/60 shadow-[0_-4px_12px_rgba(0,0,0,0.02)]">`);
 function GateAnimation(props) {
   return (() => {
     var _el$ = _tmpl$2$5(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.firstChild, _el$5 = _el$4.firstChild, _el$7 = _el$5.firstChild, _el$8 = _el$3.nextSibling;
@@ -34599,30 +34777,30 @@ function useNativePaneView(paneId, initialUrl, currentPartition, currentUserAgen
   });
 }
 function useGateAnimation(paneId, gateTriggeredSet2, currentUrl, currentType) {
-  const [isInitialGate, setIsInitialGate] = createSignal(false);
-  const [gateLabel, setGateLabel] = createSignal("");
-  const [gateDomain, setGateDomain] = createSignal("");
+  const [state, setState] = createSignal(createInitialGateState(paneId));
   let topGateRef;
   let bottomGateRef;
   let pillRef;
   let gateContainerRef;
-  let animTimeout = null;
-  let hasOpened = false;
-  const parseDomain = (url) => {
-    try {
-      const u = new URL(url);
-      return u.hostname;
-    } catch {
-      return url.replace(/^https?:\/\/(www\.)?/, "").split("/")[0];
-    }
+  let watchdogTimeout = null;
+  const dispatch = (action) => {
+    setState((prev) => reduceGate(prev, action));
   };
-  const openGates = () => {
-    if (hasOpened) return;
-    hasOpened = true;
-    if (animTimeout) {
-      clearTimeout(animTimeout);
-      animTimeout = null;
-    }
+  const killTweens = () => {
+    if (pillRef) gsapWithCSS.killTweensOf(pillRef);
+    if (topGateRef) gsapWithCSS.killTweensOf(topGateRef);
+    if (bottomGateRef) gsapWithCSS.killTweensOf(bottomGateRef);
+    if (gateContainerRef) gsapWithCSS.killTweensOf(gateContainerRef);
+  };
+  const resetRefsToLocked = () => {
+    killTweens();
+    if (topGateRef) gsapWithCSS.set(topGateRef, { yPercent: 0, opacity: 1 });
+    if (bottomGateRef) gsapWithCSS.set(bottomGateRef, { yPercent: 0, opacity: 1 });
+    if (pillRef) gsapWithCSS.set(pillRef, { scale: 1, opacity: 1 });
+    if (gateContainerRef) gsapWithCSS.set(gateContainerRef, { opacity: 1 });
+  };
+  const openGates = (epoch) => {
+    killTweens();
     if (topGateRef && bottomGateRef && pillRef && gateContainerRef) {
       gsapWithCSS.to(pillRef, {
         scale: 0.8,
@@ -34632,42 +34810,47 @@ function useGateAnimation(paneId, gateTriggeredSet2, currentUrl, currentType) {
       });
       gsapWithCSS.to(topGateRef, {
         yPercent: -100,
-        duration: 0.9,
+        duration: 0.85,
         ease: "expo.inOut",
         delay: 0.05
       });
       gsapWithCSS.to(bottomGateRef, {
         yPercent: 100,
-        duration: 0.9,
+        duration: 0.85,
         ease: "expo.inOut",
         delay: 0.05,
-        onComplete: () => setIsInitialGate(false)
+        onComplete: () => {
+          dispatch({ type: "REVEAL_COMPLETED", paneId, epoch });
+        }
       });
-      gsapWithCSS.to(gateContainerRef, { opacity: 0, duration: 0.3, delay: 0.85 });
+      gsapWithCSS.to(gateContainerRef, { opacity: 0, duration: 0.3, delay: 0.8 });
     } else {
-      setIsInitialGate(false);
+      dispatch({ type: "REVEAL_COMPLETED", paneId, epoch });
     }
   };
-  const startGate = (url) => {
-    hasOpened = false;
-    const query = extractSearchQuery(url);
-    const domain = parseDomain(url);
-    if (query) {
-      setGateLabel(`Searching: ${query}`);
-      setGateDomain("google.com");
-    } else {
-      setGateLabel(domain);
-      setGateDomain(domain);
+  createEffect(() => {
+    const curr = state();
+    if (curr.phase === "locked") {
+      resetRefsToLocked();
+      if (watchdogTimeout) clearTimeout(watchdogTimeout);
+      const epoch = curr.epoch;
+      watchdogTimeout = setTimeout(() => {
+        dispatch({ type: "WATCHDOG_TIMEOUT", paneId, epoch, now: Date.now() });
+      }, GATE_WATCHDOG_MS);
+    } else if (curr.phase === "revealing" || curr.phase === "failed") {
+      if (watchdogTimeout) {
+        clearTimeout(watchdogTimeout);
+        watchdogTimeout = null;
+      }
+      openGates(curr.epoch);
     }
-    setIsInitialGate(true);
-    animTimeout = setTimeout(openGates, 750);
-  };
+  });
   createEffect(() => {
     const url = currentUrl();
     if (url) {
       if (currentType() === "web" && !gateTriggeredSet2.has(paneId) && !window.IS_WEB_DEMO) {
         gateTriggeredSet2.add(paneId);
-        startGate(url);
+        dispatch({ type: "START_GATE", paneId, targetUrl: url, now: Date.now() });
       }
     }
   });
@@ -34675,29 +34858,63 @@ function useGateAnimation(paneId, gateTriggeredSet2, currentUrl, currentType) {
     const onForceGate = (e) => {
       if (window.IS_WEB_DEMO) return;
       const detail = e.detail;
-      if (detail.id === paneId) {
+      const id = typeof detail === "string" ? detail : detail?.id || detail?.paneId;
+      if (id === paneId && detail?.url) {
         gateTriggeredSet2.delete(paneId);
-        startGate(detail.url);
+        dispatch({ type: "START_GATE", paneId, targetUrl: detail.url, now: Date.now() });
       }
     };
     const onFirstPaint = (e) => {
       const detail = e.detail;
-      if (detail === paneId && isInitialGate()) {
-        openGates();
+      const id = typeof detail === "string" ? detail : detail?.paneId || detail?.id;
+      if (id === paneId) {
+        dispatch({ type: "FIRST_PAINT", paneId, paintUrl: detail?.url, now: Date.now() });
+      }
+    };
+    const onNavigated = (e) => {
+      const detail = e.detail;
+      const id = typeof detail === "string" ? detail : detail?.paneId || detail?.id;
+      if (id === paneId && detail?.url) {
+        dispatch({ type: "DOC_COMMITTED", paneId, committedUrl: detail.url, now: Date.now() });
+      }
+    };
+    const onLoaded = (e) => {
+      const detail = e.detail;
+      const id = typeof detail === "string" ? detail : detail?.paneId || detail?.id;
+      if (id === paneId) {
+        dispatch({ type: "DOC_LOADED", paneId, loadedUrl: detail?.url, now: Date.now() });
+      }
+    };
+    const onLoadError = (e) => {
+      const detail = e.detail;
+      const id = typeof detail === "string" ? detail : detail?.paneId || detail?.id;
+      if (id === paneId) {
+        dispatch({ type: "NAV_FAILED", paneId, errorCode: detail?.errorCode, now: Date.now() });
       }
     };
     window.addEventListener("pane.force-gate", onForceGate);
     window.addEventListener("pane.first-paint", onFirstPaint);
+    window.addEventListener("app:webview-navigated", onNavigated);
+    window.addEventListener("app:webview-loaded", onLoaded);
+    window.addEventListener("pane.loaded", onLoaded);
+    window.addEventListener("pane.finish-load", onLoaded);
+    window.addEventListener("pane.load-error", onLoadError);
     onCleanup(() => {
-      if (animTimeout) clearTimeout(animTimeout);
+      if (watchdogTimeout) clearTimeout(watchdogTimeout);
+      killTweens();
       window.removeEventListener("pane.force-gate", onForceGate);
       window.removeEventListener("pane.first-paint", onFirstPaint);
+      window.removeEventListener("app:webview-navigated", onNavigated);
+      window.removeEventListener("app:webview-loaded", onLoaded);
+      window.removeEventListener("pane.loaded", onLoaded);
+      window.removeEventListener("pane.finish-load", onLoaded);
+      window.removeEventListener("pane.load-error", onLoadError);
     });
   });
   return {
-    isInitialGate,
-    gateLabel,
-    gateDomain,
+    isInitialGate: createMemo(() => state().phase !== "idle"),
+    gateLabel: createMemo(() => state().targetLabel),
+    gateDomain: createMemo(() => state().targetDomain),
     refs: {
       setTopGateRef: (el) => topGateRef = el,
       setBottomGateRef: (el) => bottomGateRef = el,
@@ -34738,6 +34955,12 @@ function useNativePaneBridge(paneId, onNavigated) {
       api.onViewLoaded?.((d) => {
         if (d?.paneId !== paneId) return;
         window.dispatchEvent(new CustomEvent("app:webview-loaded", { detail: d }));
+      }) ?? noop
+    );
+    offs.push(
+      api.onPaneFirstPaint?.((d) => {
+        if (d?.paneId !== paneId) return;
+        window.dispatchEvent(new CustomEvent("pane.first-paint", { detail: d }));
       }) ?? noop
     );
     offs.push(
@@ -34892,7 +35115,7 @@ function useWebviewBridge(paneId, isActivePane, onNavigated) {
     const handleFirstPaint = () => {
       registerWc();
       window.dispatchEvent(
-        new CustomEvent("pane.first-paint", { detail: paneId })
+        new CustomEvent("pane.first-paint", { detail: { paneId, url: el.getURL?.() } })
       );
     };
     const emitMedia = (isPlaying) => window.dispatchEvent(
@@ -36986,6 +37209,9 @@ function captureRendererException(err, context3) {
   } catch {
   }
 }
+async function sendUserFeedback(submission) {
+  return sendFeedbackEnvelope(submission, SENTRY_DSN);
+}
 var _tmpl$ = /* @__PURE__ */ template(`<div class="fixed bottom-6 left-1/2 -translate-x-1/2 z-[20000] pointer-events-auto select-none animate-in slide-in-from-bottom-3 fade-in duration-200"><div class="h-10 flex items-center gap-2.5 px-3.5 bg-white text-neutral-800 rounded-[10px] border border-neutral-200 shadow-[0_4px_16px_rgba(0,0,0,0.08)] type-ui font-medium"><span class="w-1.5 h-1.5 rounded-full bg-neutral-900 shrink-0"></span><span>`), _tmpl$2 = /* @__PURE__ */ template(`<div class="h-screen w-screen bg-[#fafaf9] flex items-center justify-center select-none font-sans text-neutral-600 text-xs"><div class="flex items-center gap-2"><span class="inline-block w-1.5 h-1.5 rounded-full bg-neutral-400 animate-pulse"></span><span class=font-mono>Auto-recovering session...`), _tmpl$3 = /* @__PURE__ */ template(`<div tabindex=0 class="h-screen w-screen bg-[#fafaf9] flex flex-col items-center justify-center p-6 select-none font-sans text-neutral-900 focus:outline-none"><div class="w-full max-w-md border border-neutral-300 bg-white p-6 shadow-[0_1px_3px_rgba(0,0,0,0.05),0_0_0_1px_rgba(0,0,0,0.03)] flex flex-col gap-4"><div class="flex items-center justify-between border-b border-neutral-200 pb-3"><span class="font-mono text-xs uppercase tracking-wider text-neutral-500">Workspace Protection</span><span class="font-mono text-xs text-neutral-400">#</span></div><div class="flex flex-col gap-1.5"><h2 class="text-sm font-medium text-neutral-900">Persistent state interruption detected.</h2><p class="text-xs text-neutral-600 leading-relaxed">Auto-healing was paused to protect your active session. Tabs and database state remain safe.</p></div><div class="bg-[#fafaf9] border border-neutral-200 p-2.5 rounded type-telemetry text-neutral-600 truncate"></div><div class="flex flex-col gap-2 pt-2 border-t border-neutral-200"><div class="flex gap-2"><button class="flex-1 px-3 py-2 text-xs font-medium bg-neutral-900 text-white hover:bg-neutral-800 active:bg-black transition-colors rounded">Resume Workspace</button><button class="flex-1 px-3 py-2 text-xs font-medium border border-neutral-300 bg-white text-neutral-800 hover:bg-neutral-100 transition-colors rounded">Reload Session</button></div><div class="flex gap-2"><button class="flex-1 px-3 py-1.5 text-xs text-neutral-600 hover:text-neutral-900 border border-neutral-200 hover:border-neutral-300 transition-colors rounded text-center">Reset Safe Mode</button><button class="px-3 py-1.5 text-xs text-neutral-600 hover:text-neutral-900 border border-neutral-200 hover:border-neutral-300 transition-colors rounded">`);
 const MAX_AUTO_RETRIES = 3;
 const RETRY_WINDOW_MS = 1e4;
@@ -37118,7 +37344,9 @@ export {
   Switch as S,
   DoubleBezel as T,
   ModalShell as U,
+  ModalShell$1 as V,
   WorkspaceIcon as W,
+  sendUserFeedback as X,
   checkForUpdates as a,
   isRestarting as b,
   createComponent as c,

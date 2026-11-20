@@ -4262,13 +4262,13 @@
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 
-  .shadow-\[0_8px_24px_-8px_rgba\(0\,0\,0\,0\.1\)\] {
-    --tw-shadow: 0 8px 24px -8px var(--tw-shadow-color, #0000001a);
+  .shadow-\[0_8px_24px_-8px_rgba\(0\,0\,0\,0\.4\)\] {
+    --tw-shadow: 0 8px 24px -8px var(--tw-shadow-color, #0006);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 
-  .shadow-\[0_8px_24px_-8px_rgba\(0\,0\,0\,0\.4\)\] {
-    --tw-shadow: 0 8px 24px -8px var(--tw-shadow-color, #0006);
+  .shadow-\[0_8px_24px_-8px_rgba\(0\,0\,0\,0\.12\)\] {
+    --tw-shadow: 0 8px 24px -8px var(--tw-shadow-color, #0000001f);
     box-shadow: var(--tw-inset-shadow), var(--tw-inset-ring-shadow), var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow);
   }
 
@@ -6572,6 +6572,16 @@
 
     .dark\:ring-neutral-900 {
       --tw-ring-color: var(--color-neutral-900);
+    }
+
+    .dark\:ring-white\/10 {
+      --tw-ring-color: #ffffff1a;
+    }
+
+    @supports (color: color-mix(in lab, red, red)) {
+      .dark\:ring-white\/10 {
+        --tw-ring-color: color-mix(in oklab, var(--color-white) 10%, transparent);
+      }
     }
 
     @media (hover: hover) {

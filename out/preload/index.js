@@ -162,7 +162,58 @@ const IPC_CHANNELS = {
     CLOSE_PANE_WC: "app:close-pane-wc",
     PANE_RELOADED_WC: "pane.reloaded-wc",
     VIEW_LOAD_START: "view.load-start",
-    VIEW_LOADED: "view.loaded"
+    VIEW_LOADED: "view.loaded",
+    PANE_FIRST_PAINT: "pane.first-paint",
+    PANE_MEDIA_TIMESTAMP: "pane.media-timestamp",
+    PANE_MEDIA_PLAYING: "pane.media-playing",
+    PANE_DYNAMIC_MEDIA_STATUS: "pane.dynamic-media-status",
+    PANE_SCROLL_POSITION: "pane.scroll-position",
+    PANE_IDENTITY_HARVESTED: "pane.identity-harvested",
+    PANE_MANIFEST_HARVESTED: "pane.manifest-harvested",
+    PANE_SEMANTIC_TITLE: "pane.semantic-title",
+    PANE_FOCUS_CHANGE: "pane.focus-change",
+    PANE_CLICKED: "pane.clicked",
+    PANE_NOTIFICATION_POSTED: "pane.notification-posted",
+    PANE_LINK_INTENT: "pane:link-intent",
+    GUEST_CONTEXT_PROBE: "guest:context-probe",
+    AIRSPACE_CHROME_CLICKED: "airspace:chrome-clicked",
+    AIRSPACE_CHROME_ENTERED: "airspace:chrome-entered",
+    AIRSPACE_CONTEXT_GESTURE: "airspace:context-gesture",
+    UI_MOUNTED: "app:ui-mounted",
+    FOCUS_OVERLAY_WINDOW: "app:focus-overlay-window",
+    WINDOW_FOCUS_MAIN: "window.focus-main",
+    VIEW_UPDATE_PROFILE: "view.updateProfile",
+    VIEW_CAPTURE: "view.capture",
+    TRPC_IPC: "trpc-ipc"
+  },
+  COMMUNICATOR: {
+    SHOW_DRAWER: "communicator.showDrawer",
+    HIDE_DRAWER: "communicator.hideDrawer",
+    GET_STATE: "communicator.getState",
+    CREATE_STACK: "communicator.createStack",
+    UPDATE_STACK: "communicator.updateStack",
+    DELETE_STACK: "communicator.deleteStack",
+    CREATE_APP: "communicator.createApp",
+    UPDATE_APP: "communicator.updateApp",
+    DELETE_APP: "communicator.deleteApp",
+    SAVE_PROVIDER: "communicator.saveProvider",
+    DELETE_PROVIDER: "communicator.deleteProvider",
+    CAPTURE_SNAPSHOT: "communicator.captureSnapshot",
+    DESTROY_VIEW: "communicator.destroyView",
+    RELOAD_APP: "communicator.reloadApp"
+  },
+  AUDIO: {
+    TOGGLE_MUTE: "audio:toggle-mute",
+    TOGGLE_MASTER_MUTE: "audio:toggle-master-mute",
+    GET_ACTIVE_SOURCES: "audio:get-active-sources"
+  },
+  PROXY: {
+    TEST_CONNECTION: "proxy.test-connection",
+    GET_TELEMETRY: "proxy.get-telemetry"
+  },
+  SHADOW_VAULT: {
+    SAVE_STATE: "vault:save-shadow-state",
+    GET_STATE: "vault:get-shadow-state"
   }
 };
 function createIpcClient(ipcRenderer) {
@@ -415,6 +466,11 @@ function createIpcEvents(ipcRenderer) {
       const handler = (_, data) => callback(data);
       ipcRenderer.on(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
       return () => ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.VIEW_LOADED, handler);
+    },
+    onPaneFirstPaint: (callback) => {
+      const handler = (_, data) => callback(data);
+      ipcRenderer.on(IPC_CHANNELS.EVENTS.PANE_FIRST_PAINT, handler);
+      return () => ipcRenderer.removeListener(IPC_CHANNELS.EVENTS.PANE_FIRST_PAINT, handler);
     },
     onAccelerator: (callback) => {
       const handler = (_, accelerator) => callback(accelerator);
@@ -1164,6 +1220,18 @@ const api = {
     const unsub = events.onViewLoaded(callback);
     return () => {
       window.removeEventListener("app:webview-loaded", handler);
+      unsub();
+    };
+  },
+  onPaneFirstPaint: (callback) => {
+    const handler = (e) => callback(e.detail);
+    window.addEventListener("pane.first-paint", handler);
+    const unsub = events.onPaneFirstPaint((d) => {
+      callback(d);
+      window.dispatchEvent(new CustomEvent("pane.first-paint", { detail: d }));
+    });
+    return () => {
+      window.removeEventListener("pane.first-paint", handler);
       unsub();
     };
   },

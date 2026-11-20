@@ -1,6 +1,6 @@
 {
   "name": "apposition",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "description": "A smart digital workspace to organize web apps, accounts, and tasks in one place.",
   "main": "./out/main/index.js",
   "author": "jvondev <jvondev@users.noreply.github.com>",
@@ -13,6 +13,10 @@
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "bench": "node scripts/benchmark-invariants.mjs",
+    "bench:invariants": "node scripts/benchmark-invariants.mjs",
+    "verify:anti-slop": "node scripts/verify-no-comments.mjs && node scripts/verify-blast-radius.mjs",
+    "verify:smoke": "node scripts/verify-ui-smoke.mjs",
     "db:reset": "node scripts/reset-db.js",
     "sentry": "node scripts/sentry.js",
     "canary": "node scripts/canary.js",
